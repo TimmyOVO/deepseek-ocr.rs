@@ -401,11 +401,11 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     weights: Option<PathBuf>,
 
-    /// Device backend (cpu/metal).
+    /// Device backend (cpu/metal/cuda).
     #[arg(long, default_value = "cpu")]
     device: DeviceKind,
 
-    /// Numeric precision override.
+    /// Numeric precision override (cpu=f32 default, metal/cuda=f16).
     #[arg(long)]
     dtype: Option<Precision>,
 

@@ -6,6 +6,7 @@ use clap::ValueEnum;
 pub enum DeviceKind {
     Cpu,
     Metal,
+    Cuda,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -25,13 +26,17 @@ pub fn prepare_device_and_dtype(
             Device::new_metal(0).context("failed to initialise Metal device")?,
             Some(Precision::F16),
         ),
+        DeviceKind::Cuda => (
+            Device::new_cuda(0).context("failed to initialise CUDA device")?,
+            Some(Precision::F16),
+        ),
     };
     let dtype = precision.or(default_precision).map(dtype_from_precision);
     Ok((device, dtype))
 }
 
 pub fn default_dtype_for_device(device: &Device) -> DType {
-    if device.is_metal() {
+    if device.is_metal() || device.is_cuda() {
         DType::F16
     } else {
         DType::F32

@@ -24,3 +24,4 @@ candle-core = { workspace = true }
 default = []
 metal = ["deepseek-ocr-core/metal"]
 flash-attn = ["deepseek-ocr-core/flash-attn"]
+cuda = ["deepseek-ocr-core/cuda"]
