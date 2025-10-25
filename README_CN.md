@@ -2,6 +2,15 @@
 
 Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HTTP Server，统一打包模型加载、视觉输入预处理、提示词工具与服务端能力，方便在本地 CPU 或 Apple Metal 上构建文档理解工作流。
 
+# deepseek-ocr.rs 🚀
+
+Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HTTP Server，统一打包模型加载、视觉输入预处理、提示词工具与服务端能力，方便在本地 CPU 或 Apple Metal 上构建文档理解工作流。
+
+> 英文文档请参见 [README.md](README.md)。  
+
+
+> 想直接下载可执行文件？访问 [Github Actions](https://github.com/TimmyOVO/deepseek-ocr.rs/actions/workflows/build-binaries.yml)，下载最新一次成功运行生成的 macOS（含 Metal）或 Windows 压缩包。
+
 ## crates/core 技术细节 🔬
 - **视觉预处理**：`prepare_vision_input_from_image` 利用 `build_global_view` 构造方形全局画布，同时在启用 crop 模式时调用 `dynamic_preprocess` 进行高分辨率切片，并支持额外缩略图。
 - **SAM + CLIP 融合**：`image_to_tensor` 标准化每幅图像，送入 Candle 版 SAM (`SamBackbone`) 与 CLIP-L (`ClipVisionModel`)，通过 `build_clip_sam_tokens` 将视觉特征按网格拼接保持空间对齐。
@@ -56,6 +65,9 @@ cargo fetch
 cargo run -p deepseek-ocr-cli -- --help
 ```
 若自定义缓存目录，请设置 `HF_HOME` 或导出 `HF_TOKEN`。完整模型约 6.3GB，推理时需预留 ~13GB 内存（模型 + 激活）。
+
+### 预构建产物
+不想自己编译？每次推送到 `main` 都会在 [build-binaries 工作流](https://github.com/TimmyOVO/deepseek-ocr.rs/actions/workflows/build-binaries.yml) 里产出 macOS（含 Metal）和 Windows 压缩包。登录 GitHub，打开最新一次绿色运行，下载 `deepseek-ocr-macos` 或 `deepseek-ocr-windows` 即可。
 
 ## 命令行工具 🖥️
 直接运行：

@@ -2,7 +2,10 @@
 
 Rust implementation of the DeepSeek-OCR inference stack with a fast CLI and an OpenAI-compatible HTTP server. The workspace packages the vision-language model, prompt tooling, and serving layer so you can build document understanding pipelines that run locally on CPU or Apple Metal.
 
-> 在找中文文档? 看这里 [中文](README_CN.md).
+> 中文文档请看 [README_CN.md](README_CN.md)。  
+
+
+> Want ready-made binaries? Latest macOS (Metal-enabled) and Windows bundles live in the [build-binaries workflow artifacts](https://github.com/TimmyOVO/deepseek-ocr.rs/actions/workflows/build-binaries.yml). Grab them from the newest green run.
 
 ## Inside `crates/core` 🔬
 - **Vision preprocessing** – `prepare_vision_input_from_image` builds a square global canvas with letterboxing (`build_global_view`) and, when crop mode is enabled, applies `dynamic_preprocess` tiling to produce high-resolution local crops plus optional thumbnails.
