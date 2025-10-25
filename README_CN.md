@@ -2,10 +2,6 @@
 
 Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HTTP Server，统一打包模型加载、视觉输入预处理、提示词工具与服务端能力，方便在本地 CPU 或 Apple Metal 上构建文档理解工作流。
 
-# deepseek-ocr.rs 🚀
-
-Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HTTP Server，统一打包模型加载、视觉输入预处理、提示词工具与服务端能力，方便在本地 CPU 或 Apple Metal 上构建文档理解工作流。
-
 > 英文文档请参见 [README.md](README.md)。  
 
 
