@@ -6,6 +6,11 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use hf_hub::api::sync::Api;
 
+// ModelScope configuration
+pub const MODELSCOPE_BASE_URL: &str = "https://www.modelscope.cn";
+pub const MODELSCOPE_REPO_ID: &str = "deepseek-ai/DeepSeek-OCR";
+pub const MODELSCOPE_FILES_PATH: &str = "master";
+
 pub const DEFAULT_REPO_ID: &str = "deepseek-ai/DeepSeek-OCR";
 pub const DEFAULT_CONFIG_PATH: &str = "DeepSeek-OCR/config.json";
 pub const DEFAULT_CONFIG_FILENAME: &str = "config.json";
@@ -25,7 +30,7 @@ pub fn ensure_config() -> Result<PathBuf> {
         return Ok(fallback);
     }
 
-    download_from_hub(
+    download_file(
         DEFAULT_CONFIG_FILENAME,
         Some(Path::new(DEFAULT_CONFIG_PATH)),
     )
@@ -40,7 +45,7 @@ pub fn ensure_tokenizer(path: &Path) -> Result<PathBuf> {
         return Err(anyhow!("tokenizer file not found at {}", path.display()));
     }
 
-    download_from_hub(
+    download_file(
         DEFAULT_TOKENIZER_FILENAME,
         Some(Path::new(DEFAULT_TOKENIZER_PATH)),
     )
@@ -61,7 +66,7 @@ pub fn resolve_weights(custom: Option<&Path>) -> Result<PathBuf> {
         return Ok(PathBuf::from(DEFAULT_WEIGHTS_PATH));
     }
 
-    download_from_hub(
+    download_file(
         DEFAULT_WEIGHTS_FILENAME,
         Some(Path::new(DEFAULT_WEIGHTS_PATH)),
     )
@@ -100,5 +105,70 @@ fn download_from_hub(filename: &str, target: Option<&Path>) -> Result<PathBuf> {
         Ok(target_path.to_path_buf())
     } else {
         Ok(cached)
+    }
+}
+
+/// Download file from ModelScope
+fn download_from_modelscope(filename: &str, target: Option<&Path>) -> Result<PathBuf> {
+    // Build download URL
+    let url = format!(
+        "{}/{}/resolve/{}/{}",
+        MODELSCOPE_BASE_URL, MODELSCOPE_REPO_ID, MODELSCOPE_FILES_PATH, filename
+    );
+
+    println!("Downloading {} from ModelScope", filename);
+    println!("Download URL: {}", url);
+
+    // Send HTTP request, allowing redirects
+    let response = ureq::get(&url)
+        .set("User-Agent", "deepseek-ocr-rs/0.1.0")
+        .call()
+        .with_context(|| format!("failed to fetch {} from ModelScope", filename))?;
+
+    if response.status() != 200 {
+        return Err(anyhow!(
+            "ModelScope API returned status {} for file {}",
+            response.status(),
+            filename
+        ));
+    }
+
+    // Determine target path
+    let target_path = if let Some(path) = target {
+        path.to_path_buf()
+    } else {
+        // If no target path specified, use current directory + filename
+        PathBuf::from(filename)
+    };
+
+    // Create directory
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+
+    // Download file
+    let mut file = fs::File::create(&target_path)
+        .with_context(|| format!("failed to create file {}", target_path.display()))?;
+
+    std::io::copy(&mut response.into_reader(), &mut file)
+        .with_context(|| format!("failed to write file {}", target_path.display()))?;
+
+    println!("Download completed: {}", target_path.display());
+    Ok(target_path)
+}
+
+/// Download file with fallback: try ModelScope first, fallback to Hugging Face
+fn download_file(filename: &str, target: Option<&Path>) -> Result<PathBuf> {
+    // Try downloading from ModelScope first
+    match download_from_modelscope(filename, target) {
+        Ok(path) => Ok(path),
+        Err(e) => {
+            println!(
+                "ModelScope download failed: {}, falling back to Hugging Face",
+                e
+            );
+            download_from_hub(filename, target)
+        }
     }
 }

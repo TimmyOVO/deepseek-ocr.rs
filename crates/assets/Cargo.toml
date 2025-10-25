@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 anyhow = { workspace = true }
 hf-hub = { version = "0.4.3", default-features = false, features = ["native-tls", "ureq"] }
+ureq = { version = "2.9", default-features = false, features = ["native-tls"] }
 deepseek-ocr-core = { workspace = true }
