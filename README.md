@@ -2,6 +2,8 @@
 
 Rust implementation of the DeepSeek-OCR inference stack with a fast CLI and an OpenAI-compatible HTTP server. The workspace packages the vision-language model, prompt tooling, and serving layer so you can build document understanding pipelines that run locally on CPU or Apple Metal.
 
+> 在找中文文档? 看这里 [中文](README_CN.md).
+
 ## Inside `crates/core` 🔬
 - **Vision preprocessing** – `prepare_vision_input_from_image` builds a square global canvas with letterboxing (`build_global_view`) and, when crop mode is enabled, applies `dynamic_preprocess` tiling to produce high-resolution local crops plus optional thumbnails.
 - **SAM + CLIP fusion** – each view is normalised via `image_to_tensor`, pushed through the Candle ports of SAM (`SamBackbone`) and CLIP-L (`ClipVisionModel`), then flattened with `build_clip_sam_tokens` so the features stay spatially aligned.
