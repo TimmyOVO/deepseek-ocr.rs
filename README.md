@@ -89,6 +89,7 @@ cargo run -p deepseek-ocr-server -- \
   --host 0.0.0.0 --port 8000 \
   --device cpu --max-new-tokens 512
 ```
+> macOS tip: add `--features metal` to the `cargo run -p deepseek-ocr-server` command when you want the server binary to link against Accelerate + Metal (and pair it with `--device metal` at runtime).
 
 Notes:
 - Use `data:` URLs or remote `http(s)` links; local paths are rejected.
@@ -103,6 +104,7 @@ Notes:
 - Pass `--device metal --dtype f16` to either CLI or server.
 - For best throughput, build the release profile: `cargo build --release -p deepseek-ocr-cli`.
 - Combine with `--max-new-tokens` and crop options to tune latency.
+- Remember to compile with `--features metal` (e.g. `cargo build --release -p deepseek-ocr-cli --features metal`) so the Candle crates link against Accelerate + Metal.
 
 ## Repository Layout 🗂️
 - `crates/core` – shared inference pipeline, model loaders, conversation templates.

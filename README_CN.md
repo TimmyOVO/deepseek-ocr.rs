@@ -87,6 +87,7 @@ cargo run -p deepseek-ocr-server -- \
   --host 0.0.0.0 --port 8000 \
   --device cpu --max-new-tokens 512
 ```
+> 如果要在 macOS 上启用 Metal，请为以上命令加上 `--features metal`，同时运行时配合 `--device metal`。
 
 注意事项：
 - 图片需使用 `data:` URL（base64）或可访问的 `http(s)` 链接，禁止本地路径。
@@ -100,6 +101,7 @@ cargo run -p deepseek-ocr-server -- \
 - 适用于 macOS 13+ 的 Apple Silicon。
 - CLI 或 Server 加上 `--device metal --dtype f16` 即可启用。
 - 建议以 `cargo build --release` 构建发布版本，并结合 `--max-new-tokens`、`--crop-mode` 调优延迟。
+- 记得在构建阶段附加 `--features metal`（例如 `cargo build --release -p deepseek-ocr-cli --features metal`），以便链接 Accelerate + Metal。
 
 ## 目录结构 🗂️
 - `crates/core`：推理管线、模型装载、会话模板。
