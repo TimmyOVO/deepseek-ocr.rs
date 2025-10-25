@@ -1,6 +1,6 @@
 # deepseek-ocr.rs 🚀
 
-Rust implementation of the DeepSeek-OCR inference stack with a fast CLI and an OpenAI-compatible HTTP server. The workspace packages the vision-language model, prompt tooling, and serving layer so you can build document understanding pipelines that run locally on CPU, Apple Metal, or NVIDIA CUDA GPUs.
+Rust implementation of the DeepSeek-OCR inference stack with a fast CLI and an OpenAI-compatible HTTP server. The workspace packages the vision-language model, prompt tooling, and serving layer so you can build document understanding pipelines that run locally on CPU, Apple Metal, or (alpha) NVIDIA CUDA GPUs.
 
 > 中文文档请看 [README_CN.md](README_CN.md)。  
 
@@ -38,7 +38,7 @@ The original DeepSeek-OCR ships as a Python + Transformers stack—powerful, but
 - **One repo, two entrypoints** – a batteries-included CLI for batch jobs and a Rocket-based server that speaks `/v1/responses` and `/v1/chat/completions`.
 - **Works out of the box** – pulls model weights, configs, and tokenizer from Hugging Face on first run.
 - **Optimised for Apple Silicon** – optional Metal backend with FP16 execution for real-time OCR on laptops.
-- **CUDA-ready** – build with `--features cuda` and run with `--device cuda --dtype f16` to leverage NVIDIA GPUs on Linux/Windows.
+- **CUDA (alpha)** – experimental support via `--features cuda` + `--device cuda --dtype f16`; expect rough edges while we finish kernel coverage.
 - **OpenAI client compatibility** – drop-in replacement for popular SDKs; the server automatically collapses chat history to the latest user turn for OCR-friendly prompts.
 
 ## Quick Start 🏁
@@ -47,7 +47,7 @@ The original DeepSeek-OCR ships as a Python + Transformers stack—powerful, but
 - Rust 1.78+ (edition 2024 support)
 - Git
 - Optional: Apple Silicon running macOS 13+ for Metal acceleration
-- Optional: CUDA 12.2+ toolkit + driver for NVIDIA GPU acceleration on Linux/Windows
+- Optional: CUDA 12.2+ toolkit + driver for experimental NVIDIA GPU acceleration on Linux/Windows
 - (Recommended) Hugging Face account with `HF_TOKEN` when pulling from the `deepseek-ai/DeepSeek-OCR` repo
 
 ### Clone the Workspace
@@ -75,7 +75,7 @@ cargo run -p deepseek-ocr-cli -- \
 
 > macOS tip: append `--features metal` to the `cargo run`/`cargo build` commands to compile with Accelerate + Metal backends.
 >
-> CUDA tip (Linux/Windows): append `--features cuda` and run with `--device cuda --dtype f16` to target NVIDIA GPUs.
+> CUDA tip (Linux/Windows): append `--features cuda` and run with `--device cuda --dtype f16` to target NVIDIA GPUs—feature is still alpha, so be ready for quirks.
 
 Install the CLI as a binary:
 ```bash
@@ -98,7 +98,7 @@ cargo run -p deepseek-ocr-server -- \
 ```
 > macOS tip: add `--features metal` to the `cargo run -p deepseek-ocr-server` command when you want the server binary to link against Accelerate + Metal (and pair it with `--device metal` at runtime).
 >
-> CUDA tip: add `--features cuda` and start the server with `--device cuda --dtype f16` to offload inference to NVIDIA GPUs.
+> CUDA tip: add `--features cuda` and start the server with `--device cuda --dtype f16` to offload inference to NVIDIA GPUs (alpha-quality support).
 
 Notes:
 - Use `data:` URLs or remote `http(s)` links; local paths are rejected.
@@ -110,7 +110,7 @@ Notes:
 
 ## GPU Acceleration ⚡
 - **Metal (macOS 13+ Apple Silicon)** – pass `--device metal --dtype f16` and build binaries with `--features metal` so Candle links against Accelerate + Metal.
-- **CUDA (Linux/Windows, NVIDIA GPUs)** – install CUDA 12.2+ toolkits, build with `--features cuda`, and launch the CLI/server with `--device cuda --dtype f16`.
+- **CUDA (alpha, NVIDIA GPUs)** – install CUDA 12.2+ toolkits, build with `--features cuda`, and launch the CLI/server with `--device cuda --dtype f16`; still experimental.
 - For either backend, prefer release builds (e.g. `cargo build --release -p deepseek-ocr-cli --features metal|cuda`) to maximise throughput.
 - Combine GPU runs with `--max-new-tokens` and crop tuning flags to balance latency vs. quality.
 
@@ -123,12 +123,12 @@ Notes:
 
 ## Troubleshooting 🛠️
 - **Weights download fails** – export `HF_TOKEN=<your-token>` and retry. Assets land in `~/.cache/huggingface` by default.
-- **Slow first response** – model load and GPU warm-up (Metal/CUDA) happen on the initial request; later runs are faster.
+- **Slow first response** – model load and GPU warm-up (Metal/CUDA alpha) happen on the initial request; later runs are faster.
 - **Large image rejection** – increase Rocket JSON limits in `crates/server/src/main.rs` or downscale the input.
 
 ## Roadmap 🗺️
 - ✅ Apple Metal backend with FP16 support and CLI/server parity on macOS.
-- ✅ NVIDIA CUDA backend (build with `--features cuda`, run with `--device cuda --dtype f16`) for GPU acceleration on Linux/Windows.
+- ✅ NVIDIA CUDA backend (alpha) – build with `--features cuda`, run with `--device cuda --dtype f16` for Linux/Windows GPUs; polishing in progress.
 - 🔄 **Parity polish** – finish projector normalisation + crop tiling alignment; extend intermediate-tensor diff suite beyond the current sample baseline.
 - 🔄 **Grounding & streaming** – port the Python post-processing helpers (box extraction, markdown polish) and refine SSE streaming ergonomics.
 - 🔄 **Cross-platform acceleration** – continue tuning CUDA kernels, add automatic device detection across CPU/Metal/CUDA, and publish opt-in GPU benchmarks.
