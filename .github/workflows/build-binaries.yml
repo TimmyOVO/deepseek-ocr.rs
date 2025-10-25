@@ -35,10 +35,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build CLI
+      - name: Build CLI (macOS)
+        if: matrix.os == 'macos-latest'
+        run: cargo build --locked --release -p deepseek-ocr-cli --features metal
+
+      - name: Build CLI (Windows)
+        if: matrix.os == 'windows-latest'
         run: cargo build --locked --release -p deepseek-ocr-cli
 
-      - name: Build server
+      - name: Build server (macOS)
+        if: matrix.os == 'macos-latest'
+        run: cargo build --locked --release -p deepseek-ocr-server --features metal
+
+      - name: Build server (Windows)
+        if: matrix.os == 'windows-latest'
         run: cargo build --locked --release -p deepseek-ocr-server
 
       - name: Package artifacts (macOS)
