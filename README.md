@@ -69,9 +69,11 @@ Build and run directly from the workspace:
 ```bash
 cargo run -p deepseek-ocr-cli -- \
   --prompt "<image>\n<|grounding|>Convert this receipt to markdown." \
-  --image baselines/sample/images/test.png \
+  --image assets/sample_1.png \
   --device cpu --max-new-tokens 512
 ```
+
+> Baseline parity assets under `baselines/sample/` are gitignored; use the bundled `assets/sample_1.png` or supply your own image path if you haven’t generated the baseline set locally.
 
 > macOS tip: append `--features metal` to the `cargo run`/`cargo build` commands to compile with Accelerate + Metal backends.
 >
