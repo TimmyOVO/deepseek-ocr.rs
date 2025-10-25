@@ -1,0 +1,19 @@
+[package]
+name = "deepseek-ocr-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true}
+image = { workspace = true }
+tokenizers = { workspace = true }
+candle-core = { workspace = true }
+deepseek-ocr-core = { workspace = true }
+deepseek-ocr-assets = { workspace = true }
+
+[features]
+default = []
+dhat-heap = ["deepseek-ocr-core/dhat-heap"]
+memlog = ["deepseek-ocr-core/memlog"]
+flash-attn = ["deepseek-ocr-core/flash-attn"]

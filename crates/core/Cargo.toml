@@ -1,0 +1,27 @@
+[package]
+name = "deepseek-ocr-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+once_cell = "1.19"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+candle-core = { version = "0.9", default-features = false, features = ["accelerate", "metal"] }
+image = { workspace = true }
+candle-nn = { version = "0.9", default-features = false, features = ["accelerate", "metal"] }
+dhat = "0.3.3"
+candle-flash-attn = { version = "0.9", default-features = false, optional = true }
+tokenizers = { version = "0.22", default-features = true }
+clap = { version = "4.5", features = ["derive"] }
+
+[features]
+default = []
+dhat-heap = []
+memlog = []
+flash-attn = ["candle-flash-attn"]
+
+[dev-dependencies]
+ndarray = "0.16"
+ndarray-npy = "0.9"

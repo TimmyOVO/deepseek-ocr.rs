@@ -1,0 +1,9 @@
+[package]
+name = "deepseek-ocr-assets"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+hf-hub = { version = "0.4.3", default-features = false, features = ["native-tls", "ureq"] }
+deepseek-ocr-core = { workspace = true }
