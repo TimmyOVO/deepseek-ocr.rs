@@ -51,6 +51,18 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: cargo build --locked --release -p deepseek-ocr-server
 
+      - name: Install UPX (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install upx --no-progress -y
+
+      - name: Compress executables with UPX (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $upx = Get-Command upx | Select-Object -ExpandProperty Source
+          & $upx --lzma --best target\release\deepseek-ocr-cli.exe
+          & $upx --lzma --best target\release\deepseek-ocr-server.exe
+
       - name: Package artifacts (macOS)
         if: matrix.os == 'macos-latest'
         run: |
