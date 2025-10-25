@@ -51,6 +51,15 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: cargo build --locked --release -p deepseek-ocr-server
 
+      - name: Collect uncompressed binaries (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts\original | Out-Null
+          Copy-Item target\release\deepseek-ocr-cli.exe artifacts\original\
+          Copy-Item target\release\deepseek-ocr-server.exe artifacts\original\
+          Compress-Archive -Path artifacts\original\* -DestinationPath deepseek-ocr-windows.zip -Force
+
       - name: Install UPX (Windows)
         if: matrix.os == 'windows-latest'
         run: choco install upx --no-progress -y
@@ -60,8 +69,12 @@ jobs:
         shell: pwsh
         run: |
           $upx = Get-Command upx | Select-Object -ExpandProperty Source
-          & $upx --lzma --best target\release\deepseek-ocr-cli.exe
-          & $upx --lzma --best target\release\deepseek-ocr-server.exe
+          New-Item -ItemType Directory -Force -Path artifacts\upx | Out-Null
+          Copy-Item target\release\deepseek-ocr-cli.exe artifacts\upx\
+          Copy-Item target\release\deepseek-ocr-server.exe artifacts\upx\
+          & $upx --lzma --best artifacts\upx\deepseek-ocr-cli.exe
+          & $upx --lzma --best artifacts\upx\deepseek-ocr-server.exe
+          Compress-Archive -Path artifacts\upx\* -DestinationPath deepseek-ocr-windows-upx.zip -Force
 
       - name: Package artifacts (macOS)
         if: matrix.os == 'macos-latest'
@@ -70,15 +83,6 @@ jobs:
           cp target/release/deepseek-ocr-cli artifacts/deepseek-ocr-cli
           cp target/release/deepseek-ocr-server artifacts/deepseek-ocr-server
           tar -czf deepseek-ocr-macos.tar.gz -C artifacts .
-
-      - name: Package artifacts (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          Copy-Item target\release\deepseek-ocr-cli.exe artifacts\
-          Copy-Item target\release\deepseek-ocr-server.exe artifacts\
-          Compress-Archive -Path artifacts\* -DestinationPath deepseek-ocr-windows.zip -Force
 
       - name: Upload artifacts (macOS)
         if: matrix.os == 'macos-latest'
@@ -93,3 +97,10 @@ jobs:
         with:
           name: deepseek-ocr-windows
           path: deepseek-ocr-windows.zip
+
+      - name: Upload UPX artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-ocr-windows-upx
+          path: deepseek-ocr-windows-upx.zip
