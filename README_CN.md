@@ -76,9 +76,11 @@ cargo run -p deepseek-ocr-cli -- --help
 ```bash
 cargo run -p deepseek-ocr-cli -- \
   --prompt "<image>\n<|grounding|>Convert this receipt to markdown." \
-  --image baselines/sample/images/test.png \
+  --image assets/sample_1.png \
   --device cpu --max-new-tokens 512
 ```
+
+> 仓库默认不会包含 `baselines/sample/` 下的基线对齐资源；可以直接使用仓库自带的 `assets/sample_1.png`，或在尚未生成基线集时改用自己的图片路径。
 
 > macOS 用户可以在 `cargo run`/`cargo build` 命令后附加 `--features metal` 以启用 Accelerate + Metal 后端。
 >
