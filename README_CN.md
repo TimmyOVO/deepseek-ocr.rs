@@ -34,13 +34,15 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 
 ## 相比 Python 实现的优势 🥷
 - Apple Silicon 冷启动更快、内存占用更低，且提供原生二进制分发。
+- **ModelScope + Hugging Face 双源下载**，ModelScope 优先，提高国内用户下载速度。
 - Hugging Face 资源下载和校验全部由 Rust crate 托管。
 - 自动折叠多轮会话，仅保留最近一次 user 提示，确保 OCR 场景稳定。
-- 与 Open WebUI 等 OpenAI 客户端“即插即用”，无需额外适配层。
+- 与 Open WebUI 等 OpenAI 客户端"即插即用"，无需额外适配层。
 
 ## 项目亮点 ✨
 - **一套代码，两种入口**：批处理友好的 CLI 与兼容 `/v1/responses`、`/v1/chat/completions` 的 Rocket Server。
-- **开箱即用**：首次运行自动从 Hugging Face 拉取配置、Tokenizer 与权重。
+- **双下载源**：优先尝试 ModelScope（魔搭社区）下载，为中国/亚洲用户提供更快的速度，自动回退到 Hugging Face 确保可靠性。
+- **开箱即用**：首次运行自动拉取配置、Tokenizer 与权重。
 - **Apple Silicon 友好**：Metal + FP16 加速让笔记本也能实时 OCR。
 - **OpenAI 客户端即插即用**：Server 端自动折叠多轮对话，只保留最新 user 指令，避免 OCR 模型被多轮上下文干扰。
 
@@ -60,11 +62,18 @@ cargo fetch
 ```
 
 ### 模型资源
-第一次运行 CLI 或 Server 会把配置、tokenizer 及 ~6.3GB 的 `model-00001-of-000001.safetensors` 下载到 `DeepSeek-OCR/`。也可以手动触发：
+第一次运行 CLI 或 Server 会把配置、tokenizer 及 ~6.7GB 的 `model-00001-of-000001.safetensors` 下载到 `DeepSeek-OCR/`。系统会优先尝试 ModelScope（魔搭社区）下载，为中国/亚洲用户提供更快的速度，如果 ModelScope 不可用会自动回退到 Hugging Face。
+
+手动触发下载：
 ```bash
-cargo run -p deepseek-ocr-cli -- --help
+cargo run -p deepseek-ocr-cli -- --help # 触发资源下载
 ```
-若自定义缓存目录，请设置 `HF_HOME` 或导出 `HF_TOKEN`。完整模型约 6.3GB，推理时需预留 ~13GB 内存（模型 + 激活）。
+
+若自定义缓存目录，请设置 `HF_HOME` 或导出 `HF_TOKEN`。完整模型约 6.7GB，推理时需预留 ~13GB 内存（模型 + 激活）。
+
+**下载源：**
+- **主要源**：ModelScope（魔搭社区）- 为中国/亚洲用户提供更快速度
+- **备用源**：Hugging Face - 全球可用
 
 ### 预构建产物
 不想自己编译？每次推送到 `main` 都会在 [build-binaries 工作流](https://github.com/TimmyOVO/deepseek-ocr.rs/actions/workflows/build-binaries.yml) 里产出 macOS（含 Metal）和 Windows 压缩包。登录 GitHub，打开最新一次绿色运行，下载 `deepseek-ocr-macos` 或 `deepseek-ocr-windows` 即可。

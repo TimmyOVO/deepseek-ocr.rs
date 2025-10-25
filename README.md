@@ -30,13 +30,15 @@ The original DeepSeek-OCR ships as a Python + Transformers stack—powerful, but
 
 ## Advantages over the Python Release 🥷
 - Faster cold-start on Apple Silicon, lower RSS, and native binary distribution.
-- Deterministic Hugging Face asset download + verification built into the workspace.
+- **ModelScope + Hugging Face dual download sources** with automatic fallback for improved reliability.
+- Deterministic asset download + verification built into the workspace.
 - Automatic single-turn chat compaction so OCR outputs stay stable even when clients send history.
 - Ready-to-use OpenAI compatibility for tools like Open WebUI without adapters.
 
 ## Highlights ✨
 - **One repo, two entrypoints** – a batteries-included CLI for batch jobs and a Rocket-based server that speaks `/v1/responses` and `/v1/chat/completions`.
-- **Works out of the box** – pulls model weights, configs, and tokenizer from Hugging Face on first run.
+- **Dual download sources** – tries ModelScope first (faster for users in China/Asia), falls back to Hugging Face automatically.
+- **Works out of the box** – pulls model weights, configs, and tokenizer automatically.
 - **Optimised for Apple Silicon** – optional Metal backend with FP16 execution for real-time OCR on laptops.
 - **OpenAI client compatibility** – drop-in replacement for popular SDKs; the server automatically collapses chat history to the latest user turn for OCR-friendly prompts.
 
@@ -56,11 +58,18 @@ cargo fetch
 ```
 
 ### Model Assets
-The first invocation of the CLI or server downloads the config, tokenizer, and `model-00001-of-000001.safetensors` (~6.3GB) into `DeepSeek-OCR/`. To prefetch manually:
+The first invocation of the CLI or server automatically downloads the config, tokenizer, and `model-00001-of-000001.safetensors` (~6.7GB) into `DeepSeek-OCR/`. The system tries ModelScope first for faster downloads in China/Asia regions, with automatic fallback to Hugging Face if ModelScope is unavailable.
+
+To prefetch manually:
 ```bash
 cargo run -p deepseek-ocr-cli -- --help # triggers asset download
 ```
-Set `HF_HOME` or `HF_TOKEN` if you store Hugging Face caches elsewhere. The full model package is ~6.3GB on disk and typically requires ~13GB of RAM headroom during inference (model + activations).
+
+Set `HF_HOME` or `HF_TOKEN` if you store Hugging Face caches elsewhere. The full model package is ~6.7GB on disk and typically requires ~13GB of RAM headroom during inference (model + activations).
+
+**Download Sources:**
+- **Primary**: ModelScope (魔搭社区) - faster for users in China/Asia
+- **Fallback**: Hugging Face - global availability
 
 ## Command-Line Interface 🖥️
 Build and run directly from the workspace:
