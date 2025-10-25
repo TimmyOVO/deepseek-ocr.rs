@@ -1,0 +1,73 @@
+name: build-binaries
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build CLI
+        run: cargo build --locked --release -p deepseek-ocr-cli
+
+      - name: Build server
+        run: cargo build --locked --release -p deepseek-ocr-server
+
+      - name: Package artifacts (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p artifacts
+          cp target/release/deepseek-ocr-cli artifacts/deepseek-ocr-cli
+          cp target/release/deepseek-ocr-server artifacts/deepseek-ocr-server
+          tar -czf deepseek-ocr-macos.tar.gz -C artifacts .
+
+      - name: Package artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item target\release\deepseek-ocr-cli.exe artifacts\
+          Copy-Item target\release\deepseek-ocr-server.exe artifacts\
+          Compress-Archive -Path artifacts\* -DestinationPath deepseek-ocr-windows.zip -Force
+
+      - name: Upload artifacts (macOS)
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-ocr-macos
+          path: deepseek-ocr-macos.tar.gz
+
+      - name: Upload artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-ocr-windows
+          path: deepseek-ocr-windows.zip
