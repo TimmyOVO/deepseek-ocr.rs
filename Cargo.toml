@@ -14,6 +14,6 @@ serde_json = "1.0"
 deepseek-ocr-core = { path = "./crates/core" }
 deepseek-ocr-assets = { path = "./crates/assets" }
 tokenizers = { version = "0.22", default-features = true }
-candle-core = { version = "0.9", default-features = false, features = ["accelerate", "metal"] }
+candle-core = { version = "0.9", default-features = false }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

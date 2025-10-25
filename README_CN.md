@@ -66,6 +66,8 @@ cargo run -p deepseek-ocr-cli -- \
   --device cpu --max-new-tokens 512
 ```
 
+> macOS 用户可以在 `cargo run`/`cargo build` 命令后附加 `--features metal` 以启用 Accelerate + Metal 后端。
+
 安装成全局二进制：
 ```bash
 cargo install --path crates/cli

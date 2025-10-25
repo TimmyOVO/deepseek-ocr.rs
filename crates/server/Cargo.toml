@@ -19,3 +19,8 @@ deepseek-ocr-core = { workspace = true }
 deepseek-ocr-assets = { workspace = true }
 tokenizers = { workspace = true }
 candle-core = { workspace = true }
+
+[features]
+default = []
+metal = ["deepseek-ocr-core/metal"]
+flash-attn = ["deepseek-ocr-core/flash-attn"]

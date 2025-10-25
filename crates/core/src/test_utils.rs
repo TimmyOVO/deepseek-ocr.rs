@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use once_cell::sync::OnceCell;
 
 use candle_core::{DType, Device, Tensor};
@@ -11,8 +11,8 @@ use candle_nn::VarBuilder;
 use image::DynamicImage;
 
 use crate::{
-    config::{load_ocr_config, DeepseekV2Config},
-    model::{build_global_view, image_to_tensor, DeepseekOcrModel, DEFAULT_WEIGHTS_PATH},
+    config::{DeepseekV2Config, load_ocr_config},
+    model::{DEFAULT_WEIGHTS_PATH, DeepseekOcrModel, build_global_view, image_to_tensor},
     transformer::{model::DeepseekLanguageModel, weights::TransformerWeights},
 };
 

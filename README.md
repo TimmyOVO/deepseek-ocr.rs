@@ -68,6 +68,8 @@ cargo run -p deepseek-ocr-cli -- \
   --device cpu --max-new-tokens 512
 ```
 
+> macOS tip: append `--features metal` to the `cargo run`/`cargo build` commands to compile with Accelerate + Metal backends.
+
 Install the CLI as a binary:
 ```bash
 cargo install --path crates/cli

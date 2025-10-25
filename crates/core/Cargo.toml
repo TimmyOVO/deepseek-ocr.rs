@@ -8,9 +8,9 @@ anyhow = "1.0"
 once_cell = "1.19"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-candle-core = { version = "0.9", default-features = false, features = ["accelerate", "metal"] }
+candle-core = { version = "0.9", default-features = false }
 image = { workspace = true }
-candle-nn = { version = "0.9", default-features = false, features = ["accelerate", "metal"] }
+candle-nn = { version = "0.9", default-features = false }
 dhat = "0.3.3"
 candle-flash-attn = { version = "0.9", default-features = false, optional = true }
 tokenizers = { version = "0.22", default-features = true }
@@ -21,6 +21,12 @@ default = []
 dhat-heap = []
 memlog = []
 flash-attn = ["candle-flash-attn"]
+metal = [
+    "candle-core/metal",
+    "candle-core/accelerate",
+    "candle-nn/metal",
+    "candle-nn/accelerate",
+]
 
 [dev-dependencies]
 ndarray = "0.16"
