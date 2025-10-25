@@ -55,11 +55,11 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     weights: Option<PathBuf>,
 
-    /// Device backend to execute on.
+    /// Device backend to execute on (cpu/metal/cuda).
     #[arg(long, default_value = "cpu")]
     device: DeviceKind,
 
-    /// Numeric precision. Defaults to f32 on CPU and f16 on Metal.
+    /// Numeric precision. Defaults to f32 on CPU and f16 on Metal/CUDA.
     #[arg(long)]
     dtype: Option<Precision>,
 

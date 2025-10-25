@@ -1,10 +1,10 @@
 # deepseek-ocr.rs 🚀
 
-Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HTTP Server，统一打包模型加载、视觉输入预处理、提示词工具与服务端能力，方便在本地 CPU 或 Apple Metal 上构建文档理解工作流。
+Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HTTP Server，统一打包模型加载、视觉输入预处理、提示词工具与服务端能力，方便在本地 CPU、Apple Metal 或 NVIDIA CUDA GPU 上构建文档理解工作流。
 
 # deepseek-ocr.rs 🚀
 
-Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HTTP Server，统一打包模型加载、视觉输入预处理、提示词工具与服务端能力，方便在本地 CPU 或 Apple Metal 上构建文档理解工作流。
+Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HTTP Server，统一打包模型加载、视觉输入预处理、提示词工具与服务端能力，方便在本地 CPU、Apple Metal 或 NVIDIA CUDA GPU 上构建文档理解工作流。
 
 > 英文文档请参见 [README.md](README.md)。  
 
@@ -42,6 +42,7 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 - **一套代码，两种入口**：批处理友好的 CLI 与兼容 `/v1/responses`、`/v1/chat/completions` 的 Rocket Server。
 - **开箱即用**：首次运行自动从 Hugging Face 拉取配置、Tokenizer 与权重。
 - **Apple Silicon 友好**：Metal + FP16 加速让笔记本也能实时 OCR。
+- **NVIDIA GPU 支持**：构建时附加 `--features cuda` 并以 `--device cuda --dtype f16` 运行，可在 Linux/Windows 上利用 CUDA 加速。
 - **OpenAI 客户端即插即用**：Server 端自动折叠多轮对话，只保留最新 user 指令，避免 OCR 模型被多轮上下文干扰。
 
 ## 快速上手 🏁
@@ -50,6 +51,7 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 - Rust 1.78+（支持 2024 Edition）
 - Git
 - 可选：macOS 13+ 的 Apple Silicon（用于 Metal）
+- 可选：Linux/Windows 的 NVIDIA GPU（需 CUDA 12.2+ 工具链与驱动）
 - 推荐：配置 `HF_TOKEN` 访问 Hugging Face `deepseek-ai/DeepSeek-OCR`
 
 ### 克隆仓库
@@ -79,6 +81,8 @@ cargo run -p deepseek-ocr-cli -- \
 ```
 
 > macOS 用户可以在 `cargo run`/`cargo build` 命令后附加 `--features metal` 以启用 Accelerate + Metal 后端。
+>
+> Linux/Windows 用户：附加 `--features cuda` 并在运行参数中加入 `--device cuda --dtype f16`，即可使用 NVIDIA GPU 加速。
 
 安装成全局二进制：
 ```bash
@@ -89,7 +93,7 @@ deepseek-ocr-cli --help
 常用参数：
 - `--prompt` / `--prompt-file`：包含 `<image>` 占位符的提示词
 - `--image`：与 `<image>` 数量一致的图片路径
-- `--device` / `--dtype`：macOS 建议 `--device metal --dtype f16`
+- `--device` / `--dtype`：macOS 建议 `--device metal --dtype f16`，NVIDIA 用户使用 `--device cuda --dtype f16`
 - `--max-new-tokens`：生成长度上限
 
 ## HTTP Server ☁️
@@ -100,6 +104,8 @@ cargo run -p deepseek-ocr-server -- \
   --device cpu --max-new-tokens 512
 ```
 > 如果要在 macOS 上启用 Metal，请为以上命令加上 `--features metal`，同时运行时配合 `--device metal`。
+>
+> 若在 Linux/Windows 上使用 NVIDIA GPU，请加上 `--features cuda` 并以 `--device cuda --dtype f16` 启动服务。
 
 注意事项：
 - 图片需使用 `data:` URL（base64）或可访问的 `http(s)` 链接，禁止本地路径。
@@ -109,11 +115,11 @@ cargo run -p deepseek-ocr-server -- \
 
 ![Open WebUI 连接 deepseek-ocr.rs](./assets/sample_1.png)
 
-## Metal 加速 ⚡
-- 适用于 macOS 13+ 的 Apple Silicon。
-- CLI 或 Server 加上 `--device metal --dtype f16` 即可启用。
-- 建议以 `cargo build --release` 构建发布版本，并结合 `--max-new-tokens`、`--crop-mode` 调优延迟。
-- 记得在构建阶段附加 `--features metal`（例如 `cargo build --release -p deepseek-ocr-cli --features metal`），以便链接 Accelerate + Metal。
+## GPU 加速 ⚡
+- **Metal（macOS 13+ & Apple Silicon）**：构建命令附加 `--features metal`，运行时使用 `--device metal --dtype f16`。
+- **CUDA（Linux/Windows & NVIDIA GPU）**：提前安装 CUDA 12.2+，构建时加 `--features cuda`，执行时传入 `--device cuda --dtype f16`。
+- 无论使用哪种 GPU，推荐 `cargo build --release -p deepseek-ocr-cli --features metal|cuda` 以获取更高吞吐。
+- 结合 `--max-new-tokens`、`--crop-mode` 等参数可在延迟与质量之间做权衡。
 
 ## 目录结构 🗂️
 - `crates/core`：推理管线、模型装载、会话模板。
@@ -124,14 +130,15 @@ cargo run -p deepseek-ocr-server -- \
 
 ## 常见问题 🛠️
 - **下载失败**：确认 `HF_TOKEN` 已配置，或重试以利用 Hugging Face 缓存。
-- **首轮耗时长**：第一次推理需要加载模型并热启动 Metal，后续会更快。
+- **首轮耗时长**：第一次推理需要加载模型并热启动 GPU（Metal/CUDA），后续会更快。
 - **图片过大被拒**：放大 Rocket 限额或对图像进行下采样。
 
 ## Roadmap 🗺️
 - ✅ Apple Metal 后端 + FP16 支持，CLI/Server 已在 macOS 上对齐。
+- ✅ NVIDIA CUDA 后端（`--features cuda` + `--device cuda --dtype f16`）可在 Linux/Windows 上加速推理。
 - 🔄 **对齐完善**：完成投影归一化、局部裁剪等细节的数值校准，并扩展中间张量对比用例。
 - 🔄 **Grounding 与流式体验**：移植 Python 版的框选/Markdown 后处理，提升 SSE 流式交互体验。
-- 🔄 **跨平台加速**：打磨 Windows CUDA/FlashAttention 原型，探索 Vulkan/Metal 自动检测，并补齐 GPU 基准测试。
+- 🔄 **跨平台加速**：继续调优 CUDA 性能、补齐 CPU/Metal/CUDA 自动检测，并发布可选 GPU 基准测试。
 - 🔄 **打包与运维**：提供带校验的二进制发行版，增强日志/指标，并补充 Helm/Docker 部署示例。
 - 🔜 **结构化输出**：在对齐完成后引入可选 JSON Schema 工具，方便下游自动化。
 

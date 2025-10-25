@@ -27,6 +27,10 @@ metal = [
     "candle-nn/metal",
     "candle-nn/accelerate",
 ]
+cuda = [
+    "candle-core/cuda",
+    "candle-nn/cuda",
+]
 
 [dev-dependencies]
 ndarray = "0.16"
