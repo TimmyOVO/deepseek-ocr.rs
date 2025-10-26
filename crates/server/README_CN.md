@@ -3,7 +3,7 @@
 `deepseek-ocr-server` 提供 OpenAI 兼容的 HTTP 接口（`/v1/responses`、`/v1/chat/completions`、`/v1/models`），适合需要流式输出或与 Open WebUI 等工具对接的场景。
 
 ```bash
-cargo run -p deepseek-ocr-server -- \
+cargo run -p deepseek-ocr-server --release -- \
   --host 0.0.0.0 \
   --port 8000 \
   --device cpu \

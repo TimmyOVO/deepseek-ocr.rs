@@ -3,7 +3,7 @@
 The `deepseek-ocr-server` binary exposes the model behind an OpenAI-compatible HTTP API (`/v1/responses`, `/v1/chat/completions`, `/v1/models`). Use it when you need streaming output or to integrate with tools such as Open WebUI.
 
 ```bash
-cargo run -p deepseek-ocr-server -- \
+cargo run -p deepseek-ocr-server --release -- \
   --host 0.0.0.0 \
   --port 8000 \
   --device cpu \

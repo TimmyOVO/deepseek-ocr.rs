@@ -3,7 +3,7 @@
 `deepseek-ocr-cli` 是完整推理流程的终端入口。它接收包含 `<image>` 占位符的文本提示，将图像编码为视觉特征，并自回归生成 Markdown 输出。可以直接在工作区运行，也可以 `cargo install --path crates/cli` 后独立调用。
 
 ```bash
-cargo run -p deepseek-ocr-cli -- \
+cargo run -p deepseek-ocr-cli --release -- \
   --prompt "<image>\n<|grounding|>Convert this Markdown" \
   --image baselines/sample/images/test.png \
   --device cpu --max-new-tokens 512

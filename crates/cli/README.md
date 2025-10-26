@@ -3,7 +3,7 @@
 The `deepseek-ocr-cli` binary drives the full multimodal pipeline from the terminal. It accepts a text prompt with `<image>` placeholders, projects one or more images into vision embeddings, and then autoregressively generates markdown output. Run it directly from the workspace or after `cargo install --path crates/cli`.
 
 ```bash
-cargo run -p deepseek-ocr-cli -- \
+cargo run -p deepseek-ocr-cli --release -- \
   --prompt "<image>\n<|grounding|>Convert this Markdown." \
   --image baselines/sample/images/test.png \
   --device cpu --max-new-tokens 512

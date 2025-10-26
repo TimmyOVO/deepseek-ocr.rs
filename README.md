@@ -60,18 +60,20 @@ cargo fetch
 ### Model Assets
 The first invocation of the CLI or server downloads the config, tokenizer, and `model-00001-of-000001.safetensors` (~6.3GB) into `DeepSeek-OCR/`. To prefetch manually:
 ```bash
-cargo run -p deepseek-ocr-cli -- --help # triggers asset download
+cargo run -p deepseek-ocr-cli --release -- --help # dev profile is extremely slow; always prefer --release
 ```
+> Always include `--release` when running from source; debug builds on this model are extremely slow.
 Set `HF_HOME`/`HF_TOKEN` if you store Hugging Face caches elsewhere (ModelScope downloads land alongside the same asset tree). The full model package is ~6.3GB on disk and typically requires ~13GB of RAM headroom during inference (model + activations).
 
 ## Command-Line Interface 🖥️
 Build and run directly from the workspace:
 ```bash
-cargo run -p deepseek-ocr-cli -- \
+cargo run -p deepseek-ocr-cli --release -- \
   --prompt "<image>\n<|grounding|>Convert this receipt to markdown." \
   --image baselines/sample/images/test.png \
   --device cpu --max-new-tokens 512
 ```
+> Tip: `--release` is required for reasonable throughput; debug builds can be 10x slower.
 
 > macOS tip: append `--features metal` to the `cargo run`/`cargo build` commands to compile with Accelerate + Metal backends.
 >
@@ -92,10 +94,11 @@ Key flags:
 ## HTTP Server ☁️
 Launch an OpenAI-compatible endpoint:
 ```bash
-cargo run -p deepseek-ocr-server -- \
+cargo run -p deepseek-ocr-server --release -- \
   --host 0.0.0.0 --port 8000 \
   --device cpu --max-new-tokens 512
 ```
+> Keep `--release` on the server as well; the debug profile is far too slow for inference workloads.
 > macOS tip: add `--features metal` to the `cargo run -p deepseek-ocr-server` command when you want the server binary to link against Accelerate + Metal (and pair it with `--device metal` at runtime).
 >
 > CUDA tip: add `--features cuda` and start the server with `--device cuda --dtype f16` to offload inference to NVIDIA GPUs (alpha-quality support).

@@ -60,7 +60,7 @@ cargo fetch
 ### 模型资源
 第一次运行 CLI 或 Server 会把配置、tokenizer 及 ~6.3GB 的 `model-00001-of-000001.safetensors` 下载到 `DeepSeek-OCR/`。也可以手动触发：
 ```bash
-cargo run -p deepseek-ocr-cli -- --help
+cargo run -p deepseek-ocr-cli --release -- --help # dev profile 极慢，建议始终加 --release
 ```
 若自定义缓存目录，请设置 `HF_HOME` 或导出 `HF_TOKEN`。完整模型约 6.3GB，推理时需预留 ~13GB 内存（模型 + 激活）。
 
@@ -70,7 +70,7 @@ cargo run -p deepseek-ocr-cli -- --help
 ## 命令行工具 🖥️
 直接运行：
 ```bash
-cargo run -p deepseek-ocr-cli -- \
+cargo run -p deepseek-ocr-cli --release -- \
   --prompt "<image>\n<|grounding|>Convert this receipt to markdown." \
   --image baselines/sample/images/test.png \
   --device cpu --max-new-tokens 512
@@ -95,7 +95,7 @@ deepseek-ocr-cli --help
 ## HTTP Server ☁️
 启动 OpenAI 兼容服务：
 ```bash
-cargo run -p deepseek-ocr-server -- \
+cargo run -p deepseek-ocr-server --release -- \
   --host 0.0.0.0 --port 8000 \
   --device cpu --max-new-tokens 512
 ```
