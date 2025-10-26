@@ -1,5 +1,8 @@
 name: build-binaries
 
+permissions:
+  contents: write
+
 on:
   push:
     branches:
@@ -91,6 +94,12 @@ jobs:
           name: deepseek-ocr-macos
           path: deepseek-ocr-macos.tar.gz
 
+      - name: Publish release asset (macOS)
+        if: matrix.os == 'macos-latest' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: deepseek-ocr-macos.tar.gz
+
       - name: Upload artifacts (Windows)
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
@@ -104,3 +113,11 @@ jobs:
         with:
           name: deepseek-ocr-windows-upx
           path: deepseek-ocr-windows-upx.zip
+
+      - name: Publish release assets (Windows)
+        if: matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            deepseek-ocr-windows.zip
+            deepseek-ocr-windows-upx.zip
