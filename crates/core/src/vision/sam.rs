@@ -920,32 +920,8 @@ fn adapt_position_embedding(
 }
 
 pub fn bicubic_resize_antialiased(input: &Tensor, out_h: usize, out_w: usize) -> Result<Tensor> {
-    // 输入: [1, C, H, W], dtype=f32
-    let input = input.contiguous()?.to_dtype(DType::F32)?;
-    let (b, c, src_h, src_w) = input.shape().dims4()?;
-    anyhow::ensure!(b == 1, "bicubic resize expects batch size 1");
-
-    if src_h == out_h && src_w == out_w {
-        return Ok(input.clone());
-    }
-
-    // 读取数据到内存
-    let data = input.flatten_all()?.to_vec1::<f32>()?;
-    let chan_stride = src_h * src_w;
-
-    // PyTorch F.interpolate bicubic 的 a 值
-    let a: f32 = -0.75;
-
-    // 两轴 scale（align_corners=False 的定义）
-    let scale_y = src_h as f32 / out_h as f32;
-    let scale_x = src_w as f32 / out_w as f32;
-
-    // 预分配输出
-    let mut out = vec![0f32; c * out_h * out_w];
-
-    // 核函数（Keys cubic）
     #[inline(always)]
-    fn cubic_weight(a: f32, x: f32) -> f32 {
+    fn cubic(a: f32, x: f32) -> f32 {
         let x = x.abs();
         if x <= 1.0 {
             (a + 2.0) * x * x * x - (a + 3.0) * x * x + 1.0
@@ -956,110 +932,101 @@ pub fn bicubic_resize_antialiased(input: &Tensor, out_h: usize, out_w: usize) ->
         }
     }
 
-    // 一维权重（含 antialias）：返回 4 个权重及 4 个索引
-    #[inline(always)]
-    fn weights_and_indices(
-        src_len: usize,
-        out_idx: usize,
+    fn compute_axis_weights(
+        in_len: usize,
+        out_len: usize,
         scale: f32,
+        support_scale: f32,
         a: f32,
-        _align_corners_false: bool, // 仅用于强调坐标公式
-    ) -> ([f32; 4], [usize; 4]) {
-        // align_corners=False
-        let src_pos = (out_idx as f32 + 0.5) * scale - 0.5;
+    ) -> (Vec<Vec<f32>>, Vec<Vec<usize>>) {
+        // PyTorch 在下采样时会把 bicubic 核的支撑区放大到 2 * support_scale，
+        // 相当于先低通滤波再重采样，避免 aliasing，尽量缩小和PyTorch实现的差别。
+        let radius = 2.0 * support_scale;
+        let mut weights = vec![Vec::new(); out_len];
+        let mut indices = vec![Vec::new(); out_len];
 
-        // 采样核的基准中心
-        let center = src_pos.floor();
-
-        // 抗锯齿：下采样时扩大支撑域，并按 1/scale 缩放权重
-        let aa = if scale < 1.0 { 1.0 / scale } else { 1.0 }; // 放大系数
-
-        // 4 邻域整数索引（center-1, center, center+1, center+2）
-        let p0 = (center as isize - 1).clamp(0, src_len as isize - 1) as usize;
-        let p1 = (center as isize + 0).clamp(0, src_len as isize - 1) as usize;
-        let p2 = (center as isize + 1).clamp(0, src_len as isize - 1) as usize;
-        let p3 = (center as isize + 2).clamp(0, src_len as isize - 1) as usize;
-
-        // 与四个点的距离
-        let d0 = (src_pos - (center - 1.0)) / aa;
-        let d1 = (src_pos - (center + 0.0)) / aa;
-        let d2 = (src_pos - (center + 1.0)) / aa;
-        let d3 = (src_pos - (center + 2.0)) / aa;
-
-        // 未归一的权重（除以 aa 保持能量）
-        let mut w0 = cubic_weight(a, d0) / aa;
-        let mut w1 = cubic_weight(a, d1) / aa;
-        let mut w2 = cubic_weight(a, d2) / aa;
-        let mut w3 = cubic_weight(a, d3) / aa;
-
-        // 归一化，避免边界处能量略偏
-        let sum = w0 + w1 + w2 + w3;
-        if sum != 0.0 {
-            w0 /= sum;
-            w1 /= sum;
-            w2 /= sum;
-            w3 /= sum;
+        for out_idx in 0..out_len {
+            let center = (out_idx as f32 + 0.5) * scale - 0.5;
+            let start = (center - radius).floor() as isize;
+            let end = (center + radius).ceil() as isize;
+            let mut idxs = Vec::new();
+            let mut wts = Vec::new();
+            for src_idx in start..=end {
+                let clamped = src_idx.clamp(0, (in_len as isize) - 1) as usize;
+                let distance = (center - src_idx as f32) / support_scale;
+                let weight = cubic(a, distance) / support_scale;
+                if weight != 0.0 {
+                    idxs.push(clamped);
+                    wts.push(weight);
+                }
+            }
+            let sum: f32 = wts.iter().sum();
+            if sum != 0.0 {
+                for w in &mut wts {
+                    *w /= sum;
+                }
+            }
+            weights[out_idx] = wts;
+            indices[out_idx] = idxs;
         }
 
-        ([w0, w1, w2, w3], [p0, p1, p2, p3])
+        (weights, indices)
     }
 
-    // 为两个维度分别预计算权重和索引（提升效率 & 保持确定性）
-    let mut wy = vec![[0f32; 4]; out_h];
-    let mut iy = vec![[0usize; 4]; out_h];
-    for oh in 0..out_h {
-        let (w, idx) = weights_and_indices(src_h, oh, scale_y, a, true);
-        wy[oh] = w;
-        iy[oh] = idx;
-    }
-    let mut wx = vec![[0f32; 4]; out_w];
-    let mut ix = vec![[0usize; 4]; out_w];
-    for ow in 0..out_w {
-        let (w, idx) = weights_and_indices(src_w, ow, scale_x, a, true);
-        wx[ow] = w;
-        ix[ow] = idx;
+    let input = input.contiguous()?.to_dtype(DType::F32)?;
+    let (batch, channels, in_h, in_w) = input.shape().dims4()?;
+    ensure!(batch == 1, "bicubic resize expects batch size 1");
+
+    if in_h == out_h && in_w == out_w {
+        return Ok(input.clone());
     }
 
-    // 正式卷积：分离 2D（权重事先算好）
-    for ch in 0..c {
-        let base = ch * chan_stride;
+    let scale_y = in_h as f32 / out_h as f32;
+    let scale_x = in_w as f32 / out_w as f32;
+    let support_y = scale_y.max(1.0);
+    let support_x = scale_x.max(1.0);
+    let a = -0.75f32;
+
+    let (wy, iy) = compute_axis_weights(in_h, out_h, scale_y, support_y, a);
+    let (wx, ix) = compute_axis_weights(in_w, out_w, scale_x, support_x, a);
+
+    let flat = input.flatten_all()?.to_vec1::<f32>()?;
+    let mut tmp = vec![0f32; channels * out_h * in_w];
+
+    for ch in 0..channels {
         for oh in 0..out_h {
-            let (wy0, wy1, wy2, wy3) = (wy[oh][0], wy[oh][1], wy[oh][2], wy[oh][3]);
-            let (y0, y1, y2, y3) = (iy[oh][0], iy[oh][1], iy[oh][2], iy[oh][3]);
+            // 先对纵向做卷积（保持 width 不变），与 PyTorch 的实现尽量保持顺序一致。
+            let mut acc = vec![0f32; in_w];
+            for (k, &src_y) in iy[oh].iter().enumerate() {
+                let weight = wy[oh][k];
+                let row_offset = ((ch * in_h + src_y) * in_w) as usize;
+                for x in 0..in_w {
+                    acc[x] += flat[row_offset + x] * weight;
+                }
+            }
+            let dst_offset = (ch * out_h + oh) * in_w;
+            tmp[dst_offset..dst_offset + in_w].copy_from_slice(&acc);
+        }
+    }
 
+    let mut out = vec![0f32; channels * out_h * out_w];
+    for ch in 0..channels {
+        for oh in 0..out_h {
             for ow in 0..out_w {
-                let (wx0, wx1, wx2, wx3) = (wx[ow][0], wx[ow][1], wx[ow][2], wx[ow][3]);
-                let (x0, x1, x2, x3) = (ix[ow][0], ix[ow][1], ix[ow][2], ix[ow][3]);
-
-                // 4×4 采样并分离乘法（先横向，再纵向）
-                let row0 = data[base + y0 * src_w + x0] * wx0
-                    + data[base + y0 * src_w + x1] * wx1
-                    + data[base + y0 * src_w + x2] * wx2
-                    + data[base + y0 * src_w + x3] * wx3;
-
-                let row1 = data[base + y1 * src_w + x0] * wx0
-                    + data[base + y1 * src_w + x1] * wx1
-                    + data[base + y1 * src_w + x2] * wx2
-                    + data[base + y1 * src_w + x3] * wx3;
-
-                let row2 = data[base + y2 * src_w + x0] * wx0
-                    + data[base + y2 * src_w + x1] * wx1
-                    + data[base + y2 * src_w + x2] * wx2
-                    + data[base + y2 * src_w + x3] * wx3;
-
-                let row3 = data[base + y3 * src_w + x0] * wx0
-                    + data[base + y3 * src_w + x1] * wx1
-                    + data[base + y3 * src_w + x2] * wx2
-                    + data[base + y3 * src_w + x3] * wx3;
-
-                let val = row0 * wy0 + row1 * wy1 + row2 * wy2 + row3 * wy3;
-
-                out[ch * out_h * out_w + oh * out_w + ow] = val;
+                let mut value = 0f32;
+                for (k, &src_x) in ix[ow].iter().enumerate() {
+                    // 横向卷积阶段读取上一步的 tmp，最终得到目标像素。
+                    let weight = wx[ow][k];
+                    let idx = ((ch * out_h + oh) * in_w + src_x);
+                    value += tmp[idx] * weight;
+                }
+                let out_idx = ((ch * out_h + oh) * out_w + ow);
+                out[out_idx] = value;
             }
         }
     }
 
-    Ok(Tensor::from_vec(out, (1, c, out_h, out_w), input.device())?)
+    Tensor::from_vec(out, (1, channels, out_h, out_w), input.device()).map_err(Into::into)
 }
 fn compute_relative_bias(
     q: &Tensor,
