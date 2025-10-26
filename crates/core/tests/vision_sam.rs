@@ -1,9 +1,11 @@
+mod common;
+
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
+use common::test_utils::{with_shared_ocr_model, workspace_path};
 use deepseek_ocr_core::{
     config::load_ocr_config,
     model::DeepseekOcrModel,
-    test_utils::with_shared_ocr_model,
     vision::sam::{SamBackbone, window_partition_shape, window_unpartition_shape},
 };
 
@@ -22,7 +24,8 @@ where
 
 #[test]
 fn sam_params_match_hf_config() {
-    let cfg = load_ocr_config(None).expect("hf config must load");
+    let cfg_path = workspace_path("DeepSeek-OCR/config.json");
+    let cfg = load_ocr_config(Some(&cfg_path)).expect("hf config must load");
     let sam = SamBackbone::with_dummy_weights(&cfg).expect("sam params");
     assert_eq!(sam.params.image_size, 1024);
     assert_eq!(sam.params.patch_size, 16);
@@ -36,7 +39,8 @@ fn sam_params_match_hf_config() {
 fn sam_forward_shape_check() {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
-    let cfg = load_ocr_config(None).expect("hf config must load");
+    let cfg_path = workspace_path("DeepSeek-OCR/config.json");
+    let cfg = load_ocr_config(Some(&cfg_path)).expect("hf config must load");
     let sam = SamBackbone::with_dummy_weights(&cfg).expect("sam params");
 
     let device = Device::Cpu;

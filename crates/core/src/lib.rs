@@ -13,8 +13,6 @@ pub mod memlog;
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-pub mod test_utils;
-
 /// Placeholder entry point while components are being ported from Python.
 pub fn init() {
     // Initialization logic (e.g., logger setup) will live here.

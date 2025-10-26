@@ -1,5 +1,8 @@
+mod common;
+
 use anyhow::Result;
 use candle_core::{DType, Tensor};
+use common::test_utils::workspace_path;
 use deepseek_ocr_core::{
     config::load_ocr_config,
     vision::clip::{ClipVisionParams, adapt_position_embedding_for_tests},
@@ -7,7 +10,8 @@ use deepseek_ocr_core::{
 
 #[test]
 fn clip_params_match_config() -> Result<()> {
-    let cfg = load_ocr_config(None)?;
+    let cfg_path = workspace_path("DeepSeek-OCR/config.json");
+    let cfg = load_ocr_config(Some(&cfg_path))?;
     let params = ClipVisionParams::from_config(&cfg)?;
     assert_eq!(params.hidden_size, 1024);
     assert_eq!(params.num_heads, 16);

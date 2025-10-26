@@ -1,84 +1,23 @@
+mod common;
+
 use anyhow::{Context, Result, bail, ensure};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
+use common::test_utils::{
+    build_global_view_from_path, global_view_tensor_from_path, with_shared_ocr_model,
+    workspace_path, workspace_root,
+};
 use ndarray::{Array2, ArrayD};
 use ndarray_npy::NpzReader;
 use serde_json::Value;
 use std::fs::File;
-use std::path::Path;
 
-use deepseek_ocr_core::{
-    test_utils::{
-        build_global_view_from_path, global_view_tensor_from_path, with_shared_ocr_model,
-    },
-    vision::dynamic_preprocess,
-};
+use deepseek_ocr_core::vision::dynamic_preprocess;
 use image::{DynamicImage, ImageBuffer, Rgb, open};
 
 #[test]
-fn compare_clip_weights_against_python_dump() -> Result<()> {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let weights_path = repo_root.join("DeepSeek-OCR/model-00001-of-000001.safetensors");
-    let dump_path = repo_root.join("baselines/sample/clip_vision_weights.npz");
-
-    let device = Device::Cpu;
-    let dtype = DType::F32;
-
-    let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&[weights_path.as_path()], dtype, &device)
-            .context("failed to mmap weights")?
-    };
-    let vb_clip = vb.pp("model").pp("vision_model");
-
-    let mut reader = NpzReader::new(File::open(&dump_path)?)
-        .with_context(|| format!("failed to open npz {}", dump_path.display()))?;
-    let names = reader.names()?.clone();
-
-    let mut max_diff = 0f32;
-
-    for name in names {
-        let canonical = name.strip_suffix(".npy").unwrap_or(&name);
-        let original = canonical.replace("__", ".");
-        if !original.starts_with("model.vision_model.") {
-            continue;
-        }
-        let local = &original["model.vision_model.".len()..];
-
-        let array: ArrayD<f32> = reader
-            .by_name(&name)
-            .with_context(|| format!("array {name} missing from {}", dump_path.display()))?;
-        let dims: Vec<usize> = array.shape().iter().map(|&d| d as usize).collect();
-        let len = array.len();
-        let (flat, offset) = array.into_raw_vec_and_offset();
-        if let Some(off) = offset {
-            ensure!(
-                off == 0,
-                "numpy array {name} is not contiguous (offset {off:?})"
-            );
-        }
-        let numpy_tensor = Tensor::from_vec(flat, len, &device)?.reshape(dims.clone())?;
-        let rust_tensor = vb_clip
-            .get(dims.clone(), local)
-            .with_context(|| format!("missing tensor {local} in safetensors"))?
-            .to_dtype(DType::F32)?;
-
-        let diff = rust_tensor
-            .sub(&numpy_tensor)?
-            .abs()?
-            .max_all()?
-            .to_scalar::<f32>()?;
-        max_diff = max_diff.max(diff);
-        println!("tensor {local}: max diff {diff}");
-    }
-
-    println!("max diff across CLIP weights: {max_diff}");
-    Ok(())
-}
-
-#[test]
 fn dump_rust_global_view_image() -> Result<()> {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let baseline_dir = repo_root.join("baselines/sample");
+    let baseline_dir = workspace_path("baselines/sample");
     let metadata_path = baseline_dir.join("baseline.json");
     let metadata: Value = serde_json::from_str(&std::fs::read_to_string(&metadata_path)?)?;
     let base_size = metadata
@@ -89,7 +28,7 @@ fn dump_rust_global_view_image() -> Result<()> {
         .get("image")
         .and_then(Value::as_str)
         .context("baseline.json missing image path")?;
-    let image_path = repo_root.join(image_rel);
+    let image_path = workspace_root().join(image_rel);
 
     let rust_image = build_global_view_from_path(&image_path, base_size)?;
     let output_path = baseline_dir.join("rust_global_view_image0.png");
@@ -106,8 +45,7 @@ fn load_array_from_npz(reader: &mut NpzReader<File>, name: &str) -> Result<Array
 
 #[test]
 fn compare_global_view_preprocessing() -> Result<()> {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let baseline_dir = repo_root.join("baselines/sample");
+    let baseline_dir = workspace_path("baselines/sample");
     let metadata_path = baseline_dir.join("baseline.json");
     let metadata: Value = serde_json::from_str(&std::fs::read_to_string(&metadata_path)?)?;
     let base_size = metadata
@@ -118,7 +56,7 @@ fn compare_global_view_preprocessing() -> Result<()> {
         .get("image")
         .and_then(Value::as_str)
         .context("baseline.json missing image path")?;
-    let image_path = repo_root.join(image_rel);
+    let image_path = workspace_root().join(image_rel);
 
     let npz_path = baseline_dir.join("image_tensors.npz");
     let mut reader = NpzReader::new(File::open(&npz_path)?)
@@ -296,15 +234,14 @@ fn max_abs_diff_tensor(tensor: &Tensor, expected: &Array2<f32>) -> Result<(f32, 
 
 #[test]
 fn compare_local_crops_preprocessing() -> Result<()> {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let baseline_dir = repo_root.join("baselines/sample");
+    let baseline_dir = workspace_path("baselines/sample");
     let metadata_path = baseline_dir.join("baseline.json");
     let metadata: Value = serde_json::from_str(&std::fs::read_to_string(&metadata_path)?)?;
     let image_rel = metadata
         .get("image")
         .and_then(Value::as_str)
         .context("baseline.json missing image path")?;
-    let image_path = repo_root.join(image_rel);
+    let image_path = workspace_root().join(image_rel);
     let image_size = metadata
         .get("image_size")
         .and_then(Value::as_u64)
@@ -352,25 +289,24 @@ fn compare_local_crops_preprocessing() -> Result<()> {
 
 #[test]
 fn compare_clip_sam_tokens_against_reference() -> Result<()> {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let baseline_dir = repo_root.join("baselines/sample");
+    let baseline_dir = workspace_path("baselines/sample");
     let metadata_path = baseline_dir.join("baseline.json");
     let metadata: Value = serde_json::from_str(&std::fs::read_to_string(&metadata_path)?)?;
     let image_rel = metadata
         .get("image")
         .and_then(Value::as_str)
         .context("baseline.json missing image path")?;
-    let image_path = repo_root.join(image_rel);
+    let image_path = workspace_root().join(image_rel);
     let vision_rel = metadata
         .get("vision_embeddings_path")
         .and_then(Value::as_str)
         .unwrap_or("baselines/sample/vision_embeddings.npz");
-    let vision_path = repo_root.join(vision_rel);
+    let vision_path = workspace_root().join(vision_rel);
     let clip_trace_rel = metadata
         .get("clip_trace_path")
         .and_then(Value::as_str)
         .unwrap_or("baselines/sample/clip_trace.npz");
-    let clip_trace_path = repo_root.join(clip_trace_rel);
+    let clip_trace_path = workspace_root().join(clip_trace_rel);
     ensure!(
         clip_trace_path.exists(),
         "clip trace npz missing at {}",
@@ -380,7 +316,7 @@ fn compare_clip_sam_tokens_against_reference() -> Result<()> {
         .get("sam_trace_path")
         .and_then(Value::as_str)
         .unwrap_or("baselines/sample/sam_trace.npz");
-    let sam_trace_path = repo_root.join(sam_trace_rel);
+    let sam_trace_path = workspace_root().join(sam_trace_rel);
     ensure!(
         sam_trace_path.exists(),
         "sam trace npz missing at {}",

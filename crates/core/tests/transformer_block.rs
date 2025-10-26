@@ -1,8 +1,10 @@
+mod common;
+
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
+use common::test_utils::{shared_language_config, shared_transformer_weights};
 use deepseek_ocr_core::{
     config::DeepseekV2Config,
-    test_utils::{shared_language_config, shared_transformer_weights},
     transformer::{
         block::{TransformerBlock, lengths_to_padding_mask},
         rope::RopeCache,

@@ -1,9 +1,9 @@
+mod common;
+
 use anyhow::Result;
 use candle_core::{DType, Tensor};
-use deepseek_ocr_core::{
-    model::{DeepseekOcrModel, GenerateOptions, VisionInput},
-    test_utils::with_shared_ocr_model,
-};
+use common::test_utils::with_shared_ocr_model;
+use deepseek_ocr_core::model::{DeepseekOcrModel, GenerateOptions, VisionInput};
 
 fn with_model<F>(label: &str, f: F) -> Result<()>
 where

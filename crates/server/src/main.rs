@@ -24,6 +24,7 @@ use deepseek_ocr_core::{
 };
 use image::DynamicImage;
 use reqwest::blocking::Client;
+use rocket::data::ToByteUnit;
 use rocket::{
     Config, Either, State,
     futures::stream::Stream,
@@ -36,7 +37,6 @@ use rocket::{
     serde::json::Json,
     tokio::{self, sync::mpsc},
 };
-use rocket::data::ToByteUnit;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -493,9 +493,11 @@ async fn main() -> Result<()> {
     let figment = Config::figment()
         .merge(("port", args.port))
         .merge(("address", args.host.clone()))
-        .merge(("limits", rocket::data::Limits::default()
-            .limit("json", 50.megabytes())
-            .limit("bytes", 50.megabytes())
+        .merge((
+            "limits",
+            rocket::data::Limits::default()
+                .limit("json", 50.megabytes())
+                .limit("bytes", 50.megabytes()),
         ));
 
     println!(
@@ -614,7 +616,7 @@ async fn chat_completions_endpoint(
     ensure_model(&req.model, &state.model_id)?;
     let gen_inputs = GenerationInputs::from_state(state);
     let (prompt, images) = convert_messages(&req.messages)?;
-    println!("{}",prompt);
+    println!("{}", prompt);
     let max_tokens = req.max_tokens.unwrap_or(state.max_new_tokens);
     if req.stream.unwrap_or(false) {
         let stream_inputs = gen_inputs.clone();

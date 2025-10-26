@@ -1477,7 +1477,7 @@ fn round_ties_to_even(value: f64) -> f64 {
     }
 }
 
-pub(crate) fn build_global_view(image: &DynamicImage, base_size: u32) -> DynamicImage {
+pub fn build_global_view(image: &DynamicImage, base_size: u32) -> DynamicImage {
     let mean = (0.5 * 255.0) as u8;
     let mut canvas = RgbImage::from_pixel(base_size, base_size, Rgb([mean, mean, mean]));
     let (orig_w, orig_h) = image.dimensions();
@@ -1501,11 +1501,7 @@ pub(crate) fn build_global_view(image: &DynamicImage, base_size: u32) -> Dynamic
     DynamicImage::ImageRgb8(canvas)
 }
 
-pub(crate) fn image_to_tensor(
-    image: &DynamicImage,
-    device: &Device,
-    dtype: DType,
-) -> Result<Tensor> {
+pub fn image_to_tensor(image: &DynamicImage, device: &Device, dtype: DType) -> Result<Tensor> {
     let rgb = image.to_rgb8();
     let (width, height) = rgb.dimensions();
     let mut data = Vec::with_capacity((width * height * 3) as usize);

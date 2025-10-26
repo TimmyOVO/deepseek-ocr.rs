@@ -1,9 +1,17 @@
+mod common;
+
 use anyhow::{Context, Result};
-use deepseek_ocr_core::config::load_ocr_config;
+use common::test_utils::workspace_path;
+use deepseek_ocr_core::config::{DeepseekOcrConfig, load_ocr_config};
+
+fn load_test_config() -> Result<DeepseekOcrConfig> {
+    let path = workspace_path("DeepSeek-OCR/config.json");
+    load_ocr_config(Some(&path))
+}
 
 #[test]
 fn load_default_config() -> Result<()> {
-    let config = load_ocr_config(None)?;
+    let config = load_test_config()?;
     assert_eq!(
         config
             .name_or_path
@@ -19,7 +27,7 @@ fn load_default_config() -> Result<()> {
 
 #[test]
 fn language_resolution_prefers_nested_config() -> Result<()> {
-    let config = load_ocr_config(None)?;
+    let config = load_test_config()?;
     let language = config.resolved_language_config()?;
     assert_eq!(language.hidden_size, 1280);
     assert_eq!(language.num_hidden_layers, 12);
@@ -30,7 +38,7 @@ fn language_resolution_prefers_nested_config() -> Result<()> {
 
 #[test]
 fn projector_resolution_mirrors_config() -> Result<()> {
-    let config = load_ocr_config(None)?;
+    let config = load_test_config()?;
     let projector = config.resolved_projector_config()?;
     assert_eq!(projector.projector_type, "linear");
     assert_eq!(projector.n_embed, 1280);
@@ -39,7 +47,7 @@ fn projector_resolution_mirrors_config() -> Result<()> {
 
 #[test]
 fn vision_backbone_lookup() -> Result<()> {
-    let config = load_ocr_config(None)?;
+    let config = load_test_config()?;
     let sam = config
         .resolved_vision_backbone("sam_vit_b")
         .context("sam_vit_b config missing")?;
