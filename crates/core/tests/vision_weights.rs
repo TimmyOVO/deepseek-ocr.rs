@@ -1,8 +1,7 @@
 mod common;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
 use common::test_utils::{
     build_global_view_from_path, global_view_tensor_from_path, with_shared_ocr_model,
     workspace_path, workspace_root,
@@ -13,7 +12,7 @@ use serde_json::Value;
 use std::fs::File;
 
 use deepseek_ocr_core::vision::dynamic_preprocess;
-use image::{DynamicImage, ImageBuffer, Rgb, open};
+use image::{open, DynamicImage, ImageBuffer, Rgb};
 
 #[test]
 fn dump_rust_global_view_image() -> Result<()> {

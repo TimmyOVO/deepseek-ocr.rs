@@ -1017,10 +1017,10 @@ pub fn bicubic_resize_antialiased(input: &Tensor, out_h: usize, out_w: usize) ->
                 for (k, &src_x) in ix[ow].iter().enumerate() {
                     // 横向卷积阶段读取上一步的 tmp，最终得到目标像素。
                     let weight = wx[ow][k];
-                    let idx = ((ch * out_h + oh) * in_w + src_x);
+                    let idx = (ch * out_h + oh) * in_w + src_x;
                     value += tmp[idx] * weight;
                 }
-                let out_idx = ((ch * out_h + oh) * out_w + ow);
+                let out_idx = (ch * out_h + oh) * out_w + ow;
                 out[out_idx] = value;
             }
         }
