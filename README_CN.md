@@ -25,18 +25,18 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 ## 技术栈 ⚙️
 - **Candle**：Rust 深度学习框架，支持 Metal/CUDA（alpha） 与 FlashAttention。
 - **Rocket**：异步 HTTP 框架，提供 `/v1/responses`、`/v1/chat/completions` 等 OpenAI 兼容路由。
-- **tokenizers**：Hugging Face 原版分词器，通过 `crates/assets` 缓存与校验。
+- **tokenizers**：上游模型提供的分词器，通过 `crates/assets` 在 Hugging Face / ModelScope 镜像间缓存与校验。
 - **纯 Rust 视觉/Prompt 管线**：CLI 与 Server 复用，减少重复逻辑。
 
 ## 相比 Python 实现的优势 🥷
 - Apple Silicon 冷启动更快、内存占用更低，且提供原生二进制分发。
-- Hugging Face 资源下载和校验全部由 Rust crate 托管。
+- 资产下载/校验由 Rust crate 统一托管，可在 Hugging Face 与 ModelScope 之间自动切换。
 - 自动折叠多轮会话，仅保留最近一次 user 提示，确保 OCR 场景稳定。
 - 与 Open WebUI 等 OpenAI 客户端“即插即用”，无需额外适配层。
 
 ## 项目亮点 ✨
 - **一套代码，两种入口**：批处理友好的 CLI 与兼容 `/v1/responses`、`/v1/chat/completions` 的 Rocket Server。
-- **开箱即用**：首次运行自动从 Hugging Face 拉取配置、Tokenizer 与权重。
+- **开箱即用**：首次运行自动从 Hugging Face 或 ModelScope（取决于实时延迟）拉取配置、Tokenizer 与权重。
 - **Apple Silicon 友好**：Metal + FP16 加速让笔记本也能实时 OCR。
 - **NVIDIA GPU（α 测试）**：构建时附加 `--features cuda` 并以 `--device cuda --dtype f16` 运行，可在 Linux/Windows 上尝鲜 CUDA 加速。
 - **OpenAI 客户端即插即用**：Server 端自动折叠多轮对话，只保留最新 user 指令，避免 OCR 模型被多轮上下文干扰。
@@ -48,7 +48,7 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 - Git
 - 可选：macOS 13+ 的 Apple Silicon（用于 Metal）
 - 可选：Linux/Windows 的 NVIDIA GPU（需 CUDA 12.2+ 工具链与驱动，当前为alpha阶段）
-- 推荐：配置 `HF_TOKEN` 访问 Hugging Face `deepseek-ai/DeepSeek-OCR`
+- 推荐：配置 `HF_TOKEN` 访问 Hugging Face `deepseek-ai/DeepSeek-OCR`（若该源不可用会自动切换 ModelScope）
 
 ### 克隆仓库
 ```bash
@@ -127,7 +127,8 @@ cargo run -p deepseek-ocr-server -- \
 更多 CLI 说明请参见 [`crates/cli/README_CN.md`](crates/cli/README_CN.md)；服务端 API 详见 [`crates/server/README_CN.md`](crates/server/README_CN.md)。
 
 ## 常见问题 🛠️
-- **下载失败**：确认 `HF_TOKEN` 已配置，或重试以利用 Hugging Face 缓存。
+- **资产下载源**：会自动在 Hugging Face 与 ModelScope 之间按延迟择优。命令行会提示当前使用的源与目标路径。
+- **下载失败**：确认 `HF_TOKEN` 已配置，或重试以利用 Hugging Face/ModelScope 缓存。
 - **首轮耗时长**：第一次推理需要加载模型并热启动 GPU（Metal/CUDA α)，后续会更快。
 - **图片过大被拒**：放大 Rocket 限额或对图像进行下采样。
 

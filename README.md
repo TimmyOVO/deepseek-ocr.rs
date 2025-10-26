@@ -25,18 +25,18 @@ The original DeepSeek-OCR ships as a Python + Transformers stack—powerful, but
 ## Technical Stack ⚙️
 - **Candle** for tensor compute, with Metal and CUDA backends and FlashAttention support.
 - **Rocket** + async streaming for OpenAI-compatible `/v1/responses` and `/v1/chat/completions`.
-- **tokenizers** (Hugging Face) wrapped by `crates/assets` for deterministic caching.
+- **tokenizers** (upstream DeepSeek release) wrapped by `crates/assets` for deterministic caching via Hugging Face and ModelScope mirrors.
 - **Pure Rust vision/prompt pipeline** shared by CLI and server to avoid duplicated logic.
 
 ## Advantages over the Python Release 🥷
 - Faster cold-start on Apple Silicon, lower RSS, and native binary distribution.
-- Deterministic Hugging Face asset download + verification built into the workspace.
+- Deterministic dual-source (Hugging Face + ModelScope) asset download + verification built into the workspace.
 - Automatic single-turn chat compaction so OCR outputs stay stable even when clients send history.
 - Ready-to-use OpenAI compatibility for tools like Open WebUI without adapters.
 
 ## Highlights ✨
 - **One repo, two entrypoints** – a batteries-included CLI for batch jobs and a Rocket-based server that speaks `/v1/responses` and `/v1/chat/completions`.
-- **Works out of the box** – pulls model weights, configs, and tokenizer from Hugging Face on first run.
+- **Works out of the box** – pulls model weights, configs, and tokenizer from whichever of Hugging Face or ModelScope responds fastest on first run.
 - **Optimised for Apple Silicon** – optional Metal backend with FP16 execution for real-time OCR on laptops.
 - **CUDA (alpha)** – experimental support via `--features cuda` + `--device cuda --dtype f16`; expect rough edges while we finish kernel coverage.
 - **OpenAI client compatibility** – drop-in replacement for popular SDKs; the server automatically collapses chat history to the latest user turn for OCR-friendly prompts.
@@ -48,7 +48,7 @@ The original DeepSeek-OCR ships as a Python + Transformers stack—powerful, but
 - Git
 - Optional: Apple Silicon running macOS 13+ for Metal acceleration
 - Optional: CUDA 12.2+ toolkit + driver for experimental NVIDIA GPU acceleration on Linux/Windows
-- (Recommended) Hugging Face account with `HF_TOKEN` when pulling from the `deepseek-ai/DeepSeek-OCR` repo
+- (Recommended) Hugging Face account with `HF_TOKEN` when pulling from the `deepseek-ai/DeepSeek-OCR` repo (ModelScope is used automatically when it’s faster/reachable).
 
 ### Clone the Workspace
 ```bash
@@ -62,7 +62,7 @@ The first invocation of the CLI or server downloads the config, tokenizer, and `
 ```bash
 cargo run -p deepseek-ocr-cli -- --help # triggers asset download
 ```
-Set `HF_HOME` or `HF_TOKEN` if you store Hugging Face caches elsewhere. The full model package is ~6.3GB on disk and typically requires ~13GB of RAM headroom during inference (model + activations).
+Set `HF_HOME`/`HF_TOKEN` if you store Hugging Face caches elsewhere (ModelScope downloads land alongside the same asset tree). The full model package is ~6.3GB on disk and typically requires ~13GB of RAM headroom during inference (model + activations).
 
 ## Command-Line Interface 🖥️
 Build and run directly from the workspace:
@@ -118,13 +118,13 @@ Notes:
 - `crates/core` – shared inference pipeline, model loaders, conversation templates.
 - `crates/cli` – command-line frontend (`deepseek-ocr-cli`).
 - `crates/server` – Rocket server exposing OpenAI-compatible endpoints.
-- `crates/assets` – asset management (configuration, tokenizer, Hugging Face download helpers).
+- `crates/assets` – asset management (configuration, tokenizer, Hugging Face + ModelScope download helpers).
 - `baselines/` – reference inputs and outputs for regression testing.
 
 Detailed CLI usage lives in [`crates/cli/README.md`](crates/cli/README.md). The server’s OpenAI-compatible interface is covered in [`crates/server/README.md`](crates/server/README.md).
 
 ## Troubleshooting 🛠️
-- **Weights download fails** – export `HF_TOKEN=<your-token>` and retry. Assets land in `~/.cache/huggingface` by default.
+- **Where do assets come from?** – downloads automatically pick between Hugging Face and ModelScope based on latency; the CLI prints the chosen source for each file.
 - **Slow first response** – model load and GPU warm-up (Metal/CUDA alpha) happen on the initial request; later runs are faster.
 - **Large image rejection** – increase Rocket JSON limits in `crates/server/src/main.rs` or downscale the input.
 

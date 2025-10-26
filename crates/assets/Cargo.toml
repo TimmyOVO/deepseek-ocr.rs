@@ -7,3 +7,7 @@ edition = "2024"
 anyhow = { workspace = true }
 hf-hub = { version = "0.4.3", default-features = false, features = ["native-tls", "ureq"] }
 deepseek-ocr-core = { workspace = true }
+indicatif = "0.17"
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { workspace = true }
+once_cell = "1.19"
