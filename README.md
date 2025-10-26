@@ -121,6 +121,8 @@ Notes:
 - `crates/assets` – asset management (configuration, tokenizer, Hugging Face download helpers).
 - `baselines/` – reference inputs and outputs for regression testing.
 
+Detailed CLI usage lives in [`crates/cli/README.md`](crates/cli/README.md). The server’s OpenAI-compatible interface is covered in [`crates/server/README.md`](crates/server/README.md).
+
 ## Troubleshooting 🛠️
 - **Weights download fails** – export `HF_TOKEN=<your-token>` and retry. Assets land in `~/.cache/huggingface` by default.
 - **Slow first response** – model load and GPU warm-up (Metal/CUDA alpha) happen on the initial request; later runs are faster.

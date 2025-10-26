@@ -124,6 +124,8 @@ cargo run -p deepseek-ocr-server -- \
 - `crates/assets`：模型/Tokenizer 下载与缓存工具。
 - `baselines/`：基准输入输出样例，便于回归测试。
 
+更多 CLI 说明请参见 [`crates/cli/README_CN.md`](crates/cli/README_CN.md)；服务端 API 详见 [`crates/server/README_CN.md`](crates/server/README_CN.md)。
+
 ## 常见问题 🛠️
 - **下载失败**：确认 `HF_TOKEN` 已配置，或重试以利用 Hugging Face 缓存。
 - **首轮耗时长**：第一次推理需要加载模型并热启动 GPU（Metal/CUDA α)，后续会更快。

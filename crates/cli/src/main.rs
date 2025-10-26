@@ -35,10 +35,6 @@ struct Args {
     #[arg(long, default_value = "plain")]
     template: String,
 
-    /// System prompt injected at the top of the conversation template.
-    #[arg(long, default_value = "You are DeepSeek-OCR running in Rust.")]
-    system_prompt: String,
-
     /// Image files corresponding to `<image>` placeholders, in order.
     #[arg(long = "image", value_name = "PATH")]
     images: Vec<PathBuf>,
@@ -130,7 +126,7 @@ fn run() -> Result<()> {
         )
     })?;
 
-    let prompt_with_template = render_prompt(&args.template, &args.system_prompt, &prompt_raw)?;
+    let prompt_with_template = render_prompt(&args.template, "", &prompt_raw)?;
     let image_slots = prompt_with_template.matches("<image>").count();
     anyhow::ensure!(
         image_slots == args.images.len(),
