@@ -1,4 +1,5 @@
 use std::time::Instant;
+use tracing::trace;
 
 use anyhow::{Context, Result, anyhow};
 use candle_core::Tensor;
@@ -30,7 +31,7 @@ pub fn prepare_vision_inputs(
     crop_mode: bool,
 ) -> Result<Vec<OwnedVisionInput>> {
     if !images.is_empty() {
-        println!(
+        trace!(
             "Preparing vision input (base_size={base_size}, image_size={image_size}, crop_mode={crop_mode})"
         );
     }
@@ -56,10 +57,10 @@ pub fn compute_image_embeddings(
         .iter()
         .map(|owned| Some(owned.as_ref()))
         .collect();
-    println!("Computing image embeddings for {} image(s)...", refs.len());
+    trace!("Computing image embeddings for {} image(s)...", refs.len());
     let start = Instant::now();
     let outputs = model.compute_image_embeddings(&refs)?;
-    println!("Image embeddings computed in {:.2?}", start.elapsed());
+    trace!("Image embeddings computed in {:.2?}", start.elapsed());
     Ok(outputs)
 }
 

@@ -17,5 +17,10 @@ deepseek-ocr-assets = { path = "./crates/assets" }
 deepseek-ocr-config = { path = "./crates/config" }
 tokenizers = { version = "0.22", default-features = true }
 candle-core = { version = "0.9", default-features = false }
+candle-nn = { version = "0.9", default-features = false }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+# Currently tracing-subscriber 0.3.20 breaks color output
+# See https://github.com/tokio-rs/tracing/issues/3378
+tracing-subscriber = { version = "=0.3.19", features = ["env-filter", "fmt", "ansi"] }

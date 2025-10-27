@@ -12,6 +12,7 @@ use hf_hub::api::sync::Api;
 use indicatif::{HumanBytes, ProgressBar, ProgressStyle, style::ProgressTracker};
 use reqwest::blocking::Client;
 use serde::Deserialize;
+use tracing::info;
 
 pub const DEFAULT_REPO_ID: &str = "deepseek-ai/DeepSeek-OCR";
 pub const DEFAULT_CONFIG_PATH: &str = "DeepSeek-OCR/config.json";
@@ -459,7 +460,7 @@ fn match_path(file: &ModelScopeFile, remote_path: &str) -> bool {
 }
 
 fn announce_provider(provider: Provider, remote: &str, target: &Path) {
-    println!(
+    info!(
         "Downloading {remote} via {} -> {}",
         provider_name(provider),
         target.display()

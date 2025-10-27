@@ -20,6 +20,8 @@ deepseek-ocr-assets = { workspace = true }
 deepseek-ocr-config = { workspace = true }
 tokenizers = { workspace = true }
 candle-core = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [features]
 default = []
