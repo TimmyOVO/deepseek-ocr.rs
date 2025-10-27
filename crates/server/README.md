@@ -28,6 +28,17 @@ cargo run -p deepseek-ocr-server --release -- \
 
 > **Truncation reminder:** If client responses appear cut off, raise `--max-new-tokens` (or the per-request `max_tokens` body field). The server stops generation once the configured budget is consumed.
 
+## Configuration & Overrides
+| Platform | Config path | Weights cache path |
+| --- | --- | --- |
+| Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/model.safetensors` |
+| macOS | `~/Library/Application Support/deepseek-ocr/config.toml` | `~/Library/Caches/deepseek-ocr/models/<id>/model.safetensors` |
+| Windows | `%APPDATA%\deepseek-ocr\config.toml` | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\model.safetensors` |
+
+- Use `--config /path/to/config.toml` to load or bootstrap a custom file. Missing files are generated with defaults.
+- Effective values resolve in this order: CLI/server flags → entries in `config.toml` → baked-in defaults. For per-request behaviour the JSON payload wins last (for example `max_tokens` overrides both the CLI flag and config setting). Asset paths behave the same way; explicit flags beat config entries which beat the auto-managed cache paths listed above.
+- The default TOML layout (including inference and server sections) is documented in the workspace `README.md`; tweak it to persistently change bindings or token budgets.
+
 ## Usage Notes
 
 - GPU backends (`--device metal` or `--device cuda`) require compiling with `--features metal` or `--features cuda` respectively.

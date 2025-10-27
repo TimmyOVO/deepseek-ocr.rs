@@ -29,6 +29,17 @@ cargo run -p deepseek-ocr-cli --release -- \
 
 > **Heads-up:** If the final markdown appears truncated, increase `--max-new-tokens`. The model stops once it has emitted the configured number of tokens even if the prompt is unfinished.
 
+### Configuration & Overrides
+| Platform | Config path | Weights cache path |
+| --- | --- | --- |
+| Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/model.safetensors` |
+| macOS | `~/Library/Application Support/deepseek-ocr/config.toml` | `~/Library/Caches/deepseek-ocr/models/<id>/model.safetensors` |
+| Windows | `%APPDATA%\deepseek-ocr\config.toml` | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\model.safetensors` |
+
+- Pass `--config /path/to/config.toml` to read or bootstrap an alternate file (created with defaults if missing).
+- Runtime values resolve in this order: CLI flags → values in `config.toml` → baked-in defaults. Asset paths behave the same way: explicit flags beat config entries which beat the cache locations listed above.
+- The generated file starts with the defaults shown in the workspace root `README.md`; edit them to persistently change devices, templates, token budgets, or server bindings.
+
 ### Additional Tips
 
 - Match the number of `--image` arguments to the `<image>` tokens after the template is rendered. The CLI validates this at runtime.

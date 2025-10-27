@@ -29,6 +29,17 @@ cargo run -p deepseek-ocr-cli --release -- \
 
 > **重要提醒：** 如果生成的 Markdown 被提前截断，请调大 `--max-new-tokens`。模型在达到该上限后会立刻停止，即便尚未完成回答。
 
+### 配置与覆盖
+| 平台 | 配置文件路径 | 权重缓存路径 |
+| --- | --- | --- |
+| Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/model.safetensors` |
+| macOS | `~/Library/Application Support/deepseek-ocr/config.toml` | `~/Library/Caches/deepseek-ocr/models/<id>/model.safetensors` |
+| Windows | `%APPDATA%\deepseek-ocr\config.toml` | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\model.safetensors` |
+
+- 通过 `--config /path/to/config.toml` 可切换或初始化自定义路径；若文件不存在会自动填入默认值。
+- 参数生效顺序为：命令行参数 → `config.toml` → 内置默认值。资产路径同样遵循该顺序：显式的 `--weights`/`--tokenizer` 会覆盖配置文件，若都未指定则使用上表所列缓存目录。
+- 默认文件内容可在仓库根目录 `README_CN.md` 中查看，修改对应段落即可长期改变设备、模板、token 上限或 server 监听配置。
+
 ## 使用提示
 
 - 模板渲染后 `<image>` 的数量必须与传入的 `--image` 参数数量一致，运行时会自动校验。

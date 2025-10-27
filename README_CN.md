@@ -67,6 +67,48 @@ cargo run -p deepseek-ocr-cli --release -- --help # dev profile 极慢，建议�
 ### 预构建产物
 不想自己编译？每次推送到 `main` 都会在 [build-binaries 工作流](https://github.com/TimmyOVO/deepseek-ocr.rs/actions/workflows/build-binaries.yml) 里产出 macOS（含 Metal）和 Windows 压缩包。登录 GitHub，打开最新一次绿色运行，下载 `deepseek-ocr-macos` 或 `deepseek-ocr-windows` 即可。
 
+## 配置与优先级 🗂️
+CLI 与 Server 共享同一份配置。首次启动会在系统配置目录生成带默认值的 `config.toml`，后续运行都会沿用该文件确保两个入口保持一致。
+
+| 平台 | 默认配置文件 | 模型缓存目录 |
+| --- | --- | --- |
+| Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/…` |
+| macOS | `~/Library/Application Support/deepseek-ocr/config.toml` | `~/Library/Caches/deepseek-ocr/models/<id>/…` |
+| Windows | `%APPDATA%\deepseek-ocr\config.toml` | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\…` |
+
+- 可通过 `--config /path/to/config.toml`（CLI/Server 通用）自定义路径；当文件不存在时会自动创建并写入默认内容。
+- `config.toml` 中的 `[models.entries."<id>"]` 节点允许为不同模型指定独立的 `config`、`tokenizer`、`weights` 路径；若留空则使用上表所示缓存目录并按需下载。
+- 参数覆盖顺序为：命令行参数 → `config.toml` → 内置默认值。HTTP API 请求体中的字段（例如 `max_tokens`）会在该次调用中继续覆盖前述设置。
+
+默认配置文件内容如下，可根据需要修改后长期生效：
+
+```toml
+[models]
+active = "deepseek-ocr"
+
+[models.entries.deepseek-ocr]
+
+[inference]
+device = "cpu"
+template = "plain"
+base_size = 1024
+image_size = 640
+crop_mode = true
+max_new_tokens = 512
+use_cache = true
+
+[server]
+host = "0.0.0.0"
+port = 8000
+model_id = "deepseek-ocr"
+```
+
+- `[models]` 用于指定当前激活的模型以及额外的模型条目（每个条目都可以指向各自的配置、分词器与权重文件）。
+- `[inference]` 提供 CLI 与 Server 共用的推理默认值（设备、模板、视觉分辨率、生成长度与缓存策略）。
+- `[server]` 决定网络监听地址以及 `/v1/models` 返回的模型名。
+
+更多覆盖项详见 `crates/cli/README_CN.md` 与 `crates/server/README_CN.md`。
+
 ## 命令行工具 🖥️
 直接运行：
 ```bash

@@ -28,6 +28,17 @@ cargo run -p deepseek-ocr-server --release -- \
 
 > **截断提示：** 如果客户端响应过早结束，请调大 `--max-new-tokens`（或请求体 `max_tokens`）。只要达到该上限，模型就会停止生成。
 
+## 配置与覆盖
+| 平台 | 配置文件路径 | 权重缓存路径 |
+| --- | --- | --- |
+| Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/model.safetensors` |
+| macOS | `~/Library/Application Support/deepseek-ocr/config.toml` | `~/Library/Caches/deepseek-ocr/models/<id>/model.safetensors` |
+| Windows | `%APPDATA%\deepseek-ocr/config.toml` | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\model.safetensors` |
+
+- 通过 `--config /path/to/config.toml` 可加载或初始化自定义路径，若文件不存在会写入默认内容。
+- 生效顺序为：命令行参数 → `config.toml` → 内置默认值；HTTP 请求体中的字段（如 `max_tokens`）会在该次请求内再次覆盖。资产路径同样遵循此顺序：显式参数 > 配置文件 > 上表所示缓存目录。
+- 默认配置（包含推理与服务端段落）可在仓库根部 `README_CN.md` 中查看，根据需要修改即可长期生效。
+
 ## 使用说明
 
 - 使用 GPU 后端（`--device metal` 或 `--device cuda`）时，需要在 `cargo run/build` 时加入对应的 `--features metal` 或 `--features cuda`。

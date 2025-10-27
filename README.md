@@ -65,6 +65,48 @@ cargo run -p deepseek-ocr-cli --release -- --help # dev profile is extremely slo
 > Always include `--release` when running from source; debug builds on this model are extremely slow.
 Set `HF_HOME`/`HF_TOKEN` if you store Hugging Face caches elsewhere (ModelScope downloads land alongside the same asset tree). The full model package is ~6.3GB on disk and typically requires ~13GB of RAM headroom during inference (model + activations).
 
+## Configuration & Overrides 🗂️
+The CLI and server share the same configuration. On first launch we create a `config.toml` populated with defaults; later runs reuse it so both entrypoints stay in sync.
+
+| Platform | Config file (default) | Model cache root |
+| --- | --- | --- |
+| Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/…` |
+| macOS | `~/Library/Application Support/deepseek-ocr/config.toml` | `~/Library/Caches/deepseek-ocr/models/<id>/…` |
+| Windows | `%APPDATA%\deepseek-ocr\config.toml` | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\…` |
+
+- Override the location with `--config /path/to/config.toml` (available on both CLI and server). Missing files are created automatically.
+- Each `[models.entries."<id>"]` record can point to custom `config`, `tokenizer`, or `weights` files. When omitted we fall back to the cache directory above and download/update assets as required.
+- Runtime values resolve in this order: command-line flags → values stored in `config.toml` → built-in defaults. The HTTP API adds a final layer where request payload fields (for example `max_tokens`) override everything else for that call.
+
+The generated file starts with the defaults below; adjust them to persistently change behaviour:
+
+```toml
+[models]
+active = "deepseek-ocr"
+
+[models.entries.deepseek-ocr]
+
+[inference]
+device = "cpu"
+template = "plain"
+base_size = 1024
+image_size = 640
+crop_mode = true
+max_new_tokens = 512
+use_cache = true
+
+[server]
+host = "0.0.0.0"
+port = 8000
+model_id = "deepseek-ocr"
+```
+
+- `[models]` picks the active model and lets you add more entries (each entry can point to its own config/tokenizer/weights).
+- `[inference]` controls notebook-friendly defaults shared by the CLI and server (device, template, vision sizing, decoding budget, cache usage).
+- `[server]` sets the network binding and the model identifier reported by `/v1/models`.
+
+See `crates/cli/README.md` and `crates/server/README.md` for concise override tables.
+
 ## Command-Line Interface 🖥️
 Build and run directly from the workspace:
 ```bash
