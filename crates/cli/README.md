@@ -30,6 +30,7 @@ cargo run -p deepseek-ocr-cli --release -- \
 > **Heads-up:** If the final markdown appears truncated, increase `--max-new-tokens`. The model stops once it has emitted the configured number of tokens even if the prompt is unfinished.
 
 ### Configuration & Overrides
+
 | Platform | Config path | Weights cache path |
 | --- | --- | --- |
 | Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/model.safetensors` |

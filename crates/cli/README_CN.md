@@ -30,6 +30,7 @@ cargo run -p deepseek-ocr-cli --release -- \
 > **重要提醒：** 如果生成的 Markdown 被提前截断，请调大 `--max-new-tokens`。模型在达到该上限后会立刻停止，即便尚未完成回答。
 
 ### 配置与覆盖
+
 | 平台 | 配置文件路径 | 权重缓存路径 |
 | --- | --- | --- |
 | Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/model.safetensors` |

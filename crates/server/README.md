@@ -29,6 +29,7 @@ cargo run -p deepseek-ocr-server --release -- \
 > **Truncation reminder:** If client responses appear cut off, raise `--max-new-tokens` (or the per-request `max_tokens` body field). The server stops generation once the configured budget is consumed.
 
 ## Configuration & Overrides
+
 | Platform | Config path | Weights cache path |
 | --- | --- | --- |
 | Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/model.safetensors` |

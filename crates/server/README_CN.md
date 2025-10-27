@@ -29,6 +29,7 @@ cargo run -p deepseek-ocr-server --release -- \
 > **截断提示：** 如果客户端响应过早结束，请调大 `--max-new-tokens`（或请求体 `max_tokens`）。只要达到该上限，模型就会停止生成。
 
 ## 配置与覆盖
+
 | 平台 | 配置文件路径 | 权重缓存路径 |
 | --- | --- | --- |
 | Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/model.safetensors` |
