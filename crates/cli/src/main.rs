@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -9,6 +9,10 @@ use anyhow::{Context, Result, anyhow};
 use candle_core::{DType, Tensor};
 use clap::Parser;
 use deepseek_ocr_assets as assets;
+use deepseek_ocr_config::{
+    AppConfig, ConfigOverride, ConfigOverrides, LocalFileSystem, ResourceLocation,
+    VirtualFileSystem,
+};
 use deepseek_ocr_core::{
     inference::{
         build_prompt_tokens, compute_image_embeddings, normalize_text, prepare_vision_inputs,
@@ -23,6 +27,18 @@ use tokenizers::Tokenizer;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "DeepSeek-OCR CLI", long_about = None)]
 struct Args {
+    /// Optional path to a configuration file (defaults to platform config dir).
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    config: Option<PathBuf>,
+
+    /// Select which model entry to load from the configuration.
+    #[arg(long, value_name = "ID", help_heading = "Application")]
+    model: Option<String>,
+
+    /// Override the model configuration JSON path.
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    model_config: Option<PathBuf>,
+
     /// Prompt text. Use `<image>` tokens to denote image slots.
     #[arg(long, conflicts_with = "prompt_file")]
     prompt: Option<String>,
@@ -32,51 +48,47 @@ struct Args {
     prompt_file: Option<PathBuf>,
 
     /// Conversation template name (plain/deepseek/deepseekv2/alignment).
-    #[arg(long, default_value = "plain")]
-    template: String,
+    #[arg(long, help_heading = "Inference")]
+    template: Option<String>,
 
     /// Image files corresponding to `<image>` placeholders, in order.
     #[arg(long = "image", value_name = "PATH")]
     images: Vec<PathBuf>,
 
     /// Override the default tokenizer path.
-    #[arg(
-        long,
-        default_value = assets::DEFAULT_TOKENIZER_PATH,
-        value_name = "PATH"
-    )]
-    tokenizer: PathBuf,
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    tokenizer: Option<PathBuf>,
 
     /// Override the weights path (defaults to DeepSeek-OCR/model-*.safetensors).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
     weights: Option<PathBuf>,
 
     /// Device backend to execute on (cpu/metal/cuda).
-    #[arg(long, default_value = "cpu")]
-    device: DeviceKind,
+    #[arg(long, help_heading = "Inference")]
+    device: Option<DeviceKind>,
 
     /// Numeric precision. Defaults to f32 on CPU and f16 on Metal/CUDA.
-    #[arg(long)]
+    #[arg(long, help_heading = "Inference")]
     dtype: Option<Precision>,
 
     /// Global view resolution (defaults to 1024).
-    #[arg(long, default_value_t = 1024)]
-    base_size: u32,
+    #[arg(long, help_heading = "Inference")]
+    base_size: Option<u32>,
 
     /// Local crop resolution (defaults to 640).
-    #[arg(long, default_value_t = 640)]
-    image_size: u32,
+    #[arg(long, help_heading = "Inference")]
+    image_size: Option<u32>,
 
     /// Enable/disable dynamic crop mode (true/false).
-    #[arg(long, default_value_t = true)]
-    crop_mode: bool,
+    #[arg(long, help_heading = "Inference")]
+    crop_mode: Option<bool>,
 
     /// Maximum number of tokens to generate.
-    #[arg(long, default_value_t = 512)]
-    max_new_tokens: usize,
+    #[arg(long, help_heading = "Inference")]
+    max_new_tokens: Option<usize>,
 
     /// Disable KV-cache usage during decoding.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, help_heading = "Inference")]
     no_cache: bool,
 }
 
@@ -91,18 +103,32 @@ fn run() -> Result<()> {
     let args = Args::parse();
     let prompt_raw = load_prompt(&args)?;
 
-    let config_path = assets::ensure_config()?;
-    let weights_path = assets::resolve_weights(args.weights.as_deref())?;
+    let fs = LocalFileSystem::new("deepseek-ocr");
+    let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.config.as_deref())?;
+    app_config += &args;
+    app_config.normalise(&fs)?;
+    let resources = app_config.active_model_resources(&fs)?;
+
+    println!(
+        "Using configuration {} (active model `{}`)",
+        descriptor.location.display_with(&fs)?,
+        app_config.models.active
+    );
+
+    let config_path = ensure_config_file(&fs, &resources.config)?;
+    let tokenizer_path = ensure_tokenizer_file(&fs, &resources.tokenizer)?;
+    let weights_path = prepare_weights_path(&fs, &resources.weights)?;
 
     let (device, maybe_precision) =
-        prepare_device_and_dtype(args.device.clone(), args.dtype.clone())?;
+        prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
     let dtype = maybe_precision.unwrap_or_else(|| default_dtype_for_device(&device));
 
     println!(
-        "Loading model (device={:?}, dtype={:?}) from {}",
+        "Loading model `{}` (device={:?}, dtype={:?}) using config {}",
+        app_config.models.active,
         device,
         dtype,
-        weights_path.display()
+        config_path.display()
     );
     let load_start = Instant::now();
     let model = DeepseekOcrModel::load(
@@ -113,12 +139,12 @@ fn run() -> Result<()> {
     )
     .context("failed to load DeepSeek-OCR model")?;
     println!(
-        "Model ready in {:.2?} (flash-attn: {})",
+        "Model ready in {:.2?} (flash-attn: {}, weights={})",
         load_start.elapsed(),
-        model.flash_attention_enabled()
+        model.flash_attention_enabled(),
+        weights_path.display()
     );
 
-    let tokenizer_path = assets::ensure_tokenizer(&args.tokenizer)?;
     let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|err| {
         anyhow!(
             "failed to load tokenizer from {}: {err}",
@@ -126,7 +152,7 @@ fn run() -> Result<()> {
         )
     })?;
 
-    let prompt_with_template = render_prompt(&args.template, "", &prompt_raw)?;
+    let prompt_with_template = render_prompt(&app_config.inference.template, "", &prompt_raw)?;
     let image_slots = prompt_with_template.matches("<image>").count();
     anyhow::ensure!(
         image_slots == args.images.len(),
@@ -145,9 +171,9 @@ fn run() -> Result<()> {
     let owned_inputs = prepare_vision_inputs(
         &model,
         &images,
-        args.base_size,
-        args.image_size,
-        args.crop_mode,
+        app_config.inference.base_size,
+        app_config.inference.image_size,
+        app_config.inference.crop_mode,
     )?;
     let embeddings = compute_image_embeddings(&model, &owned_inputs)?;
 
@@ -156,9 +182,9 @@ fn run() -> Result<()> {
         &prompt_with_template,
         &embeddings,
         &owned_inputs,
-        args.base_size,
-        args.image_size,
-        args.crop_mode,
+        app_config.inference.base_size,
+        app_config.inference.image_size,
+        app_config.inference.crop_mode,
     )?;
 
     println!(
@@ -176,15 +202,13 @@ fn run() -> Result<()> {
     let mask_tensor = Tensor::from_vec(mask_vec.clone(), (1, mask_vec.len()), model.device())?
         .to_dtype(DType::U8)?;
 
-    let mut options = GenerateOptions::new(args.max_new_tokens);
+    let mut options = GenerateOptions::new(app_config.inference.max_new_tokens);
     options.images_seq_mask = Some(&mask_tensor);
     if !embeddings.is_empty() {
         options.image_embeddings = Some(embeddings.as_slice());
     }
     options.eos_token_id = model.language_model().config().eos_token_id;
-    if args.no_cache {
-        options.use_cache = false;
-    }
+    options.use_cache = app_config.inference.use_cache;
 
     let tokenizer_for_stream = tokenizer.clone();
     let progress_state = std::rc::Rc::new(std::cell::RefCell::new(0usize));
@@ -215,7 +239,7 @@ fn run() -> Result<()> {
 
     println!(
         "Starting generation with requested budget {} tokens.",
-        args.max_new_tokens
+        app_config.inference.max_new_tokens
     );
     println!("\n--- Generation start ---\n");
     let gen_start = Instant::now();
@@ -241,6 +265,65 @@ fn run() -> Result<()> {
     println!("\nFinal output:\n{}", normalized);
 
     Ok(())
+}
+
+fn ensure_config_file(fs: &LocalFileSystem, location: &ResourceLocation) -> Result<PathBuf> {
+    ensure_resource(fs, location, |path| assets::ensure_config_at(path))
+}
+
+fn ensure_tokenizer_file(fs: &LocalFileSystem, location: &ResourceLocation) -> Result<PathBuf> {
+    ensure_resource(fs, location, |path| assets::ensure_tokenizer_at(path))
+}
+
+fn prepare_weights_path(fs: &LocalFileSystem, location: &ResourceLocation) -> Result<PathBuf> {
+    ensure_resource(fs, location, |path| {
+        assets::resolve_weights_with_default(None, path)
+    })
+}
+
+impl From<&Args> for ConfigOverrides {
+    fn from(args: &Args) -> Self {
+        let mut overrides = ConfigOverrides::default();
+        overrides.config_path = args.config.clone();
+        overrides.model_id = args.model.clone();
+        overrides.model_config = args.model_config.clone();
+        overrides.tokenizer = args.tokenizer.clone();
+        overrides.weights = args.weights.clone();
+        overrides.inference.device = args.device;
+        overrides.inference.precision = args.dtype;
+        overrides.inference.template = args.template.clone();
+        overrides.inference.base_size = args.base_size;
+        overrides.inference.image_size = args.image_size;
+        overrides.inference.crop_mode = args.crop_mode;
+        overrides.inference.max_new_tokens = args.max_new_tokens;
+        if args.no_cache {
+            overrides.inference.use_cache = Some(false);
+        }
+        overrides
+    }
+}
+
+impl ConfigOverride for &Args {
+    fn apply(self, config: &mut AppConfig) {
+        config.apply_overrides(&ConfigOverrides::from(self));
+    }
+}
+
+fn ensure_resource<F>(
+    fs: &LocalFileSystem,
+    location: &ResourceLocation,
+    ensure_fn: F,
+) -> Result<PathBuf>
+where
+    F: Fn(&Path) -> Result<PathBuf>,
+{
+    match location {
+        ResourceLocation::Physical(path) => ensure_fn(path),
+        ResourceLocation::Virtual(vpath) => fs.with_physical_path(vpath, |physical| {
+            let resolved = ensure_fn(physical)?;
+            Ok(resolved)
+        }),
+    }
 }
 
 fn load_prompt(args: &Args) -> Result<String> {

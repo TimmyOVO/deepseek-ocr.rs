@@ -11,6 +11,7 @@ tokenizers = { workspace = true }
 candle-core = { workspace = true }
 deepseek-ocr-core = { workspace = true }
 deepseek-ocr-assets = { workspace = true }
+deepseek-ocr-config = { workspace = true }
 
 [features]
 default = []

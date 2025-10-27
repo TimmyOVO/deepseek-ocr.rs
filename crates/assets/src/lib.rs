@@ -130,32 +130,39 @@ impl ProgressTracker for SmoothedRate {
 }
 
 pub fn ensure_config() -> Result<PathBuf> {
-    let default_path = PathBuf::from(DEFAULT_CONFIG_PATH);
-    if default_path.exists() {
-        return Ok(default_path);
+    ensure_config_at(Path::new(DEFAULT_CONFIG_PATH))
+}
+
+pub fn ensure_config_at(target: &Path) -> Result<PathBuf> {
+    if target.exists() {
+        return Ok(target.to_path_buf());
     }
 
-    let fallback = PathBuf::from(DEFAULT_CONFIG_FILENAME);
-    if fallback.exists() {
-        return Ok(fallback);
-    }
-
-    download_asset(DEFAULT_CONFIG_FILENAME, Path::new(DEFAULT_CONFIG_PATH))
+    download_asset(DEFAULT_CONFIG_FILENAME, target)
 }
 
 pub fn ensure_tokenizer(path: &Path) -> Result<PathBuf> {
+    ensure_tokenizer_at(path)
+}
+
+pub fn ensure_tokenizer_at(path: &Path) -> Result<PathBuf> {
     if path.exists() {
         return Ok(path.to_path_buf());
     }
 
     if path != Path::new(DEFAULT_TOKENIZER_PATH) {
-        return Err(anyhow!("tokenizer file not found at {}", path.display()));
+        ensure_parent(path)?;
+        return download_asset(DEFAULT_TOKENIZER_FILENAME, path);
     }
 
     download_asset(DEFAULT_TOKENIZER_FILENAME, path)
 }
 
 pub fn resolve_weights(custom: Option<&Path>) -> Result<PathBuf> {
+    resolve_weights_with_default(custom, Path::new(DEFAULT_WEIGHTS_PATH))
+}
+
+pub fn resolve_weights_with_default(custom: Option<&Path>, default_path: &Path) -> Result<PathBuf> {
     if let Some(path) = custom {
         if path.exists() {
             return Ok(path.to_path_buf());
@@ -166,11 +173,11 @@ pub fn resolve_weights(custom: Option<&Path>) -> Result<PathBuf> {
         ));
     }
 
-    if Path::new(DEFAULT_WEIGHTS_PATH).exists() {
-        return Ok(PathBuf::from(DEFAULT_WEIGHTS_PATH));
+    if default_path.exists() {
+        return Ok(default_path.to_path_buf());
     }
 
-    download_asset(DEFAULT_WEIGHTS_FILENAME, Path::new(DEFAULT_WEIGHTS_PATH))
+    download_asset(DEFAULT_WEIGHTS_FILENAME, default_path)
 }
 
 fn download_asset(remote_name: &str, target: &Path) -> Result<PathBuf> {
@@ -239,10 +246,7 @@ fn download_from_modelscope(remote_name: &str, target: &Path) -> Result<PathBuf>
         }
     }
 
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    }
+    ensure_parent(target)?;
 
     let url = MODELSCOPE_DOWNLOAD_URL
         .replace("{model_id}", DEFAULT_MODELSCOPE_ID)
@@ -305,10 +309,7 @@ fn download_from_modelscope(remote_name: &str, target: &Path) -> Result<PathBuf>
 }
 
 fn copy_to_target(cached: &Path, target: &Path) -> Result<()> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    }
+    ensure_parent(target)?;
 
     if target.exists() && !target.is_file() {
         bail!(
@@ -327,6 +328,14 @@ fn copy_to_target(cached: &Path, target: &Path) -> Result<()> {
         })?;
     }
 
+    Ok(())
+}
+
+fn ensure_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
     Ok(())
 }
 

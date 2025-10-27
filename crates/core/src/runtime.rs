@@ -1,15 +1,18 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device};
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DeviceKind {
     Cpu,
     Metal,
     Cuda,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Precision {
     F32,
     F16,

@@ -15,6 +15,10 @@ use base64::Engine;
 use candle_core::{DType, Tensor};
 use clap::Parser;
 use deepseek_ocr_assets as assets;
+use deepseek_ocr_config::{
+    AppConfig, ConfigOverride, ConfigOverrides, LocalFileSystem, ResourceLocation,
+    VirtualFileSystem,
+};
 use deepseek_ocr_core::{
     inference::{
         build_prompt_tokens, compute_image_embeddings, normalize_text, prepare_vision_inputs,
@@ -389,53 +393,61 @@ impl StreamController {
 #[derive(Parser, Debug)]
 #[command(author, version, about = "DeepSeek-OCR API Server", long_about = None)]
 struct Args {
+    /// Optional path to a configuration file (defaults to platform config dir).
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    config: Option<PathBuf>,
+
+    /// Select the model entry to serve (configuration file).
+    #[arg(long, value_name = "ID", help_heading = "Application")]
+    model: Option<String>,
+
+    /// Override the model configuration JSON path.
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    model_config: Option<PathBuf>,
+
     /// Tokenizer path.
-    #[arg(
-        long,
-        default_value = deepseek_ocr_assets::DEFAULT_TOKENIZER_PATH,
-        value_name = "PATH"
-    )]
-    tokenizer: PathBuf,
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    tokenizer: Option<PathBuf>,
 
     /// Optional weights override (defaults to DeepSeek-OCR/model-*.safetensors).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
     weights: Option<PathBuf>,
 
     /// Device backend (cpu/metal/cuda).
-    #[arg(long, default_value = "cpu")]
-    device: DeviceKind,
+    #[arg(long, help_heading = "Inference")]
+    device: Option<DeviceKind>,
 
     /// Numeric precision override (cpu=f32 default, metal/cuda=f16).
-    #[arg(long)]
+    #[arg(long, help_heading = "Inference")]
     dtype: Option<Precision>,
 
     /// Global view resolution.
-    #[arg(long, default_value_t = 1024)]
-    base_size: u32,
+    #[arg(long, help_heading = "Inference")]
+    base_size: Option<u32>,
 
     /// Local crop resolution.
-    #[arg(long, default_value_t = 640)]
-    image_size: u32,
+    #[arg(long, help_heading = "Inference")]
+    image_size: Option<u32>,
 
     /// Enables dynamic crop mode.
-    #[arg(long, default_value_t = true)]
-    crop_mode: bool,
+    #[arg(long, help_heading = "Inference")]
+    crop_mode: Option<bool>,
 
     /// Default max tokens budget per request.
-    #[arg(long, default_value_t = 512)]
-    max_new_tokens: usize,
+    #[arg(long, help_heading = "Inference")]
+    max_new_tokens: Option<usize>,
 
     /// Host/IP for Rocket to bind to.
-    #[arg(long, default_value = "0.0.0.0")]
-    host: String,
+    #[arg(long, help_heading = "Application")]
+    host: Option<String>,
 
     /// TCP port for Rocket.
-    #[arg(long, default_value_t = 8000)]
-    port: u16,
+    #[arg(long, help_heading = "Application")]
+    port: Option<u16>,
 
     /// Model identifier returned by /models.
-    #[arg(long, default_value = "deepseek-ocr")]
-    model_id: String,
+    #[arg(long, help_heading = "Application")]
+    model_id: Option<String>,
 }
 
 struct AppState {
@@ -472,27 +484,48 @@ impl GenerationInputs {
 #[rocket::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let weights_path = prepare_weights(args.weights.as_ref())?;
-    let (device, maybe_dtype) = prepare_device_and_dtype(args.device, args.dtype)?;
+    let fs = LocalFileSystem::new("deepseek-ocr");
+    let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.config.as_deref())?;
+    app_config += &args;
+    app_config.normalise(&fs)?;
+    let resources = app_config.active_model_resources(&fs)?;
+
+    println!(
+        "Using configuration {} (active model `{}`)",
+        descriptor.location.display_with(&fs)?,
+        app_config.models.active
+    );
+
+    let config_path = ensure_config_file(&fs, &resources.config)?;
+    let tokenizer_path = ensure_tokenizer_file(&fs, &resources.tokenizer)?;
+    let weights_path = prepare_weights_path(&fs, &resources.weights)?;
+
+    let (device, maybe_dtype) =
+        prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
     let dtype = maybe_dtype.unwrap_or_else(|| default_dtype_for_device(&device));
-    let config_path = prepare_config()?;
+
     let model = DeepseekOcrModel::load(Some(&config_path), Some(&weights_path), device, dtype)
         .context("failed to load DeepSeek-OCR model")?;
-    let tokenizer = prepare_tokenizer(&args.tokenizer)?;
+    let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|err| {
+        anyhow!(
+            "failed to load tokenizer from {}: {err}",
+            tokenizer_path.display()
+        )
+    })?;
 
     let state = AppState {
         model: Arc::new(Mutex::new(model)),
         tokenizer: Arc::new(tokenizer),
-        base_size: args.base_size,
-        image_size: args.image_size,
-        crop_mode: args.crop_mode,
-        max_new_tokens: args.max_new_tokens,
-        model_id: args.model_id.clone(),
+        base_size: app_config.inference.base_size,
+        image_size: app_config.inference.image_size,
+        crop_mode: app_config.inference.crop_mode,
+        max_new_tokens: app_config.inference.max_new_tokens,
+        model_id: app_config.server.model_id.clone(),
     };
 
     let figment = Config::figment()
-        .merge(("port", args.port))
-        .merge(("address", args.host.clone()))
+        .merge(("port", app_config.server.port))
+        .merge(("address", app_config.server.host.clone()))
         .merge((
             "limits",
             rocket::data::Limits::default()
@@ -502,7 +535,7 @@ async fn main() -> Result<()> {
 
     println!(
         "Server ready on {}:{} ({})",
-        args.host, args.port, state.model_id
+        app_config.server.host, app_config.server.port, state.model_id
     );
 
     rocket::custom(figment)
@@ -944,22 +977,61 @@ fn fetch_remote_image(url: &str) -> Result<DynamicImage, ApiError> {
         .map_err(|err| ApiError::BadRequest(format!("failed to decode remote image: {err}")))
 }
 
-fn prepare_config() -> Result<PathBuf> {
-    assets::ensure_config()
+fn ensure_config_file(fs: &LocalFileSystem, location: &ResourceLocation) -> Result<PathBuf> {
+    ensure_resource(fs, location, |path| assets::ensure_config_at(path))
 }
 
-fn prepare_weights(custom: Option<&PathBuf>) -> Result<PathBuf> {
-    assets::resolve_weights(custom.map(PathBuf::as_path))
+fn ensure_tokenizer_file(fs: &LocalFileSystem, location: &ResourceLocation) -> Result<PathBuf> {
+    ensure_resource(fs, location, |path| assets::ensure_tokenizer_at(path))
 }
 
-fn prepare_tokenizer(path: &Path) -> Result<Tokenizer> {
-    let tokenizer_path = assets::ensure_tokenizer(path)?;
-    Tokenizer::from_file(&tokenizer_path).map_err(|err| {
-        anyhow!(
-            "failed to load tokenizer from {}: {err}",
-            tokenizer_path.display()
-        )
+fn prepare_weights_path(fs: &LocalFileSystem, location: &ResourceLocation) -> Result<PathBuf> {
+    ensure_resource(fs, location, |path| {
+        assets::resolve_weights_with_default(None, path)
     })
+}
+
+impl From<&Args> for ConfigOverrides {
+    fn from(args: &Args) -> Self {
+        let mut overrides = ConfigOverrides::default();
+        overrides.config_path = args.config.clone();
+        overrides.model_id = args.model.clone();
+        overrides.model_config = args.model_config.clone();
+        overrides.tokenizer = args.tokenizer.clone();
+        overrides.weights = args.weights.clone();
+        overrides.inference.device = args.device;
+        overrides.inference.precision = args.dtype;
+        overrides.inference.base_size = args.base_size;
+        overrides.inference.image_size = args.image_size;
+        overrides.inference.crop_mode = args.crop_mode;
+        overrides.inference.max_new_tokens = args.max_new_tokens;
+        overrides.server.host = args.host.clone();
+        overrides.server.port = args.port;
+        overrides.server.model_id = args.model_id.clone();
+        overrides
+    }
+}
+
+impl ConfigOverride for &Args {
+    fn apply(self, config: &mut AppConfig) {
+        config.apply_overrides(&ConfigOverrides::from(self));
+    }
+}
+
+fn ensure_resource<F>(
+    fs: &LocalFileSystem,
+    location: &ResourceLocation,
+    ensure_fn: F,
+) -> Result<PathBuf>
+where
+    F: Fn(&Path) -> Result<PathBuf>,
+{
+    match location {
+        ResourceLocation::Physical(path) => ensure_fn(path),
+        ResourceLocation::Virtual(vpath) => {
+            fs.with_physical_path(vpath, |physical| ensure_fn(physical))
+        }
+    }
 }
 
 fn ensure_model(requested: &str, available: &str) -> Result<(), ApiError> {
