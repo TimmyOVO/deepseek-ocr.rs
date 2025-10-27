@@ -6,6 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }
+deepseek-ocr-core = { workspace = true }
 toml = "0.8"
 dirs = "5.0"
-deepseek-ocr-core = { workspace = true }
