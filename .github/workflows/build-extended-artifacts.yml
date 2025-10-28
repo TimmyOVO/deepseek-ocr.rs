@@ -1,7 +1,6 @@
 name: build-extended-artifacts
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - master
