@@ -26,5 +26,6 @@ tracing-subscriber = { workspace = true }
 [features]
 default = []
 metal = ["deepseek-ocr-core/metal"]
+accelerate = ["deepseek-ocr-core/accelerate"]
 flash-attn = ["deepseek-ocr-core/flash-attn"]
 cuda = ["deepseek-ocr-core/cuda"]

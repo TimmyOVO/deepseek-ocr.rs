@@ -1,9 +1,11 @@
 use std::{
+    convert::TryFrom,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::{Context, Result, ensure};
+use candle_core::scalar::Scalar;
 use candle_core::{DType, Device, Tensor, shape::D};
 use candle_nn::VarBuilder;
 use image::GenericImageView;
@@ -1239,6 +1241,7 @@ impl DeepseekOcrModel {
         }
 
         let mut generated = Vec::with_capacity(options.max_new_tokens);
+        let decode_token = Tensor::zeros((1, 1), DType::I64, self.device())?; // reused single-token buffer
         let decode_timer = Timer::new("decode.iterative");
         for step in 0..options.max_new_tokens {
             generated.push(current);
@@ -1248,11 +1251,18 @@ impl DeepseekOcrModel {
             if step + 1 == options.max_new_tokens {
                 break;
             }
-            let next_input =
-                Tensor::from_slice(&[current], (1, 1), self.device())?.to_dtype(DType::I64)?;
+            decode_token.const_set(Scalar::I64(current))?;
+            let token_index = usize::try_from(current)
+                .context("token id out of range while preparing decode embedding")?;
+            let decode_inputs = self
+                .language
+                .token_embedding_for_id(token_index)
+                .context("failed to gather embedding for decode token")?
+                .unsqueeze(0)?
+                .unsqueeze(0)?;
             let decode = self.forward(
-                Some(&next_input),
                 None,
+                Some(&decode_inputs),
                 None,
                 None,
                 None,

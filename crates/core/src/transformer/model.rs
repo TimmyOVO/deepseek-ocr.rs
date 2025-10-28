@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use candle_core::{DType, Tensor};
+use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::ops::rms_norm;
 
 use crate::{
@@ -99,6 +99,15 @@ impl DeepseekLanguageModel {
             input_ids.to_dtype(DType::I64)?
         };
         gather_embeddings(&self.token_embedding, &ids)
+    }
+
+    pub fn token_embedding_for_id(&self, token_id: usize) -> Result<Tensor> {
+        let (vocab, _) = self.token_embedding.shape().dims2()?;
+        ensure!(
+            token_id < vocab,
+            "token id {token_id} out of bounds for vocab size {vocab}"
+        );
+        Ok(self.token_embedding.i(token_id)?)
     }
 
     pub fn prompt_guard<'a>(&'a self, cache: &'a mut DynamicCache) -> PromptCacheGuard<'a> {
