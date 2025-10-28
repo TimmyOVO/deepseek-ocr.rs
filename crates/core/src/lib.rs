@@ -7,6 +7,9 @@ pub mod runtime;
 pub mod transformer;
 pub mod vision;
 
+// #[cfg(feature = "mkl")]
+// extern crate intel_mkl_src;
+
 #[cfg(feature = "memlog")]
 pub mod memlog;
 

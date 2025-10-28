@@ -36,6 +36,10 @@ cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",
 ]
+mkl = [
+    "candle-core/mkl",
+    "candle-nn/mkl",
+]
 
 [dev-dependencies]
 ndarray = "0.16"
