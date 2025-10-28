@@ -46,7 +46,7 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: false
-          tags: ghcr.io/${{ github.repository }}:${{ matrix.variant }}-ci
+          load: true
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,scope=${{ matrix.variant }},mode=max
 
@@ -80,7 +80,8 @@ jobs:
     env:
       CUDA_INSTALL_DIR: C:\CUDA\Installer
       CUDA_VERSION: "12.2.0"
-      CUDA_BASE_URL: https://developer.download.nvidia.com/compute/cuda
+      CUDA_INSTALLER_NAME: cuda_12.2.0_windows_network.exe
+      CUDA_INSTALLER_URL: https://developer.download.nvidia.com/compute/cuda/12.2.0/network_installers/cuda_12.2.0_windows_network.exe
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -114,10 +115,9 @@ jobs:
         if: steps.cache-cuda-installer.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          $installer = Join-Path $env:CUDA_INSTALL_DIR "cuda_${{ env.CUDA_VERSION }}_windows_network.exe"
-          $url = "$($env:CUDA_BASE_URL)/${{ env.CUDA_VERSION }}/local_installers/cuda_${{ env.CUDA_VERSION }}_windows_network.exe"
-          Write-Host "Downloading CUDA from $url"
-          Invoke-WebRequest -Uri $url -OutFile $installer
+          $installer = Join-Path $env:CUDA_INSTALL_DIR $env:CUDA_INSTALLER_NAME
+          Write-Host "Downloading CUDA from $env:CUDA_INSTALLER_URL"
+          Invoke-WebRequest -Uri $env:CUDA_INSTALLER_URL -OutFile $installer
 
       - name: Install CUDA toolkit
         shell: pwsh
