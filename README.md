@@ -44,6 +44,7 @@ The original DeepSeek-OCR ships as a Python + Transformers stack—powerful, but
 - **Works out of the box** – pulls model weights, configs, and tokenizer from whichever of Hugging Face or ModelScope responds fastest on first run.
 - **Optimised for Apple Silicon** – optional Metal backend with FP16 execution for real-time OCR on laptops.
 - **CUDA (alpha)** – experimental support via `--features cuda` + `--device cuda --dtype f16`; expect rough edges while we finish kernel coverage.
+- **Intel MKL (preview)** – faster BLAS on x86 via `--features mkl` (install Intel oneMKL beforehand).
 - **OpenAI client compatibility** – drop-in replacement for popular SDKs; the server automatically collapses chat history to the latest user turn for OCR-friendly prompts.
 
 ## Quick Start 🏁
@@ -54,6 +55,7 @@ The original DeepSeek-OCR ships as a Python + Transformers stack—powerful, but
 - Git
 - Optional: Apple Silicon running macOS 13+ for Metal acceleration
 - Optional: CUDA 12.2+ toolkit + driver for experimental NVIDIA GPU acceleration on Linux/Windows
+- Optional: Intel oneAPI MKL for preview x86 acceleration (see below)
 - (Recommended) Hugging Face account with `HF_TOKEN` when pulling from the `deepseek-ai/DeepSeek-OCR` repo (ModelScope is used automatically when it’s faster/reachable).
 
 ### Clone the Workspace
@@ -148,6 +150,8 @@ cargo run -p deepseek-ocr-cli --release -- \
 > macOS tip: append `--features metal` to the `cargo run`/`cargo build` commands to compile with Accelerate + Metal backends.
 >
 > CUDA tip (Linux/Windows): append `--features cuda` and run with `--device cuda --dtype f16` to target NVIDIA GPUs—feature is still alpha, so be ready for quirks.
+>
+> Intel MKL preview: install Intel oneMKL, then build with `--features mkl` for faster CPU matmuls on x86.
 
 Install the CLI as a binary:
 
@@ -177,6 +181,8 @@ cargo run -p deepseek-ocr-server --release -- \
 > macOS tip: add `--features metal` to the `cargo run -p deepseek-ocr-server` command when you want the server binary to link against Accelerate + Metal (and pair it with `--device metal` at runtime).
 >
 > CUDA tip: add `--features cuda` and start the server with `--device cuda --dtype f16` to offload inference to NVIDIA GPUs (alpha-quality support).
+>
+> Intel MKL preview: install Intel oneMKL before building with `--features mkl` to accelerate CPU workloads on x86.
 
 Notes:
 
@@ -191,6 +197,7 @@ Notes:
 
 - **Metal (macOS 13+ Apple Silicon)** – pass `--device metal --dtype f16` and build binaries with `--features metal` so Candle links against Accelerate + Metal.
 - **CUDA (alpha, NVIDIA GPUs)** – install CUDA 12.2+ toolkits, build with `--features cuda`, and launch the CLI/server with `--device cuda --dtype f16`; still experimental.
+- **Intel MKL (preview)** – install Intel oneMKL and build with `--features mkl` to speed up CPU workloads on x86.
 - For either backend, prefer release builds (e.g. `cargo build --release -p deepseek-ocr-cli --features metal|cuda`) to maximise throughput.
 - Combine GPU runs with `--max-new-tokens` and crop tuning flags to balance latency vs. quality.
 

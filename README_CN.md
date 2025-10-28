@@ -44,6 +44,7 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 - **开箱即用**：首次运行自动从 Hugging Face 或 ModelScope（取决于实时延迟）拉取配置、Tokenizer 与权重。
 - **Apple Silicon 友好**：Metal + FP16 加速让笔记本也能实时 OCR。
 - **NVIDIA GPU（α 测试）**：构建时附加 `--features cuda` 并以 `--device cuda --dtype f16` 运行，可在 Linux/Windows 上尝鲜 CUDA 加速。
+- **Intel MKL（预览）**：安装 Intel oneMKL 后，构建时附加 `--features mkl` 以提升 x86 CPU 上的矩阵运算速度。
 - **OpenAI 客户端即插即用**：Server 端自动折叠多轮对话，只保留最新 user 指令，避免 OCR 模型被多轮上下文干扰。
 
 ## 快速上手 🏁
@@ -54,6 +55,7 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 - Git
 - 可选：macOS 13+ 的 Apple Silicon（用于 Metal）
 - 可选：Linux/Windows 的 NVIDIA GPU（需 CUDA 12.2+ 工具链与驱动，当前为alpha阶段）
+- 可选：x86 平台安装 Intel oneMKL（预览），用于提升 CPU 推理性能
 - 推荐：配置 `HF_TOKEN` 访问 Hugging Face `deepseek-ai/DeepSeek-OCR`（若该源不可用会自动切换 ModelScope）
 
 ### 克隆仓库
@@ -76,7 +78,7 @@ cargo run -p deepseek-ocr-cli --release -- --help # dev profile 极慢，建议�
 
 ### 预构建产物
 
-不想自己编译？每次推送到 `main` 都会在 [build-binaries 工作流](https://github.com/TimmyOVO/deepseek-ocr.rs/actions/workflows/build-binaries.yml) 里产出 macOS（含 Metal）和 Windows 压缩包。登录 GitHub，打开最新一次绿色运行，下载 `deepseek-ocr-macos` 或 `deepseek-ocr-windows` 即可。
+不想自己编译？点这里 [Github Actions](https://github.com/TimmyOVO/deepseek-ocr.rs/actions/workflows/build-binaries.yml) 里产出 macOS（含 Metal）和 Windows 压缩包。登录 GitHub，打开最新一次绿色运行，下载 `deepseek-ocr-macos` 或 `deepseek-ocr-windows` 即可。
 
 ## 配置与优先级 🗂️
 
@@ -149,6 +151,8 @@ cargo run -p deepseek-ocr-cli --release -- \
 > macOS 用户可以在 `cargo run`/`cargo build` 命令后附加 `--features metal` 以启用 Accelerate + Metal 后端。
 >
 > Linux/Windows 用户：附加 `--features cuda` 并在运行参数中加入 `--device cuda --dtype f16`，即可使用 NVIDIA GPU 加速。
+>
+> Intel MKL 预览：先安装 Intel oneMKL，构建时附加 `--features mkl`，可在 x86 CPU 上取得更高的矩阵运算性能。
 
 安装成全局二进制：
 
@@ -176,6 +180,8 @@ cargo run -p deepseek-ocr-server --release -- \
 
 > 如果要在 macOS 上启用 Metal，请为以上命令加上 `--features metal`，同时运行时配合 `--device metal`。
 >
+> Intel MKL 预览：构建前安装 Intel oneMKL，再附加 `--features mkl`，即可在 x86 CPU 上获得更快的推理速度。
+>
 > 若在 Linux/Windows 上使用 NVIDIA GPU，请加上 `--features cuda` 并以 `--device cuda --dtype f16` 启动服务。
 
 注意事项：
@@ -191,6 +197,7 @@ cargo run -p deepseek-ocr-server --release -- \
 
 - **Metal（macOS 13+ & Apple Silicon）**：构建命令附加 `--features metal`，运行时使用 `--device metal --dtype f16`。
 - **CUDA（alpha，Linux/Windows & NVIDIA GPU）**：提前安装 CUDA 12.2+，构建时加 `--features cuda`，执行时传入 `--device cuda --dtype f16`。
+- **Intel MKL（预览）**：安装 Intel oneMKL，构建时附加 `--features mkl`，可提升 x86 CPU 推理性能。
 - 无论使用哪种 GPU，推荐 `cargo build --release -p deepseek-ocr-cli --features metal|cuda` 以获取更高吞吐。
 - 结合 `--max-new-tokens`、`--crop-mode` 等参数可在延迟与质量之间做权衡。
 
