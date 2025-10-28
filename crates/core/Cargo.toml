@@ -40,3 +40,8 @@ cuda = [
 [dev-dependencies]
 ndarray = "0.16"
 ndarray-npy = "0.9"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
