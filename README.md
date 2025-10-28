@@ -118,6 +118,20 @@ model_id = "deepseek-ocr"
 
 See `crates/cli/README.md` and `crates/server/README.md` for concise override tables.
 
+## Benchmark Snapshot 📊
+
+Single-request Rust CLI (Accelerate backend on macOS) compared with the reference Python pipeline on the same prompt and image:
+
+| Stage                                             | ref total (ms) | ref avg (ms) | python total | python/ref |
+|---------------------------------------------------|----------------|--------------|--------------|------------|
+| Decode – Overall (`decode.generate`)              | 30077.840      | 30077.840    | 56554.873    | 1.88x      |
+| Decode – Token Loop (`decode.iterative`)          | 26930.216      | 26930.216    | 39227.974    | 1.46x      |
+| Decode – Prompt Prefill (`decode.prefill`)        | 3147.337       | 3147.337     | 5759.684     | 1.83x      |
+| Prompt – Build Tokens (`prompt.build_tokens`)     | 0.466          | 0.466        | 45.434       | 97.42x     |
+| Prompt – Render Template (`prompt.render`)        | 0.005          | 0.005        | 0.019        | 3.52x      |
+| Vision – Embed Images (`vision.compute_embeddings`)| 6391.435      | 6391.435     | 3953.459     | 0.62x      |
+| Vision – Prepare Inputs (`vision.prepare_inputs`) | 62.524         | 62.524       | 45.438       | 0.73x      |
+
 ## Command-Line Interface 🖥️
 
 Build and run directly from the workspace:

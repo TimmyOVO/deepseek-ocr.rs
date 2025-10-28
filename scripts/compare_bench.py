@@ -26,21 +26,54 @@ def load_stage_totals(path: Path) -> Dict[str, Dict[str, float]]:
     return mapping
 
 
-def format_row(values: Iterable[str]) -> str:
-    return " | ".join(f"{value:<18}" for value in values)
+FRIENDLY_STAGE_NAMES: Dict[str, str] = {
+    "decode.generate": "Decode – Overall",
+    "decode.iterative": "Decode – Token Loop",
+    "decode.prefill": "Decode – Prompt Prefill",
+    "decode.generate_no_cache": "Decode – No Cache",
+    "prompt.build_tokens": "Prompt – Build Tokens",
+    "prompt.render": "Prompt – Render Template",
+    "vision.compute_embeddings": "Vision – Embed Images",
+    "vision.prepare_inputs": "Vision – Prepare Inputs",
+    "vision.compute_projection": "Vision – Project Features",
+    "vision.prepare_masks": "Vision – Prepare Masks",
+}
+
+
+def friendly_stage_name(stage: str) -> str:
+    if stage in FRIENDLY_STAGE_NAMES:
+        return f"{FRIENDLY_STAGE_NAMES[stage]} ({stage})"
+    cleaned = stage.replace(".", " ").replace("_", " ")
+    pretty = " ".join(part.capitalize() for part in cleaned.split())
+    if not pretty:
+        return stage
+    return f"{pretty} ({stage})"
+
+
+def render_table(header: List[str], rows: List[List[str]]) -> None:
+    table = [header] + rows
+    widths = [max(len(row[idx]) for row in table) for idx in range(len(header))]
+
+    def fmt(row: Iterable[str]) -> str:
+        return " | ".join(value.ljust(widths[idx]) for idx, value in enumerate(row))
+
+    print(fmt(header))
+    separator = "-+-".join("-" * width for width in widths)
+    print(separator)
+    for row in rows:
+        print(fmt(row))
 
 
 def compare(reference: Dict[str, Dict[str, float]], targets: List[Tuple[str, Dict[str, Dict[str, float]]]]) -> None:
     header = ["stage", "ref total (ms)", "ref avg (ms)"]
     for label, _ in targets:
         header.extend([f"{label} total", f"{label}/ref"])
-    print(format_row(header))
-    print("-" * (len(header) * 21))
 
     stages = sorted(reference.keys() | {stage for _, data in targets for stage in data.keys()})
+    rows: List[List[str]] = []
     for stage in stages:
         ref = reference.get(stage)
-        row = [stage]
+        row = [friendly_stage_name(stage)]
         if ref:
             row.append(f"{ref['total_ms']:.3f}")
             row.append(f"{ref['avg_ms']:.3f}")
@@ -57,7 +90,9 @@ def compare(reference: Dict[str, Dict[str, float]], targets: List[Tuple[str, Dic
                     row.append("-")
             else:
                 row.extend(["-", "-"])
-        print(format_row(row))
+        rows.append(row)
+
+    render_table(header, rows)
 
 
 def parse_args() -> argparse.Namespace:

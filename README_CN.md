@@ -121,6 +121,20 @@ model_id = "deepseek-ocr"
 
 更多覆盖项详见 `crates/cli/README_CN.md` 与 `crates/server/README_CN.md`。
 
+## 基准对比 📊
+
+下表展示在同一张图像与提示词下，启用了 Accelerate 的 Rust CLI（单次请求）与 Python 参考实现的性能表现：
+
+| 阶段（Stage）                                     | ref total (ms) | ref avg (ms) | python total | python/ref |
+|--------------------------------------------------|----------------|--------------|--------------|------------|
+| Decode – Overall (`decode.generate`)             | 30077.840      | 30077.840    | 56554.873    | 1.88x      |
+| Decode – Token Loop (`decode.iterative`)         | 26930.216      | 26930.216    | 39227.974    | 1.46x      |
+| Decode – Prompt Prefill (`decode.prefill`)       | 3147.337       | 3147.337     | 5759.684     | 1.83x      |
+| Prompt – Build Tokens (`prompt.build_tokens`)    | 0.466          | 0.466        | 45.434       | 97.42x     |
+| Prompt – Render Template (`prompt.render`)       | 0.005          | 0.005        | 0.019        | 3.52x      |
+| Vision – Embed Images (`vision.compute_embeddings`)| 6391.435     | 6391.435     | 3953.459     | 0.62x      |
+| Vision – Prepare Inputs (`vision.prepare_inputs`)| 62.524         | 62.524       | 45.438       | 0.73x      |
+
 ## 命令行工具 🖥️
 
 直接运行：
