@@ -14,6 +14,8 @@ RUN apt-get update && \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain stable
 ENV PATH=/root/.cargo/bin:${PATH}
+# Skip nvidia-smi detection during build; use generic compute capability
+ENV CUDA_COMPUTE_CAP=80
 
 WORKDIR /app
 COPY . .
