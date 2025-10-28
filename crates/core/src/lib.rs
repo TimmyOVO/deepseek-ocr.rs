@@ -1,3 +1,4 @@
+pub mod benchmark;
 pub mod config;
 pub mod conversation;
 pub mod inference;

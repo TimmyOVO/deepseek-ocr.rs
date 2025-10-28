@@ -4,3 +4,4 @@ target
 .DS_Store
 DeepSeek-OCR
 baselines/sample
+__pycache__

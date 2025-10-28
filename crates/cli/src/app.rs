@@ -23,11 +23,15 @@ use tracing::info;
 
 use crate::{
     args::Args,
+    bench,
     prompt::load_prompt,
     resources::{ensure_config_file, ensure_tokenizer_file, prepare_weights_path},
 };
 
 pub fn run(args: Args) -> Result<()> {
+    let bench_enabled = args.bench || args.bench_output.is_some();
+    let bench_session = bench::maybe_start(bench_enabled, args.bench_output.clone())?;
+
     let prompt_raw = load_prompt(&args)?;
 
     let fs = LocalFileSystem::new("deepseek-ocr");
@@ -191,6 +195,11 @@ pub fn run(args: Args) -> Result<()> {
         .unwrap_or_default();
     let normalized = normalize_text(&decoded);
     info!("Final output:\n{normalized}");
+
+    if let Some(session) = bench_session {
+        let report = session.finalize()?;
+        bench::print_summary(&report);
+    }
 
     Ok(())
 }

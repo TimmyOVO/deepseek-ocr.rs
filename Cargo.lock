@@ -658,6 +658,8 @@ dependencies = [
  "deepseek-ocr-config",
  "deepseek-ocr-core",
  "image",
+ "serde",
+ "serde_json",
  "tokenizers",
  "tracing",
  "tracing-subscriber",

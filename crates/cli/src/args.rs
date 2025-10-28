@@ -70,6 +70,14 @@ pub struct Args {
     /// Disable KV-cache usage during decoding.
     #[arg(long, help_heading = "Inference")]
     pub no_cache: bool,
+
+    /// Enable benchmark instrumentation (requires `bench-metrics` feature).
+    #[arg(long, help_heading = "Benchmark")]
+    pub bench: bool,
+
+    /// Write benchmark events to a JSON file.
+    #[arg(long, value_name = "PATH", help_heading = "Benchmark")]
+    pub bench_output: Option<PathBuf>,
 }
 
 impl From<&Args> for ConfigOverrides {

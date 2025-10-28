@@ -22,6 +22,7 @@ default = []
 dhat-heap = []
 memlog = []
 flash-attn = ["candle-flash-attn"]
+bench-metrics = []
 metal = [
     "candle-core/metal",
     "candle-core/accelerate",

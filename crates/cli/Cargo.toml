@@ -14,6 +14,8 @@ deepseek-ocr-assets = { workspace = true }
 deepseek-ocr-config = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 default = []
@@ -22,3 +24,4 @@ memlog = ["deepseek-ocr-core/memlog"]
 flash-attn = ["deepseek-ocr-core/flash-attn"]
 metal = ["deepseek-ocr-core/metal"]
 cuda = ["deepseek-ocr-core/cuda"]
+bench-metrics = ["deepseek-ocr-core/bench-metrics"]

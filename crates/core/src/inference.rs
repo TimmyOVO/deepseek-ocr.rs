@@ -1,4 +1,3 @@
-use std::time::Instant;
 use tracing::trace;
 
 use anyhow::{Context, Result, anyhow};
@@ -7,19 +6,25 @@ use image::DynamicImage;
 use tokenizers::Tokenizer;
 
 use crate::{
+    benchmark::Timer,
     conversation::get_conv_template,
     model::{DeepseekOcrModel, OwnedVisionInput, VisionInput},
 };
 
 /// Render a prompt using the configured conversation template and system prompt.
 pub fn render_prompt(template: &str, system_prompt: &str, raw_prompt: &str) -> Result<String> {
+    let timer = Timer::new("prompt.render");
     let mut template = get_conv_template(template)
         .with_context(|| format!("unknown conversation template {template}"))?;
     template.set_system_message(system_prompt.to_owned());
     template.reset_messages();
     template.append_message("User", Some(raw_prompt.to_owned()));
     template.append_message("Assistant", None);
-    Ok(template.get_prompt())
+    let prompt = template.get_prompt();
+    timer.finish(|event| {
+        event.add_field("chars", prompt.len() as u64);
+    });
+    Ok(prompt)
 }
 
 /// Prepare SAM/CLIP inputs for the provided images.
@@ -30,19 +35,34 @@ pub fn prepare_vision_inputs(
     image_size: u32,
     crop_mode: bool,
 ) -> Result<Vec<OwnedVisionInput>> {
+    let timer = Timer::new("vision.prepare_inputs");
     if !images.is_empty() {
         trace!(
             "Preparing vision input (base_size={base_size}, image_size={image_size}, crop_mode={crop_mode})"
         );
     }
-    images
+    let result = images
         .iter()
         .map(|image| {
             model
                 .prepare_vision_input_from_image(image, base_size, image_size, crop_mode)
                 .with_context(|| "failed to build vision input")
         })
-        .collect()
+        .collect::<Result<Vec<_>>>();
+    match &result {
+        Ok(inputs) => {
+            timer.finish(|event| {
+                event.add_field("images", inputs.len());
+                event.add_field("base_size", base_size as u64);
+                event.add_field("image_size", image_size as u64);
+                event.add_field("crop_mode", crop_mode);
+            });
+        }
+        Err(_) => {
+            timer.finish(|_| {});
+        }
+    }
+    result
 }
 
 /// Compute image embeddings for the prepared SAM inputs.
@@ -50,7 +70,11 @@ pub fn compute_image_embeddings(
     model: &DeepseekOcrModel,
     owned_inputs: &[OwnedVisionInput],
 ) -> Result<Vec<Tensor>> {
+    let timer = Timer::new("vision.compute_embeddings");
     if owned_inputs.is_empty() {
+        timer.finish(|event| {
+            event.add_field("images", 0u64);
+        });
         return Ok(Vec::new());
     }
     let refs: Vec<Option<VisionInput<'_>>> = owned_inputs
@@ -58,10 +82,25 @@ pub fn compute_image_embeddings(
         .map(|owned| Some(owned.as_ref()))
         .collect();
     trace!("Computing image embeddings for {} image(s)...", refs.len());
-    let start = Instant::now();
-    let outputs = model.compute_image_embeddings(&refs)?;
-    trace!("Image embeddings computed in {:.2?}", start.elapsed());
-    Ok(outputs)
+    let outputs = model.compute_image_embeddings(&refs);
+    match &outputs {
+        Ok(values) => {
+            let tokens_total: u64 = values
+                .iter()
+                .map(|tensor| tensor.shape().dims().first().copied().unwrap_or(0) as u64)
+                .sum();
+            timer.finish(|event| {
+                event.add_field("images", refs.len());
+                event.add_field("device_is_cuda", model.device().is_cuda());
+                event.add_field("device_is_metal", model.device().is_metal());
+                event.add_field("token_rows_total", tokens_total);
+            });
+        }
+        Err(_) => {
+            timer.finish(|_| {});
+        }
+    }
+    outputs
 }
 
 /// Tokenise a prompt and align `<image>` placeholders with the computed embeddings.
@@ -74,6 +113,7 @@ pub fn build_prompt_tokens(
     image_size: u32,
     crop_mode: bool,
 ) -> Result<(Vec<i64>, Vec<u8>)> {
+    let timer = Timer::new("prompt.build_tokens");
     let image_token_id = tokenizer
         .token_to_id("<image>")
         .ok_or_else(|| anyhow!("tokenizer missing <image> token"))? as i64;
@@ -121,6 +161,15 @@ pub fn build_prompt_tokens(
             mask.extend(std::iter::repeat(1u8).take(placeholders.len()));
         }
     }
+
+    let total_tokens = tokens.len();
+    let image_tokens = mask.iter().filter(|&&flag| flag != 0).count();
+    timer.finish(|event| {
+        event.add_field("tokens", total_tokens);
+        event.add_field("image_tokens", image_tokens);
+        event.add_field("segments", segments.len());
+        event.add_field("crop_mode", crop_mode);
+    });
 
     Ok((tokens, mask))
 }

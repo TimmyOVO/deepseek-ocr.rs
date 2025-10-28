@@ -10,6 +10,7 @@ use image::GenericImageView;
 use image::{DynamicImage, Rgb, RgbImage, imageops};
 
 use crate::{
+    benchmark::Timer,
     config::{DeepseekOcrConfig, ProjectorConfig, load_ocr_config},
     transformer::{
         cache::{DynamicCache, PromptCacheGuard},
@@ -1170,6 +1171,7 @@ impl DeepseekOcrModel {
 
     /// Greedy autoregressive generation for the multimodal model.
     pub fn generate(&self, input_ids: &Tensor, options: GenerateOptions<'_>) -> Result<Tensor> {
+        let total_timer = Timer::new("decode.generate");
         ensure!(
             input_ids.rank() == 2,
             "generate expects input_ids with shape [batch, seq]"
@@ -1180,15 +1182,26 @@ impl DeepseekOcrModel {
             "generate currently supports batch size 1 (got {batch})"
         );
         if !options.use_cache {
+            total_timer.finish(|event| {
+                event.add_field("mode", "no_cache");
+                event.add_field("prompt_tokens", seq_len as u64);
+                event.add_field("max_new_tokens", options.max_new_tokens as u64);
+            });
             return self.generate_without_cache(input_ids, options);
         }
         let progress_callback = options.progress_callback;
         if options.max_new_tokens == 0 {
+            total_timer.finish(|event| {
+                event.add_field("prompt_tokens", seq_len as u64);
+                event.add_field("max_new_tokens", 0u64);
+                event.add_field("generated_tokens", 0u64);
+            });
             return self.empty_generation();
         }
 
         let mut cache = self.new_cache();
         let mut guard = self.prompt_guard(&mut cache);
+        let prefill_timer = Timer::new("decode.prefill");
         let prefill = self.forward(
             Some(input_ids),
             None,
@@ -1200,6 +1213,11 @@ impl DeepseekOcrModel {
             Some(guard.cache()),
             true,
         )?;
+        prefill_timer.finish(|event| {
+            event.add_field("prompt_tokens", seq_len as u64);
+            event.add_field("has_image_mask", options.images_seq_mask.is_some());
+            event.add_field("use_cache", true);
+        });
         let logits = prefill
             .logits
             .get(0)
@@ -1210,11 +1228,18 @@ impl DeepseekOcrModel {
         let mut current = self.select_token_id(&last_logits)?;
         if let Some(eos) = options.eos_token_id {
             if current == eos {
+                total_timer.finish(|event| {
+                    event.add_field("prompt_tokens", seq_len as u64);
+                    event.add_field("generated_tokens", 0u64);
+                    event.add_field("max_new_tokens", options.max_new_tokens as u64);
+                    event.add_field("terminated_on_prefill", true);
+                });
                 return self.empty_generation();
             }
         }
 
         let mut generated = Vec::with_capacity(options.max_new_tokens);
+        let decode_timer = Timer::new("decode.iterative");
         for step in 0..options.max_new_tokens {
             generated.push(current);
             if let Some(cb) = progress_callback {
@@ -1250,6 +1275,17 @@ impl DeepseekOcrModel {
             }
         }
         let len = generated.len();
+        decode_timer.finish(|event| {
+            event.add_field("steps", len as u64);
+            event.add_field("max_new_tokens", options.max_new_tokens as u64);
+        });
+        total_timer.finish(|event| {
+            event.add_field("prompt_tokens", seq_len as u64);
+            event.add_field("generated_tokens", len as u64);
+            event.add_field("max_new_tokens", options.max_new_tokens as u64);
+            event.add_field("terminated_on_prefill", false);
+            event.add_field("use_cache", true);
+        });
         Ok(Tensor::from_vec(generated, (1, len), self.device())?.to_dtype(DType::I64)?)
     }
 
@@ -1258,6 +1294,7 @@ impl DeepseekOcrModel {
         input_ids: &Tensor,
         options: GenerateOptions<'_>,
     ) -> Result<Tensor> {
+        let total_timer = Timer::new("decode.generate_no_cache");
         ensure!(
             input_ids.rank() == 2,
             "generate expects input_ids with shape [batch, seq]"
@@ -1268,6 +1305,12 @@ impl DeepseekOcrModel {
             "generate without cache currently supports batch size 1 (got {batch})"
         );
         if options.max_new_tokens == 0 {
+            total_timer.finish(|event| {
+                event.add_field("prompt_tokens", seq_len as u64);
+                event.add_field("generated_tokens", 0u64);
+                event.add_field("max_new_tokens", 0u64);
+                event.add_field("use_cache", false);
+            });
             return self.empty_generation();
         }
         ensure!(
@@ -1365,6 +1408,9 @@ impl DeepseekOcrModel {
 
         let input_tensor =
             to_tensor_i64(&tokens, self.device()).context("failed to build prefill tokens")?;
+        let mut forward_calls = 0u64;
+        let mut max_seq_len_seen = tokens.len() as u64;
+        let prefill_timer = Timer::new("decode.prefill_no_cache");
         let prefill = self.forward(
             Some(&input_tensor),
             None,
@@ -1376,6 +1422,12 @@ impl DeepseekOcrModel {
             None,
             false,
         )?;
+        prefill_timer.finish(|event| {
+            event.add_field("prompt_tokens", seq_len as u64);
+            event.add_field("final_seq", tokens.len() as u64);
+            event.add_field("use_cache", false);
+        });
+        forward_calls += 1;
         let logits = prefill
             .logits
             .get(0)
@@ -1385,6 +1437,15 @@ impl DeepseekOcrModel {
         let mut current = self.select_token_id(&logits)?;
         if let Some(eos) = options.eos_token_id {
             if current == eos {
+                total_timer.finish(|event| {
+                    event.add_field("prompt_tokens", seq_len as u64);
+                    event.add_field("generated_tokens", 0u64);
+                    event.add_field("max_new_tokens", options.max_new_tokens as u64);
+                    event.add_field("terminated_on_prefill", true);
+                    event.add_field("use_cache", false);
+                    event.add_field("forward_calls", forward_calls);
+                    event.add_field("max_seq_len_seen", max_seq_len_seen);
+                });
                 return self.empty_generation();
             }
         }
@@ -1401,6 +1462,7 @@ impl DeepseekOcrModel {
             }
 
             tokens.push(current);
+            max_seq_len_seen = max_seq_len_seen.max(tokens.len() as u64);
             if let Some(mask) = image_mask_vec.as_mut() {
                 mask.push(0);
             }
@@ -1430,6 +1492,7 @@ impl DeepseekOcrModel {
                 false,
             )?;
             let seq_pos = tokens.len() - 1;
+            forward_calls += 1;
             let next_logits = forward
                 .logits
                 .get(0)
@@ -1445,6 +1508,15 @@ impl DeepseekOcrModel {
         }
 
         let len = generated.len();
+        total_timer.finish(|event| {
+            event.add_field("prompt_tokens", seq_len as u64);
+            event.add_field("generated_tokens", len as u64);
+            event.add_field("max_new_tokens", options.max_new_tokens as u64);
+            event.add_field("terminated_on_prefill", false);
+            event.add_field("use_cache", false);
+            event.add_field("forward_calls", forward_calls);
+            event.add_field("max_seq_len_seen", max_seq_len_seen);
+        });
         Ok(Tensor::from_vec(generated, (1, len), self.device())?.to_dtype(DType::I64)?)
     }
 
