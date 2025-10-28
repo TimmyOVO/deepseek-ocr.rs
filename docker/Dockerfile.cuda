@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.7
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable
+ENV PATH=/root/.cargo/bin:${PATH}
+
+WORKDIR /app
+COPY . .
+
+RUN cargo build --locked --release --no-default-features --features cuda \
+        -p deepseek-ocr-cli && \
+    cargo build --locked --release --no-default-features --features cuda \
+        -p deepseek-ocr-server
+
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/deepseek-ocr-cli /usr/local/bin/deepseek-ocr-cli
+COPY --from=builder /app/target/release/deepseek-ocr-server /usr/local/bin/deepseek-ocr-server
+
+ENTRYPOINT ["/usr/local/bin/deepseek-ocr-server"]

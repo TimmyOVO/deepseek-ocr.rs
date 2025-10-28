@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1.7
+FROM rust:1.82-alpine3.20 AS builder
+
+RUN apk add --no-cache build-base musl-dev pkgconf && \
+    rustup target add x86_64-unknown-linux-musl
+
+WORKDIR /app
+COPY . .
+
+RUN cargo build --locked --release --target x86_64-unknown-linux-musl \
+    -p deepseek-ocr-cli && \
+    cargo build --locked --release --target x86_64-unknown-linux-musl \
+    -p deepseek-ocr-server
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/deepseek-ocr-cli /usr/local/bin/deepseek-ocr-cli
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/deepseek-ocr-server /usr/local/bin/deepseek-ocr-server
+
+ENTRYPOINT ["/usr/local/bin/deepseek-ocr-server"]

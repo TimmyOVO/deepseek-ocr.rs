@@ -1,0 +1,169 @@
+name: build-extended-artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  docker-images:
+    name: Build ${{ matrix.variant }} Docker image
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: alpine
+            dockerfile: docker/Dockerfile.alpine
+            artifact-name: deepseek-ocr-alpine-bin
+          - variant: cuda
+            dockerfile: docker/Dockerfile.cuda
+            artifact-name: deepseek-ocr-cuda-bin
+          - variant: mkl
+            dockerfile: docker/Dockerfile.mkl
+            artifact-name: deepseek-ocr-mkl-bin
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (${{ matrix.variant }})
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          tags: ghcr.io/${{ github.repository }}:${{ matrix.variant }}-ci
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,scope=${{ matrix.variant }},mode=max
+
+      - name: Extract binaries from image
+        run: |
+          mkdir -p artifacts/${{ matrix.variant }}
+          cid=$(docker create ${{ steps.build.outputs.imageid }})
+          docker cp "$cid":/usr/local/bin/deepseek-ocr-cli artifacts/${{ matrix.variant }}/
+          docker cp "$cid":/usr/local/bin/deepseek-ocr-server artifacts/${{ matrix.variant }}/
+          docker rm "$cid"
+
+      - name: Upload binaries (${{ matrix.variant }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: artifacts/${{ matrix.variant }}
+
+      - name: Archive binaries (${{ matrix.variant }})
+        run: tar -czf ${{ matrix.variant }}-linux.tar.gz -C artifacts/${{ matrix.variant }} .
+
+      - name: Publish release asset (${{ matrix.variant }})
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.variant }}-linux.tar.gz
+
+  windows-cuda-binaries:
+    name: Build Windows CUDA binaries
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CUDA_INSTALL_DIR: C:\CUDA\Installer
+      CUDA_VERSION: "12.2.0"
+      CUDA_BASE_URL: https://developer.download.nvidia.com/compute/cuda
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            windows-cargo-
+
+      - name: Prepare CUDA cache directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:CUDA_INSTALL_DIR | Out-Null
+
+      - name: Cache CUDA installer
+        id: cache-cuda-installer
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CUDA_INSTALL_DIR }}
+          key: cuda-${{ env.CUDA_VERSION }}
+
+      - name: Download CUDA installer
+        if: steps.cache-cuda-installer.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:CUDA_INSTALL_DIR "cuda_${{ env.CUDA_VERSION }}_windows_network.exe"
+          $url = "$($env:CUDA_BASE_URL)/${{ env.CUDA_VERSION }}/local_installers/cuda_${{ env.CUDA_VERSION }}_windows_network.exe"
+          Write-Host "Downloading CUDA from $url"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+
+      - name: Install CUDA toolkit
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem $env:CUDA_INSTALL_DIR -Filter "cuda_*_windows_network.exe" | Select-Object -First 1
+          if (-not $installer) { throw "CUDA installer not found in $env:CUDA_INSTALL_DIR" }
+          & $installer.FullName -s compiler_12.2 nvcc_12.2 tools_12.2
+
+      - name: Configure CUDA environment
+        shell: pwsh
+        run: |
+          $cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2"
+          if (-not (Test-Path $cudaPath)) { throw "CUDA path $cudaPath not found" }
+          Add-Content $env:GITHUB_ENV "CUDA_PATH=$cudaPath"
+          Add-Content $env:GITHUB_PATH "$cudaPath\bin"
+          Add-Content $env:GITHUB_PATH "$cudaPath\libnvvp"
+
+      - name: Build CLI with CUDA
+        shell: pwsh
+        run: cargo build --locked --release --no-default-features --features cuda -p deepseek-ocr-cli
+
+      - name: Build server with CUDA
+        shell: pwsh
+        run: cargo build --locked --release --no-default-features --features cuda -p deepseek-ocr-server
+
+      - name: Collect CUDA binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts\windows-cuda | Out-Null
+          Copy-Item target\release\deepseek-ocr-cli.exe artifacts\windows-cuda\
+          Copy-Item target\release\deepseek-ocr-server.exe artifacts\windows-cuda\
+
+      - name: Upload CUDA Windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-ocr-windows-cuda
+          path: artifacts\windows-cuda
+
+      - name: Package CUDA Windows binaries
+        shell: pwsh
+        run: |
+          Compress-Archive -Path artifacts\windows-cuda\* -DestinationPath windows-cuda.zip -Force
+
+      - name: Publish release asset (Windows CUDA)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: windows-cuda.zip
