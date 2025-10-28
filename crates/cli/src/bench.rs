@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "bench-metrics")]
 use anyhow::Context;
+use anyhow::Result;
 #[cfg(not(feature = "bench-metrics"))]
 use anyhow::bail;
-use anyhow::Result;
 use deepseek_ocr_core::benchmark::BenchEvent;
 #[cfg(feature = "bench-metrics")]
 use deepseek_ocr_core::benchmark::BenchRecorder;

@@ -1249,7 +1249,7 @@ impl DeepseekOcrModel {
                 break;
             }
             let next_input =
-                Tensor::from_vec(vec![current], (1, 1), self.device())?.to_dtype(DType::I64)?;
+                Tensor::from_slice(&[current], (1, 1), self.device())?.to_dtype(DType::I64)?;
             let decode = self.forward(
                 Some(&next_input),
                 None,
@@ -1391,10 +1391,10 @@ impl DeepseekOcrModel {
         };
 
         let to_tensor_i64 = |data: &[i64], device: &Device| -> Result<Tensor> {
-            Ok(Tensor::from_vec(data.to_vec(), (1, data.len()), device)?.to_dtype(DType::I64)?)
+            Ok(Tensor::from_slice(data, (1, data.len()), device)?.to_dtype(DType::I64)?)
         };
         let to_tensor_u8 = |data: &[u8], device: &Device| -> Result<Tensor> {
-            Ok(Tensor::from_vec(data.to_vec(), (1, data.len()), device)?.to_dtype(DType::U8)?)
+            Ok(Tensor::from_slice(data, (1, data.len()), device)?.to_dtype(DType::U8)?)
         };
 
         let mut attention_tensor = match &attention_vec {
