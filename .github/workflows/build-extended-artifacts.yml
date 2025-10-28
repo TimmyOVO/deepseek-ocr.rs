@@ -102,12 +102,24 @@ jobs:
         shell: pwsh
         run: |
           choco install visualstudio2022buildtools --no-progress -y --installargs '--add Microsoft.VisualStudio.Workload.VCTools --quiet --norestart'
-          & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\BuildTools" --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --passive --norestart
-          $clRoot = "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"
+          $vsInstaller = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe"
+          if (Test-Path $vsInstaller) {
+            Start-Process -FilePath $vsInstaller -ArgumentList @(
+              'modify',
+              '--installPath', 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools',
+              '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+              '--quiet', '--norestart'
+            ) -Wait
+          }
+          $vsInstallRoot = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
+          if (-not (Test-Path $vsInstallRoot)) {
+            $vsInstallRoot = "C:\Program Files\Microsoft Visual Studio\2022\BuildTools"
+          }
+          $clRoot = Join-Path $vsInstallRoot 'VC\Tools\MSVC'
           if (-not (Test-Path $clRoot)) { throw "MSVC toolchain not found after installation" }
           $vcVersion = Get-ChildItem $clRoot | Sort-Object Name -Descending | Select-Object -First 1
           if (-not $vcVersion) { throw "Unable to locate installed MSVC version" }
-          $binDir = Join-Path $vcVersion.FullName "bin\Hostx64\x64"
+          $binDir = Join-Path $vcVersion.FullName 'bin\Hostx64\x64'
           Add-Content $env:GITHUB_PATH $binDir
           Add-Content $env:GITHUB_ENV "VCToolsInstallDir=$($vcVersion.FullName)"
 
