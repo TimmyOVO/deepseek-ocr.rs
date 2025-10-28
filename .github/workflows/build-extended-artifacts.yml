@@ -82,6 +82,8 @@ jobs:
       CUDA_VERSION: "12.2.0"
       CUDA_INSTALLER_NAME: cuda_12.2.0_windows_network.exe
       CUDA_INSTALLER_URL: https://developer.download.nvidia.com/compute/cuda/12.2.0/network_installers/cuda_12.2.0_windows_network.exe
+      CUDA_INSTALL_TARGET: C:\CUDA\Toolkit
+      CUDA_COMPUTE_CAP: "80"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -103,6 +105,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path $env:CUDA_INSTALL_DIR | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:CUDA_INSTALL_TARGET | Out-Null
 
       - name: Cache CUDA installer
         id: cache-cuda-installer
@@ -124,12 +127,12 @@ jobs:
         run: |
           $installer = Get-ChildItem $env:CUDA_INSTALL_DIR -Filter "cuda_*_windows_network.exe" | Select-Object -First 1
           if (-not $installer) { throw "CUDA installer not found in $env:CUDA_INSTALL_DIR" }
-          & $installer.FullName -s compiler_12.2 nvcc_12.2 tools_12.2
+          & $installer.FullName -s compiler_12.2 nvcc_12.2 tools_12.2 -installpath=$env:CUDA_INSTALL_TARGET
 
       - name: Configure CUDA environment
         shell: pwsh
         run: |
-          $cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2"
+          $cudaPath = Join-Path $env:CUDA_INSTALL_TARGET "v12.2"
           if (-not (Test-Path $cudaPath)) { throw "CUDA path $cudaPath not found" }
           Add-Content $env:GITHUB_ENV "CUDA_PATH=$cudaPath"
           Add-Content $env:GITHUB_PATH "$cudaPath\bin"
