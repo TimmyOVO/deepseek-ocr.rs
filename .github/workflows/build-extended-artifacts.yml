@@ -78,11 +78,6 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     env:
-      CUDA_INSTALL_DIR: C:\CUDA\Installer
-      CUDA_VERSION: "12.2.0"
-      CUDA_INSTALLER_NAME: cuda_12.2.0_windows_network.exe
-      CUDA_INSTALLER_URL: https://developer.download.nvidia.com/compute/cuda/12.2.0/network_installers/cuda_12.2.0_windows_network.exe
-      CUDA_INSTALL_TARGET: C:\CUDA\Toolkit
       CUDA_COMPUTE_CAP: "80"
     steps:
       - name: Checkout repository
@@ -101,42 +96,27 @@ jobs:
           restore-keys: |
             windows-cargo-
 
-      - name: Prepare CUDA cache directory
+      - name: Install CUDA Toolkit 12.2
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path $env:CUDA_INSTALL_DIR | Out-Null
-          New-Item -ItemType Directory -Force -Path $env:CUDA_INSTALL_TARGET | Out-Null
-
-      - name: Cache CUDA installer
-        id: cache-cuda-installer
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CUDA_INSTALL_DIR }}
-          key: cuda-${{ env.CUDA_VERSION }}
-
-      - name: Download CUDA installer
-        if: steps.cache-cuda-installer.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $installer = Join-Path $env:CUDA_INSTALL_DIR $env:CUDA_INSTALLER_NAME
-          Write-Host "Downloading CUDA from $env:CUDA_INSTALLER_URL"
-          Invoke-WebRequest -Uri $env:CUDA_INSTALLER_URL -OutFile $installer
-
-      - name: Install CUDA toolkit
-        shell: pwsh
-        run: |
-          $installer = Get-ChildItem $env:CUDA_INSTALL_DIR -Filter "cuda_*_windows_network.exe" | Select-Object -First 1
-          if (-not $installer) { throw "CUDA installer not found in $env:CUDA_INSTALL_DIR" }
-          & $installer.FullName -s compiler_12.2 nvcc_12.2 tools_12.2 -installpath=$env:CUDA_INSTALL_TARGET
+          choco install cuda --version=12.2.0 --no-progress -y --params '"/NoDriver"'
 
       - name: Configure CUDA environment
         shell: pwsh
         run: |
-          $cudaPath = Join-Path $env:CUDA_INSTALL_TARGET "v12.2"
-          if (-not (Test-Path $cudaPath)) { throw "CUDA path $cudaPath not found" }
-          Add-Content $env:GITHUB_ENV "CUDA_PATH=$cudaPath"
-          Add-Content $env:GITHUB_PATH "$cudaPath\bin"
-          Add-Content $env:GITHUB_PATH "$cudaPath\libnvvp"
+          $defaultPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+          if (Test-Path $defaultPath) {
+            $versions = Get-ChildItem $defaultPath -Directory | Sort-Object Name -Descending
+            $match = $versions | Where-Object { $_.Name -eq 'v12.2' } | Select-Object -First 1
+            if (-not $match) { $match = $versions | Select-Object -First 1 }
+            if ($match) {
+              Add-Content $env:GITHUB_ENV "CUDA_PATH=$($match.FullName)"
+              Add-Content $env:GITHUB_PATH "$($match.FullName)\bin"
+              Add-Content $env:GITHUB_PATH "$($match.FullName)\libnvvp"
+              return
+            }
+          }
+          throw "Unable to locate CUDA installation under $defaultPath"
 
       - name: Build CLI with CUDA
         shell: pwsh
