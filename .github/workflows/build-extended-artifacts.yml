@@ -96,7 +96,7 @@ jobs:
       - name: Install CUDA Toolkit 12.2
         shell: pwsh
         run: |
-          choco install cuda --version=12.2.0 --no-progress -y --params '"/NoDriver"'
+          choco install cuda --version=12.2.0.53625 --no-progress -y --params '"/NoDriver"'
 
       - name: Configure CUDA environment
         shell: pwsh
