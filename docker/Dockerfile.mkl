@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM intel/oneapi-basekit:2024.2-devel-ubuntu24.04 AS builder
+FROM intel/oneapi-basekit:2025.3.0-0-devel-ubuntu24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
