@@ -5,11 +5,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use candle_core::scalar::Scalar;
 use candle_core::{DType, Device, Tensor, shape::D};
 use candle_nn::VarBuilder;
 use image::GenericImageView;
 use image::{DynamicImage, Rgb, RgbImage, imageops};
+use rayon::prelude::*;
 
 use crate::{
     benchmark::Timer,
@@ -263,6 +263,373 @@ struct VisionModules {
     clip: ClipVisionModel,
 }
 
+struct VisionContext<'a> {
+    projector: &'a ImageProjector,
+    vision: &'a VisionModules,
+    device: &'a Device,
+    dtype: DType,
+    parallel: bool,
+}
+
+impl<'a> VisionContext<'a> {
+    fn new(model: &'a DeepseekOcrModel) -> Self {
+        let parallel = matches!(model.device(), Device::Cpu);
+        Self {
+            projector: &model.projector,
+            vision: &model.vision,
+            device: model.device(),
+            dtype: model.dtype(),
+            parallel,
+        }
+    }
+
+    fn hidden_size(&self) -> usize {
+        self.projector.hidden_size()
+    }
+
+    fn device(&self) -> &'a Device {
+        self.device
+    }
+
+    fn dtype(&self) -> DType {
+        self.dtype
+    }
+
+    fn parallel_enabled(&self) -> bool {
+        self.parallel
+    }
+
+    fn prepare_image_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
+        let mut image = if tensor.rank() == 3 {
+            tensor.unsqueeze(0)?
+        } else {
+            tensor.clone()
+        };
+        ensure!(
+            image.rank() == 4,
+            "image tensor must have rank 4 (batch, channels, height, width)"
+        );
+        if !image.device().same_device(self.device) {
+            image = image.to_device(self.device)?;
+        }
+        if image.dtype() != self.dtype {
+            image = image.to_dtype(self.dtype)?;
+        }
+        Ok(image.contiguous()?)
+    }
+
+    fn append_row_breaks(&self, grid: Tensor, newline: &Tensor) -> Result<Tensor> {
+        let (rows, cols, hidden) = grid
+            .shape()
+            .dims3()
+            .context("grid must be [rows, cols, hidden]")?;
+        let grid3 = grid.reshape((rows, cols, hidden))?;
+        let newline = newline
+            .reshape((1, 1, hidden))?
+            .expand((rows, 1, hidden))?
+            .contiguous()?;
+        let with_breaks = Tensor::cat(&[grid3, newline], 1)?;
+        Ok(with_breaks.reshape((rows * (cols + 1), hidden))?)
+    }
+
+    fn build_clip_sam_tokens(&self, clip: &Tensor, sam: &Tensor) -> Result<Tensor> {
+        let (batch, clip_seq, clip_hidden) = clip
+            .shape()
+            .dims3()
+            .context("clip output must be [batch, seq, hidden]")?;
+        ensure!(clip_seq > 0, "clip output missing sequence dimension");
+        let clip_tokens = clip
+            .narrow(D::Minus2, 1, clip_seq - 1)?
+            .contiguous()
+            .context("clip token slice not contiguous")?;
+        let (sam_batch, sam_channels, sam_h, sam_w) = sam
+            .shape()
+            .dims4()
+            .context("sam output must be [batch, channels, height, width]")?;
+        ensure!(
+            sam_batch == batch,
+            "sam batch {} does not match clip batch {}",
+            sam_batch,
+            batch
+        );
+        let sam_tokens = sam
+            .reshape((batch, sam_channels, sam_h * sam_w))?
+            .transpose(1, 2)?
+            .contiguous()
+            .context("sam token transpose not contiguous")?;
+        let (_, sam_seq, sam_hidden) = sam_tokens
+            .shape()
+            .dims3()
+            .context("sam tokens reshape failed")?;
+        let (_, clip_seq_trimmed, _) = clip_tokens
+            .shape()
+            .dims3()
+            .context("clip token slice should be 3D")?;
+        ensure!(
+            clip_seq_trimmed == sam_seq,
+            "clip tokens ({clip_seq_trimmed}) do not match sam tokens ({sam_seq})"
+        );
+        ensure!(
+            clip_hidden + sam_hidden == self.projector.input_dim(),
+            "combined hidden dims {}+{} do not match projector input {}",
+            clip_hidden,
+            sam_hidden,
+            self.projector.input_dim()
+        );
+        let combined = Tensor::cat(&[clip_tokens, sam_tokens], D::Minus1)?;
+        Ok(combined)
+    }
+
+    fn format_global_tokens(&self, projected: &Tensor, newline: &Tensor) -> Result<Tensor> {
+        let (batch, seq, hidden) = projected
+            .shape()
+            .dims3()
+            .context("projected global tokens must be 3D")?;
+        ensure!(batch == 1, "global view expects batch size 1, got {batch}");
+        let side = (seq as f64).sqrt() as usize;
+        ensure!(
+            side * side == seq,
+            "global token count {} is not a perfect square",
+            seq
+        );
+        let grid = projected
+            .get(0)?
+            .reshape((side, side, hidden))?
+            .contiguous()
+            .context("global grid reshape not contiguous")?;
+        self.append_row_breaks(grid, newline)
+    }
+
+    fn format_local_tokens(
+        &self,
+        projected: &Tensor,
+        crop_shape: (usize, usize),
+        newline: &Tensor,
+    ) -> Result<Tensor> {
+        let (patches, seq, hidden) = projected
+            .shape()
+            .dims3()
+            .context("projected local tokens must be 3D")?;
+        let (width_crops, height_crops) = crop_shape;
+        ensure!(
+            patches == width_crops * height_crops,
+            "patch count {} does not match crop grid {}x{}",
+            patches,
+            width_crops,
+            height_crops
+        );
+        let side = (seq as f64).sqrt() as usize;
+        ensure!(
+            side * side == seq,
+            "local token count {} is not a perfect square",
+            seq
+        );
+        let grid = projected
+            .reshape((height_crops, width_crops, side, side, hidden))?
+            .permute((0, 2, 1, 3, 4))?
+            .reshape((height_crops * side, width_crops * side, hidden))?
+            .contiguous()
+            .context("local grid reshape not contiguous")?;
+        self.append_row_breaks(grid, newline)
+    }
+
+    fn process_input_full(&self, input: &VisionInput<'_>) -> Result<VisionProcessArtifacts> {
+        let newline = self
+            .projector
+            .image_newline_token(self.dtype, self.device)
+            .context("failed to adapt image_newline token")?;
+        if self.parallel {
+            let newline_for_global = newline.clone();
+            let newline_for_local = newline.clone();
+            let (global_res, local_res) = rayon::join(
+                || self.compute_global(input, &newline_for_global),
+                || self.compute_local(input, &newline_for_local),
+            );
+            let (global_pre, global_post, global_tokens) = global_res?;
+            let (local_pre_opt, local_post_opt, local_tokens_opt) = local_res?;
+            self.assemble_artifacts(
+                global_pre,
+                global_post,
+                global_tokens,
+                local_pre_opt,
+                local_post_opt,
+                local_tokens_opt,
+            )
+        } else {
+            let (global_pre, global_post, global_tokens) = self.compute_global(input, &newline)?;
+            let (local_pre_opt, local_post_opt, local_tokens_opt) =
+                self.compute_local(input, &newline)?;
+            self.assemble_artifacts(
+                global_pre,
+                global_post,
+                global_tokens,
+                local_pre_opt,
+                local_post_opt,
+                local_tokens_opt,
+            )
+        }
+    }
+
+    fn process_input(&self, input: &VisionInput<'_>) -> Result<Tensor> {
+        Ok(self.process_input_full(input)?.fused_tokens)
+    }
+
+    fn compute_global(
+        &self,
+        input: &VisionInput<'_>,
+        newline: &Tensor,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let global = self
+            .prepare_image_tensor(input.global)
+            .context("invalid global image tensor")?;
+        let sam_global = self
+            .vision
+            .sam
+            .forward(&global)
+            .context("sam forward (global)")?;
+        let clip_global = self
+            .vision
+            .clip
+            .forward(&global, Some(&sam_global))
+            .context("clip forward (global)")?;
+        let global_pre = self
+            .build_clip_sam_tokens(&clip_global, &sam_global)
+            .context("concat global clip+sam tokens")?
+            .contiguous()
+            .context("global pre tokens not contiguous")?;
+        let global_post = self
+            .projector
+            .project(&global_pre)
+            .context("project global features")?
+            .contiguous()
+            .context("global post tokens not contiguous")?;
+        let global_tokens = self
+            .format_global_tokens(&global_post, newline)
+            .context("format global tokens")?
+            .contiguous()
+            .context("global tokens not contiguous")?;
+        Ok((global_pre, global_post, global_tokens))
+    }
+
+    fn compute_local(
+        &self,
+        input: &VisionInput<'_>,
+        newline: &Tensor,
+    ) -> Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        if let Some(patches) = input.patches {
+            let crop_shape = input
+                .crop_shape
+                .context("crop_shape required when patches are provided")?;
+            let patches = self
+                .prepare_image_tensor(patches)
+                .context("invalid patch tensor")?;
+            let (patch_batch, _c, _h, _w) = patches
+                .shape()
+                .dims4()
+                .context("patch tensor must be 4D (batch, channels, height, width)")?;
+            if patch_batch > 0 {
+                let chunks = patches.chunk(patch_batch, 0)?;
+                let local_results: Result<Vec<(Tensor, Tensor)>> = if self.parallel {
+                    chunks
+                        .into_par_iter()
+                        .map(|chunk| self.process_patch_chunk(chunk))
+                        .collect()
+                } else {
+                    chunks
+                        .into_iter()
+                        .map(|chunk| self.process_patch_chunk(chunk))
+                        .collect()
+                };
+                let (local_pre_list, local_post_list): (Vec<_>, Vec<_>) = local_results?
+                    .into_iter()
+                    .unzip::<Tensor, Tensor, Vec<_>, Vec<_>>();
+
+                let local_pre_refs: Vec<_> = local_pre_list.iter().collect();
+                let local_post_refs: Vec<_> = local_post_list.iter().collect();
+                let local_pre = Tensor::cat(&local_pre_refs, 0)?
+                    .contiguous()
+                    .context("local pre tokens not contiguous")?;
+                let local_post = Tensor::cat(&local_post_refs, 0)?
+                    .contiguous()
+                    .context("local post tokens not contiguous")?;
+                let local_tokens = self
+                    .format_local_tokens(&local_post, crop_shape, newline)
+                    .context("format local tokens")?
+                    .contiguous()
+                    .context("local tokens not contiguous")?;
+                return Ok((Some(local_pre), Some(local_post), Some(local_tokens)));
+            }
+        }
+        Ok((None, None, None))
+    }
+
+    fn process_patch_chunk(&self, chunk: Tensor) -> Result<(Tensor, Tensor)> {
+        let chunk = chunk
+            .contiguous()
+            .context("local patch chunk not contiguous")?;
+        let sam_local = self
+            .vision
+            .sam
+            .forward(&chunk)
+            .context("sam forward (local)")?;
+        let clip_local = self
+            .vision
+            .clip
+            .forward(&chunk, Some(&sam_local))
+            .context("clip forward (local)")?;
+        let local_pre = self
+            .build_clip_sam_tokens(&clip_local, &sam_local)
+            .context("concat local clip+sam tokens")?
+            .contiguous()
+            .context("local pre tokens not contiguous")?;
+        let local_post = self
+            .projector
+            .project(&local_pre)
+            .context("project local features")?
+            .contiguous()
+            .context("local post tokens not contiguous")?;
+        Ok((local_pre, local_post))
+    }
+
+    fn assemble_artifacts(
+        &self,
+        global_pre: Tensor,
+        global_post: Tensor,
+        global_tokens: Tensor,
+        local_pre_opt: Option<Tensor>,
+        local_post_opt: Option<Tensor>,
+        local_tokens_opt: Option<Tensor>,
+    ) -> Result<VisionProcessArtifacts> {
+        let mut segments = Vec::new();
+        if let Some(local_tokens) = local_tokens_opt.clone() {
+            segments.push(local_tokens);
+        }
+        segments.push(global_tokens.clone());
+        let view_separator = self
+            .projector
+            .view_separator_token(self.dtype, self.device)
+            .context("failed to adapt view separator token")?
+            .reshape((1, self.projector.hidden_size()))?
+            .contiguous()
+            .context("view separator not contiguous")?;
+        segments.push(view_separator);
+        let fused_tokens = Tensor::cat(&segments, 0)
+            .context("failed to concatenate image segments")?
+            .contiguous()
+            .context("fused tokens not contiguous")?;
+
+        Ok(VisionProcessArtifacts {
+            fused_tokens,
+            global_pre,
+            local_pre: local_pre_opt,
+            global_post,
+            local_post: local_post_opt,
+            global_tokens,
+            local_tokens: local_tokens_opt,
+        })
+    }
+}
+
 impl DeepseekOcrModel {
     /// Load the OCR model from disk, pulling configuration and language-model weights.
     ///
@@ -456,19 +823,33 @@ impl DeepseekOcrModel {
         &self,
         inputs: &[Option<VisionInput<'_>>],
     ) -> Result<Vec<Tensor>> {
-        let mut outputs = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            if let Some(vision_input) = input {
-                outputs.push(self.process_vision_input(vision_input)?);
-            } else {
-                outputs.push(Tensor::zeros(
-                    (0, self.projector.hidden_size()),
-                    self.dtype,
-                    self.device(),
-                )?);
-            }
+        let ctx = VisionContext::new(self);
+        let hidden = ctx.hidden_size();
+        let dtype = ctx.dtype();
+        let device = ctx.device();
+        if ctx.parallel_enabled() {
+            inputs
+                .par_iter()
+                .map(|input| {
+                    if let Some(vision_input) = input {
+                        ctx.process_input(vision_input)
+                    } else {
+                        Tensor::zeros((0, hidden), dtype, device).map_err(Into::into)
+                    }
+                })
+                .collect()
+        } else {
+            inputs
+                .iter()
+                .map(|input| {
+                    if let Some(vision_input) = input {
+                        ctx.process_input(vision_input)
+                    } else {
+                        Tensor::zeros((0, hidden), dtype, device).map_err(Into::into)
+                    }
+                })
+                .collect()
         }
-        Ok(outputs)
     }
 
     pub fn compute_vision_projection(
@@ -773,254 +1154,11 @@ impl DeepseekOcrModel {
     }
 
     fn process_vision_input_full(&self, input: &VisionInput<'_>) -> Result<VisionProcessArtifacts> {
-        let newline = self
-            .projector
-            .image_newline_token(self.dtype, self.device())
-            .context("failed to adapt image_newline token")?;
-
-        let global = self
-            .prepare_image_tensor(input.global)
-            .context("invalid global image tensor")?;
-        let sam_global = self
-            .vision
-            .sam
-            .forward(&global)
-            .context("sam forward (global)")?;
-        let clip_global = self
-            .vision
-            .clip
-            .forward(&global, Some(&sam_global))
-            .context("clip forward (global)")?;
-        let global_pre = self
-            .build_clip_sam_tokens(&clip_global, &sam_global)
-            .context("concat global clip+sam tokens")?
-            .contiguous()
-            .context("global pre tokens not contiguous")?;
-        let global_post = self
-            .projector
-            .project(&global_pre)
-            .context("project global features")?
-            .contiguous()
-            .context("global post tokens not contiguous")?;
-        let global_tokens = self
-            .format_global_tokens(&global_post, &newline)
-            .context("format global tokens")?
-            .contiguous()
-            .context("global tokens not contiguous")?;
-
-        let mut local_pre_opt = None;
-        let mut local_post_opt = None;
-        let mut local_tokens_opt = None;
-
-        if let Some(patches) = input.patches {
-            let crop_shape = input
-                .crop_shape
-                .context("crop_shape required when patches are provided")?;
-            let patches = self
-                .prepare_image_tensor(patches)
-                .context("invalid patch tensor")?;
-            let (patch_batch, _c, _h, _w) = patches
-                .shape()
-                .dims4()
-                .context("patch tensor must be 4D (batch, channels, height, width)")?;
-            if patch_batch > 0 {
-                let sam_local = self
-                    .vision
-                    .sam
-                    .forward(&patches)
-                    .context("sam forward (local)")?;
-                let clip_local = self
-                    .vision
-                    .clip
-                    .forward(&patches, Some(&sam_local))
-                    .context("clip forward (local)")?;
-                let local_pre = self
-                    .build_clip_sam_tokens(&clip_local, &sam_local)
-                    .context("concat local clip+sam tokens")?
-                    .contiguous()
-                    .context("local pre tokens not contiguous")?;
-                let local_post = self
-                    .projector
-                    .project(&local_pre)
-                    .context("project local features")?
-                    .contiguous()
-                    .context("local post tokens not contiguous")?;
-                let local_tokens = self
-                    .format_local_tokens(&local_post, crop_shape, &newline)
-                    .context("format local tokens")?
-                    .contiguous()
-                    .context("local tokens not contiguous")?;
-                local_pre_opt = Some(local_pre);
-                local_post_opt = Some(local_post);
-                local_tokens_opt = Some(local_tokens);
-            }
-        }
-
-        let mut segments = Vec::new();
-        if let Some(local_tokens) = local_tokens_opt.clone() {
-            segments.push(local_tokens);
-        }
-        segments.push(global_tokens.clone());
-        let view_separator = self
-            .projector
-            .view_separator_token(self.dtype, self.device())
-            .context("failed to adapt view separator token")?
-            .reshape((1, self.projector.hidden_size()))?
-            .contiguous()
-            .context("view separator not contiguous")?;
-        segments.push(view_separator);
-        let fused_tokens = Tensor::cat(&segments, 0)
-            .context("failed to concatenate image segments")?
-            .contiguous()
-            .context("fused tokens not contiguous")?;
-
-        Ok(VisionProcessArtifacts {
-            fused_tokens,
-            global_pre,
-            local_pre: local_pre_opt,
-            global_post,
-            local_post: local_post_opt,
-            global_tokens,
-            local_tokens: local_tokens_opt,
-        })
-    }
-
-    fn process_vision_input(&self, input: &VisionInput<'_>) -> Result<Tensor> {
-        Ok(self.process_vision_input_full(input)?.fused_tokens)
+        VisionContext::new(self).process_input_full(input)
     }
 
     fn prepare_image_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let mut image = if tensor.rank() == 3 {
-            tensor.unsqueeze(0)?
-        } else {
-            tensor.clone()
-        };
-        ensure!(
-            image.rank() == 4,
-            "image tensor must have rank 4 (batch, channels, height, width)"
-        );
-        if !image.device().same_device(self.device()) {
-            image = image.to_device(self.device())?;
-        }
-        if image.dtype() != self.dtype {
-            image = image.to_dtype(self.dtype)?;
-        }
-        Ok(image.contiguous()?)
-    }
-
-    fn build_clip_sam_tokens(&self, clip: &Tensor, sam: &Tensor) -> Result<Tensor> {
-        let (batch, clip_seq, clip_hidden) = clip
-            .shape()
-            .dims3()
-            .context("clip output must be [batch, seq, hidden]")?;
-        ensure!(clip_seq > 0, "clip output missing sequence dimension");
-        let clip_tokens = clip
-            .narrow(D::Minus2, 1, clip_seq - 1)?
-            .contiguous()
-            .context("clip token slice not contiguous")?;
-        let (sam_batch, sam_channels, sam_h, sam_w) = sam
-            .shape()
-            .dims4()
-            .context("sam output must be [batch, channels, height, width]")?;
-        ensure!(
-            sam_batch == batch,
-            "sam batch {} does not match clip batch {}",
-            sam_batch,
-            batch
-        );
-        let sam_tokens = sam
-            .reshape((batch, sam_channels, sam_h * sam_w))?
-            .transpose(1, 2)?
-            .contiguous()
-            .context("sam token transpose not contiguous")?;
-        let (_, sam_seq, sam_hidden) = sam_tokens
-            .shape()
-            .dims3()
-            .context("sam tokens reshape failed")?;
-        let (_, clip_seq_trimmed, _) = clip_tokens
-            .shape()
-            .dims3()
-            .context("clip token slice should be 3D")?;
-        ensure!(
-            clip_seq_trimmed == sam_seq,
-            "clip tokens ({clip_seq_trimmed}) do not match sam tokens ({sam_seq})"
-        );
-        ensure!(
-            clip_hidden + sam_hidden == self.projector.input_dim(),
-            "combined hidden dims {}+{} do not match projector input {}",
-            clip_hidden,
-            sam_hidden,
-            self.projector.input_dim()
-        );
-        let combined = Tensor::cat(&[clip_tokens, sam_tokens], D::Minus1)?;
-        Ok(combined)
-    }
-
-    fn format_global_tokens(&self, projected: &Tensor, newline: &Tensor) -> Result<Tensor> {
-        let (batch, seq, hidden) = projected
-            .shape()
-            .dims3()
-            .context("projected global tokens must be 3D")?;
-        ensure!(batch == 1, "global view expects batch size 1, got {batch}");
-        let side = (seq as f64).sqrt() as usize;
-        ensure!(
-            side * side == seq,
-            "global token count {} is not a perfect square",
-            seq
-        );
-        let grid = projected
-            .get(0)?
-            .reshape((side, side, hidden))?
-            .contiguous()
-            .context("global grid reshape not contiguous")?;
-        self.append_row_breaks(grid, newline)
-    }
-
-    fn format_local_tokens(
-        &self,
-        projected: &Tensor,
-        crop_shape: (usize, usize),
-        newline: &Tensor,
-    ) -> Result<Tensor> {
-        let (patches, seq, hidden) = projected
-            .shape()
-            .dims3()
-            .context("projected local tokens must be 3D")?;
-        let (width_crops, height_crops) = crop_shape;
-        ensure!(
-            patches == width_crops * height_crops,
-            "patch count {} does not match crop grid {}x{}",
-            patches,
-            width_crops,
-            height_crops
-        );
-        let side = (seq as f64).sqrt() as usize;
-        ensure!(
-            side * side == seq,
-            "local token count {} is not a perfect square",
-            seq
-        );
-        let grid = projected
-            .reshape((height_crops, width_crops, side, side, hidden))?
-            .permute((0, 2, 1, 3, 4))?
-            .reshape((height_crops * side, width_crops * side, hidden))?
-            .contiguous()
-            .context("local grid reshape not contiguous")?;
-        self.append_row_breaks(grid, newline)
-    }
-
-    fn append_row_breaks(&self, grid: Tensor, newline: &Tensor) -> Result<Tensor> {
-        let (rows, cols, hidden) = grid
-            .shape()
-            .dims3()
-            .context("grid must be [rows, cols, hidden]")?;
-        let grid3 = grid.reshape((rows, cols, hidden))?;
-        let newline = newline
-            .reshape((1, 1, hidden))?
-            .expand((rows, 1, hidden))?
-            .contiguous()?;
-        let with_breaks = Tensor::cat(&[grid3, newline], 1)?;
-        Ok(with_breaks.reshape((rows * (cols + 1), hidden))?)
+        VisionContext::new(self).prepare_image_tensor(tensor)
     }
 
     /// Construct normalized tensors for a single multimodal example.
@@ -1043,10 +1181,20 @@ impl DeepseekOcrModel {
             if tiles.is_empty() {
                 (None, Some(crop))
             } else {
-                let mut tensors = Vec::with_capacity(tiles.len());
-                for tile in tiles {
-                    tensors.push(image_to_tensor(&tile, self.device(), self.dtype)?);
-                }
+                tracing::info!("Preparing {} image crops for vision input", tiles.len());
+                let device = self.device().clone();
+                let dtype = self.dtype();
+                let tensors: Vec<Tensor> = if matches!(self.device(), Device::Cpu) {
+                    tiles
+                        .into_par_iter()
+                        .map(|tile| image_to_tensor(&tile, &device, dtype))
+                        .collect::<Result<Vec<_>>>()?
+                } else {
+                    tiles
+                        .into_iter()
+                        .map(|tile| image_to_tensor(&tile, &device, dtype))
+                        .collect::<Result<Vec<_>>>()?
+                };
                 let stacked = Tensor::stack(&tensors, 0)?.contiguous()?;
                 (Some(stacked), Some(crop))
             }
@@ -1241,7 +1389,6 @@ impl DeepseekOcrModel {
         }
 
         let mut generated = Vec::with_capacity(options.max_new_tokens);
-        let decode_token = Tensor::zeros((1, 1), DType::I64, self.device())?; // reused single-token buffer
         let decode_timer = Timer::new("decode.iterative");
         for step in 0..options.max_new_tokens {
             generated.push(current);
@@ -1251,7 +1398,6 @@ impl DeepseekOcrModel {
             if step + 1 == options.max_new_tokens {
                 break;
             }
-            decode_token.const_set(Scalar::I64(current))?;
             let token_index = usize::try_from(current)
                 .context("token id out of range while preparing decode embedding")?;
             let decode_inputs = self
