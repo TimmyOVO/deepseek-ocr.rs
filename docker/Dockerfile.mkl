@@ -25,7 +25,7 @@ RUN source /opt/intel/oneapi/setvars.sh && \
     cargo build --locked --release --no-default-features --features mkl \
         -p deepseek-ocr-server
 
-FROM intel/oneapi-runtime:2024.2-ubuntu24.04
+FROM intel/oneapi-basekit:2025.3.0-0-devel-ubuntu24.04
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
