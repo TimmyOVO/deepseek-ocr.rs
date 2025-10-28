@@ -40,7 +40,7 @@ jobs:
 
       - name: Build CLI (macOS)
         if: matrix.os == 'macos-latest'
-        run: cargo build --locked --release -p deepseek-ocr-cli --features metal
+        run: cargo build --locked --release -p deepseek-ocr-cli --features metal,accelerate
 
       - name: Build CLI (Windows)
         if: matrix.os == 'windows-latest'
@@ -48,7 +48,7 @@ jobs:
 
       - name: Build server (macOS)
         if: matrix.os == 'macos-latest'
-        run: cargo build --locked --release -p deepseek-ocr-server --features metal
+        run: cargo build --locked --release -p deepseek-ocr-server --features metal,accelerate
 
       - name: Build server (Windows)
         if: matrix.os == 'windows-latest'
