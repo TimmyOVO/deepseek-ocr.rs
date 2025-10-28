@@ -528,36 +528,42 @@ impl<'a> VisionContext<'a> {
                 .dims4()
                 .context("patch tensor must be 4D (batch, channels, height, width)")?;
             if patch_batch > 0 {
-                let chunks = patches.chunk(patch_batch, 0)?;
-                let local_results: Result<Vec<(Tensor, Tensor)>> = if self.parallel {
-                    chunks
+                if self.parallel {
+                    let chunks = patches.chunk(patch_batch, 0)?;
+                    let local_results: Result<Vec<(Tensor, Tensor)>> = chunks
                         .into_par_iter()
                         .map(|chunk| self.process_patch_chunk(chunk))
-                        .collect()
-                } else {
-                    chunks
+                        .collect();
+                    let (local_pre_list, local_post_list): (Vec<_>, Vec<_>) = local_results?
                         .into_iter()
-                        .map(|chunk| self.process_patch_chunk(chunk))
-                        .collect()
-                };
-                let (local_pre_list, local_post_list): (Vec<_>, Vec<_>) = local_results?
-                    .into_iter()
-                    .unzip::<Tensor, Tensor, Vec<_>, Vec<_>>();
+                        .unzip::<Tensor, Tensor, Vec<_>, Vec<_>>();
 
-                let local_pre_refs: Vec<_> = local_pre_list.iter().collect();
-                let local_post_refs: Vec<_> = local_post_list.iter().collect();
-                let local_pre = Tensor::cat(&local_pre_refs, 0)?
-                    .contiguous()
-                    .context("local pre tokens not contiguous")?;
-                let local_post = Tensor::cat(&local_post_refs, 0)?
-                    .contiguous()
-                    .context("local post tokens not contiguous")?;
-                let local_tokens = self
-                    .format_local_tokens(&local_post, crop_shape, newline)
-                    .context("format local tokens")?
-                    .contiguous()
-                    .context("local tokens not contiguous")?;
-                return Ok((Some(local_pre), Some(local_post), Some(local_tokens)));
+                    let local_pre_refs: Vec<_> = local_pre_list.iter().collect();
+                    let local_post_refs: Vec<_> = local_post_list.iter().collect();
+                    let local_pre = Tensor::cat(&local_pre_refs, 0)?
+                        .contiguous()
+                        .context("local pre tokens not contiguous")?;
+                    let local_post = Tensor::cat(&local_post_refs, 0)?
+                        .contiguous()
+                        .context("local post tokens not contiguous")?;
+                    let local_tokens = self
+                        .format_local_tokens(&local_post, crop_shape, newline)
+                        .context("format local tokens")?
+                        .contiguous()
+                        .context("local tokens not contiguous")?;
+                    return Ok((Some(local_pre), Some(local_post), Some(local_tokens)));
+                } else {
+                    let patches = patches
+                        .contiguous()
+                        .context("local patch tensor not contiguous")?;
+                    let (local_pre, local_post) = self.process_patch_batch(&patches)?;
+                    let local_tokens = self
+                        .format_local_tokens(&local_post, crop_shape, newline)
+                        .context("format local tokens")?
+                        .contiguous()
+                        .context("local tokens not contiguous")?;
+                    return Ok((Some(local_pre), Some(local_post), Some(local_tokens)));
+                }
             }
         }
         Ok((None, None, None))
@@ -567,15 +573,19 @@ impl<'a> VisionContext<'a> {
         let chunk = chunk
             .contiguous()
             .context("local patch chunk not contiguous")?;
+        self.process_patch_batch(&chunk)
+    }
+
+    fn process_patch_batch(&self, batch: &Tensor) -> Result<(Tensor, Tensor)> {
         let sam_local = self
             .vision
             .sam
-            .forward(&chunk)
+            .forward(batch)
             .context("sam forward (local)")?;
         let clip_local = self
             .vision
             .clip
-            .forward(&chunk, Some(&sam_local))
+            .forward(batch, Some(&sam_local))
             .context("clip forward (local)")?;
         let local_pre = self
             .build_clip_sam_tokens(&clip_local, &sam_local)
