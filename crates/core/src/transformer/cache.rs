@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use candle_core::Tensor;
+use candle_core::{DType, Tensor, shape::D};
 use std::boxed::Box;
 
 #[cfg(feature = "memlog")]
@@ -210,15 +210,25 @@ impl KvCacheEntry {
         let new_len = self.len + chunk_len;
         self.ensure_capacity(new_len)?;
         let (batch, heads, key_dim, _) = self.dims()?;
-        let key_ranges = [0..batch, 0..heads, 0..key_dim, self.len..new_len];
-        self.key_t = self.key_t.slice_assign(&key_ranges, &chunk.key_t)?;
+        let base_index = Tensor::arange(self.len as i64, new_len as i64, self.key_t.device())?
+            .to_dtype(DType::I64)?;
+        let key_index = base_index
+            .reshape((1, 1, 1, chunk_len))?
+            .expand((batch, heads, key_dim, chunk_len))?
+            .contiguous()?;
+        self.key_t
+            .scatter_set(&key_index, &chunk.key_t, D::Minus1)?;
         let (_, _, _, value_dim) = self
             .value
             .shape()
             .dims4()
             .context("value tensor must be 4D")?;
-        let value_ranges = [0..batch, 0..heads, self.len..new_len, 0..value_dim];
-        self.value = self.value.slice_assign(&value_ranges, &chunk.value)?;
+        let value_index = base_index
+            .reshape((1, 1, chunk_len, 1))?
+            .expand((batch, heads, chunk_len, value_dim))?
+            .contiguous()?;
+        self.value
+            .scatter_set(&value_index, &chunk.value, D::Minus2)?;
         self.len = new_len;
         Ok(())
     }
