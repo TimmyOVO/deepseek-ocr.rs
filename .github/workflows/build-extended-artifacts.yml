@@ -28,9 +28,6 @@ jobs:
           - variant: cuda
             dockerfile: docker/Dockerfile.cuda
             artifact-name: deepseek-ocr-cuda-bin
-          - variant: mkl
-            dockerfile: docker/Dockerfile.mkl
-            artifact-name: deepseek-ocr-mkl-bin
 
     steps:
       - name: Checkout repository
