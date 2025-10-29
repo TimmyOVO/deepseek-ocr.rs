@@ -28,6 +28,9 @@ jobs:
           - 86
           - 89
           - 120
+        cuda_version:
+          - "12.5.1"
+          - "12.9.1"
 
     steps:
       - name: Checkout repository
@@ -49,7 +52,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: |
-            suffix=-cuda${{ matrix.compute_cap }}
+            suffix=-cuda${{ matrix.cuda_version }}-cc${{ matrix.compute_cap }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -60,3 +63,4 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CUDA_COMPUTE_CAP=${{ matrix.compute_cap }}
+            CUDA_VERSION=${{ matrix.cuda_version }}
