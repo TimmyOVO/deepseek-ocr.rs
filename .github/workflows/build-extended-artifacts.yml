@@ -3,7 +3,7 @@ name: build-extended-artifacts
 on:
   push:
     branches:
-      - feature/docker
+      - master
     tags:
       - "v*"
   pull_request:
