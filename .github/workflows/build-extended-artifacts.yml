@@ -25,9 +25,6 @@ jobs:
           - variant: alpine
             dockerfile: docker/Dockerfile.alpine
             artifact-name: deepseek-ocr-alpine-bin
-          - variant: cuda
-            dockerfile: docker/Dockerfile.cuda
-            artifact-name: deepseek-ocr-cuda-bin
 
     steps:
       - name: Checkout repository
