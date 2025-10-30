@@ -93,10 +93,10 @@ jobs:
           restore-keys: |
             windows-cargo-
 
-      - name: Install CUDA Toolkit 12.2
+      - name: Install CUDA Toolkit 12.4
         uses: Jimver/cuda-toolkit@v0.2.24
         with:
-          cuda: '12.2.2'
+          cuda: '12.4.1'
           method: local
           log-file-suffix: windows-cuda.txt
 
