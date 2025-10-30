@@ -100,6 +100,24 @@ jobs:
           method: local
           log-file-suffix: windows-cuda.txt
 
+      - name: Locate MSVC toolchain
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found" }
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installPath) { throw "MSVC build tools not found" }
+          $clRoot = Join-Path $installPath 'VC\Tools\MSVC'
+          if (-not (Test-Path $clRoot)) { throw "Unable to locate VC tools under $installPath" }
+          $vcVersion = Get-ChildItem $clRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $vcVersion) { throw "No VC toolset directories found in $clRoot" }
+          $binDir = Join-Path $vcVersion.FullName 'bin\Hostx64\x64'
+          $clExe = Join-Path $binDir 'cl.exe'
+          if (-not (Test-Path $clExe)) { throw "cl.exe not found at $clExe" }
+          Add-Content $env:GITHUB_PATH $binDir
+          Add-Content $env:GITHUB_ENV "VCToolsInstallDir=$($vcVersion.FullName)"
+          Add-Content $env:GITHUB_ENV "NVCC_CCBIN=$clExe"
+
       - name: Build CLI with CUDA
         shell: pwsh
         run: cargo build --locked --release --no-default-features --features cuda -p deepseek-ocr-cli
