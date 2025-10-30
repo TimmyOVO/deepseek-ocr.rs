@@ -94,51 +94,11 @@ jobs:
             windows-cargo-
 
       - name: Install CUDA Toolkit 12.2
-        shell: pwsh
-        run: |
-          choco install cuda --version=12.2.0.53625 --no-progress -y --params '"/NoDriver"'
-
-      - name: Install Visual Studio Build Tools components
-        shell: pwsh
-        run: |
-          choco install visualstudio2022buildtools --no-progress -y --installargs '--add Microsoft.VisualStudio.Workload.VCTools --quiet --norestart'
-          $vsInstaller = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe"
-          if (Test-Path $vsInstaller) {
-            Start-Process -FilePath $vsInstaller -ArgumentList @(
-              'modify',
-              '--installPath', 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools',
-              '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-              '--quiet', '--norestart'
-            ) -Wait
-          }
-          $vsInstallRoot = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
-          if (-not (Test-Path $vsInstallRoot)) {
-            $vsInstallRoot = "C:\Program Files\Microsoft Visual Studio\2022\BuildTools"
-          }
-          $clRoot = Join-Path $vsInstallRoot 'VC\Tools\MSVC'
-          if (-not (Test-Path $clRoot)) { throw "MSVC toolchain not found after installation" }
-          $vcVersion = Get-ChildItem $clRoot | Sort-Object Name -Descending | Select-Object -First 1
-          if (-not $vcVersion) { throw "Unable to locate installed MSVC version" }
-          $binDir = Join-Path $vcVersion.FullName 'bin\Hostx64\x64'
-          Add-Content $env:GITHUB_PATH $binDir
-          Add-Content $env:GITHUB_ENV "VCToolsInstallDir=$($vcVersion.FullName)"
-
-      - name: Configure CUDA environment
-        shell: pwsh
-        run: |
-          $defaultPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
-          if (Test-Path $defaultPath) {
-            $versions = Get-ChildItem $defaultPath -Directory | Sort-Object Name -Descending
-            $match = $versions | Where-Object { $_.Name -eq 'v12.2' } | Select-Object -First 1
-            if (-not $match) { $match = $versions | Select-Object -First 1 }
-            if ($match) {
-              Add-Content $env:GITHUB_ENV "CUDA_PATH=$($match.FullName)"
-              Add-Content $env:GITHUB_PATH "$($match.FullName)\bin"
-              Add-Content $env:GITHUB_PATH "$($match.FullName)\libnvvp"
-              return
-            }
-          }
-          throw "Unable to locate CUDA installation under $defaultPath"
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: '12.2.2'
+          method: local
+          log-file-suffix: windows-cuda.txt
 
       - name: Build CLI with CUDA
         shell: pwsh
