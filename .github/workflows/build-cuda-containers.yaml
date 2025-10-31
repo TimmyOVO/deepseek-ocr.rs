@@ -10,7 +10,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}
+  IMAGE_ROOT: deepseek-ocr
 
 jobs:
   build:
@@ -53,7 +54,12 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_ROOT }}-cuda
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
           flavor: |
             suffix=-cuda${{ matrix.cuda_version }}-cc${{ matrix.compute_cap }}
 
