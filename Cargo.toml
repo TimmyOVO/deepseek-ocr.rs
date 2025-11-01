@@ -16,8 +16,8 @@ deepseek-ocr-core = { path = "./crates/core" }
 deepseek-ocr-assets = { path = "./crates/assets" }
 deepseek-ocr-config = { path = "./crates/config" }
 tokenizers = { version = "0.22", default-features = true }
-candle-core = { version = "0.9", default-features = false }
-candle-nn = { version = "0.9", default-features = false }
+candle-core = { git = "https://github.com/huggingface/candle", default-features = false }
+candle-nn = { git = "https://github.com/huggingface/candle", default-features = false }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
