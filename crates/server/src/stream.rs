@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use deepseek_ocr_core::streaming::DeltaTracker;
 use rocket::{
     response::stream::{Event, EventStream},
     tokio::sync::mpsc,
@@ -89,7 +90,7 @@ struct StreamRuntime {
     last_count: usize,
     role_sent: bool,
     finished: bool,
-    decoded_text: String,
+    delta: DeltaTracker,
 }
 
 pub struct StreamController {
@@ -254,71 +255,38 @@ impl StreamControllerInner {
             return;
         }
 
-        let (include_role, previous_text) = {
-            let state = self.runtime.lock().expect("stream state lock poisoned");
+        let mut maybe_delta = None;
+        let mut include_role_flag = false;
+
+        {
+            let mut state = self.runtime.lock().expect("stream state lock poisoned");
+
             if count <= state.last_count {
+                state.last_count = count;
                 return;
             }
+
             let include_role = matches!(self.kind, StreamKind::Chat { .. }) && !state.role_sent;
-            (include_role, state.decoded_text.clone())
-        };
 
-        if let Some(full_text) = self.decode_tokens(&ids[..count]) {
-            let (delta, next_text) = Self::prepare_delta(&previous_text, &full_text, is_final);
-            let should_emit = include_role || !delta.is_empty();
+            if let Some(full_text) = self.decode_tokens(&ids[..count]) {
+                let delta = state.delta.advance(&full_text, is_final);
+                let should_emit = include_role || !delta.is_empty();
 
-            if should_emit {
-                self.emit_delta(delta.clone(), include_role);
-            }
-
-            if let Ok(mut state) = self.runtime.lock() {
-                state.last_count = count;
-                if should_emit && include_role {
-                    state.role_sent = true;
+                if should_emit {
+                    include_role_flag = include_role;
+                    maybe_delta = Some(delta);
+                    if include_role {
+                        state.role_sent = true;
+                    }
                 }
-                state.decoded_text = next_text;
             }
-        } else if let Ok(mut state) = self.runtime.lock() {
+
             state.last_count = count;
         }
-    }
 
-    fn extract_delta(previous: &str, current: &str) -> String {
-        if current.starts_with(previous) {
-            return current[previous.len()..].to_owned();
+        if let Some(delta) = maybe_delta {
+            self.emit_delta(delta, include_role_flag);
         }
-
-        let mut prefix_bytes = 0;
-        for (a, b) in previous.chars().zip(current.chars()) {
-            if a != b {
-                break;
-            }
-            prefix_bytes += a.len_utf8();
-        }
-
-        current[prefix_bytes..].to_owned()
-    }
-
-    fn prepare_delta(previous: &str, current: &str, is_final: bool) -> (String, String) {
-        let mut raw_delta = Self::extract_delta(previous, current);
-        if raw_delta.is_empty() {
-            return (String::new(), current.to_owned());
-        }
-
-        if !is_final {
-            if let Some(idx) = raw_delta.find(char::REPLACEMENT_CHARACTER) {
-                if idx == 0 {
-                    return (String::new(), previous.to_owned());
-                }
-                raw_delta.truncate(idx);
-                let mut next = previous.to_owned();
-                next.push_str(&raw_delta);
-                return (raw_delta, next);
-            }
-        }
-
-        let next = current.to_owned();
-        (raw_delta, next)
     }
 
     fn finalize(&self, normalized: &str, prompt_tokens: usize, completion_tokens: usize) {

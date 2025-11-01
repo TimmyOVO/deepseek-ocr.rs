@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-ocr-cli"
-version = "0.3.4"
+version = "0.3.7"
 edition = "2024"
 
 [dependencies]

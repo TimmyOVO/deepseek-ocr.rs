@@ -4,6 +4,7 @@ pub mod conversation;
 pub mod inference;
 pub mod model;
 pub mod runtime;
+pub mod streaming;
 pub mod transformer;
 pub mod vision;
 

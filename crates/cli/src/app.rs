@@ -16,6 +16,7 @@ use deepseek_ocr_core::{
     },
     model::{DeepseekOcrModel, GenerateOptions},
     runtime::{default_dtype_for_device, prepare_device_and_dtype},
+    streaming::DeltaTracker,
 };
 use image::DynamicImage;
 use tokenizers::Tokenizer;
@@ -27,6 +28,12 @@ use crate::{
     prompt::load_prompt,
     resources::{ensure_config_file, ensure_tokenizer_file, prepare_weights_path},
 };
+
+#[derive(Default)]
+struct StreamProgress {
+    last_count: usize,
+    delta: DeltaTracker,
+}
 
 pub fn run(args: Args) -> Result<()> {
     let bench_enabled = args.bench || args.bench_output.is_some();
@@ -143,29 +150,45 @@ pub fn run(args: Args) -> Result<()> {
     options.use_cache = app_config.inference.use_cache;
 
     let tokenizer_for_stream = tokenizer.clone();
-    let progress_state = Rc::new(RefCell::new(0usize));
+    let progress_state = Rc::new(RefCell::new(StreamProgress::default()));
     let stream_state = Rc::clone(&progress_state);
     let stdout = Rc::new(RefCell::new(io::stdout()));
     let stdout_handle = Rc::clone(&stdout);
     let progress_callback = move |count: usize, ids: &[i64]| {
-        let mut last = stream_state.borrow_mut();
-        if count <= *last {
-            return;
-        }
-        let new_tokens: Vec<u32> = ids[*last..count]
-            .iter()
-            .filter_map(|&id| u32::try_from(id).ok())
-            .collect();
-        if !new_tokens.is_empty() {
-            if let Ok(decoded) = tokenizer_for_stream.decode(&new_tokens, true) {
-                if !decoded.is_empty() {
-                    let mut handle = stdout_handle.borrow_mut();
-                    let _ = write!(handle, "{}", decoded);
-                    let _ = handle.flush();
+        let mut delta_to_emit = None;
+
+        {
+            let mut state = stream_state.borrow_mut();
+            if count <= state.last_count {
+                state.last_count = count;
+                return;
+            }
+
+            let token_slice: Vec<u32> = ids[..count]
+                .iter()
+                .filter_map(|&id| u32::try_from(id).ok())
+                .collect();
+
+            if token_slice.is_empty() {
+                state.last_count = count;
+                return;
+            }
+
+            if let Ok(full_text) = tokenizer_for_stream.decode(&token_slice, true) {
+                let delta = state.delta.advance(&full_text, false);
+                if !delta.is_empty() {
+                    delta_to_emit = Some(delta);
                 }
             }
+
+            state.last_count = count;
         }
-        *last = count;
+
+        if let Some(delta) = delta_to_emit {
+            let mut handle = stdout_handle.borrow_mut();
+            let _ = write!(handle, "{}", delta);
+            let _ = handle.flush();
+        }
     };
     options.progress_callback = Some(&progress_callback);
 
@@ -193,6 +216,17 @@ pub fn run(args: Args) -> Result<()> {
             true,
         )
         .unwrap_or_default();
+
+    let final_delta = {
+        let mut state = progress_state.borrow_mut();
+        state.last_count = generated_tokens.len();
+        state.delta.advance(&decoded, true)
+    };
+    if !final_delta.is_empty() {
+        let mut handle = stdout.borrow_mut();
+        let _ = write!(handle, "{}", final_delta);
+        let _ = handle.flush();
+    }
     let normalized = normalize_text(&decoded);
     info!("Final output:\n{normalized}");
 
