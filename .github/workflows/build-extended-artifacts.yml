@@ -105,8 +105,8 @@ jobs:
         include:
           - cuda: '12.4.1'
             artifact_suffix: cuda12-4-1
-          - cuda: '13.0.1'
-            artifact_suffix: cuda13-0-1
+          - cuda: '13.0.2'
+            artifact_suffix: cuda13-0-2
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -125,7 +125,7 @@ jobs:
             windows-cargo-
 
       - name: Install CUDA Toolkit ${{ matrix.cuda }}
-        uses: Jimver/cuda-toolkit@v0.2.24
+        uses: Jimver/cuda-toolkit@v0.2.29
         with:
           cuda: ${{ matrix.cuda }}
           method: local
