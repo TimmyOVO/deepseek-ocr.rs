@@ -1179,7 +1179,8 @@ impl DeepseekOcrModel {
         image_size: u32,
         crop_mode: bool,
     ) -> Result<OwnedVisionInput> {
-        let global_view = build_global_view(image, base_size);
+        let global_size = if crop_mode { base_size } else { image_size };
+        let global_view = build_global_view(image, global_size);
         let global = image_to_tensor(&global_view, self.device(), self.dtype)?
             .unsqueeze(0)?
             .contiguous()?;
