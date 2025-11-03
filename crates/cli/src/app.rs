@@ -1,9 +1,9 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     convert::TryFrom,
     io::{self, Write},
     rc::Rc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -153,10 +153,20 @@ pub fn run(args: Args) -> Result<()> {
     let tokenizer_for_stream = tokenizer.clone();
     let progress_state = Rc::new(RefCell::new(StreamProgress::default()));
     let stream_state = Rc::clone(&progress_state);
+    let start_time_cell = Rc::new(Cell::new(None::<Instant>));
+    let prefill_duration_cell = Rc::new(Cell::new(None::<Duration>));
+    let start_time_for_cb = Rc::clone(&start_time_cell);
+    let prefill_duration_for_cb = Rc::clone(&prefill_duration_cell);
     let stdout = Rc::new(RefCell::new(io::stdout()));
     let stdout_handle = Rc::clone(&stdout);
     let progress_callback = move |count: usize, ids: &[i64]| {
         let mut delta_to_emit = None;
+
+        if count > 0 && prefill_duration_for_cb.get().is_none() {
+            if let Some(start) = start_time_for_cb.get() {
+                prefill_duration_for_cb.set(Some(start.elapsed()));
+            }
+        }
 
         {
             let mut state = stream_state.borrow_mut();
@@ -203,6 +213,7 @@ pub fn run(args: Args) -> Result<()> {
     );
     info!("--- Generation start ---");
     let gen_start = Instant::now();
+    start_time_cell.set(Some(gen_start));
     let generated = model.generate(&input_ids, options)?;
     let elapsed = gen_start.elapsed();
     info!("--- Generation done in {:.2?} ---", elapsed);
@@ -234,6 +245,34 @@ pub fn run(args: Args) -> Result<()> {
     }
     let normalized = normalize_text(&decoded);
     info!("Final output:\n{normalized}");
+
+    {
+        let total_elapsed = elapsed;
+        let prefill_elapsed = prefill_duration_cell
+            .get()
+            .filter(|duration| *duration <= total_elapsed)
+            .unwrap_or(total_elapsed);
+        let decode_elapsed = total_elapsed
+            .checked_sub(prefill_elapsed)
+            .unwrap_or_default();
+        let prompt_tokens = input_ids_vec.len();
+        let generated_count = generated_tokens.len();
+        let prefill_secs = prefill_elapsed.as_secs_f64();
+        let decode_secs = decode_elapsed.as_secs_f64();
+        let prefill_rate = if prefill_secs > 0.0 {
+            prompt_tokens as f64 / prefill_secs
+        } else {
+            0.0
+        };
+        let decode_rate = if decode_secs > 0.0 {
+            generated_count as f64 / decode_secs
+        } else {
+            0.0
+        };
+        info!(
+            "Throughput: prefill={prompt_tokens} tok in {prefill_secs:.2}s ({prefill_rate:.2} tok/s); generation={generated_count} tok in {decode_secs:.2}s ({decode_rate:.2} tok/s)"
+        );
+    }
 
     if let Some(session) = bench_session {
         let report = session.finalize()?;
