@@ -36,6 +36,7 @@ struct StreamProgress {
 }
 
 pub fn run(args: Args) -> Result<()> {
+    let quiet = args.quiet;
     let bench_enabled = args.bench || args.bench_output.is_some();
     let bench_session = bench::maybe_start(bench_enabled, args.bench_output.clone())?;
 
@@ -190,7 +191,11 @@ pub fn run(args: Args) -> Result<()> {
             let _ = handle.flush();
         }
     };
-    options.progress_callback = Some(&progress_callback);
+
+    // Only enable streaming progress if not in quiet mode
+    if !quiet {
+        options.progress_callback = Some(&progress_callback);
+    }
 
     info!(
         "Starting generation with requested budget {} tokens",

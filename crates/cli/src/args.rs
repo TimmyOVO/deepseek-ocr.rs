@@ -78,6 +78,10 @@ pub struct Args {
     /// Write benchmark events to a JSON file.
     #[arg(long, value_name = "PATH", help_heading = "Benchmark")]
     pub bench_output: Option<PathBuf>,
+
+    /// Quiet mode - output only the final result without logs or progress.
+    #[arg(short, long, help_heading = "Application")]
+    pub quiet: bool,
 }
 
 impl From<&Args> for ConfigOverrides {

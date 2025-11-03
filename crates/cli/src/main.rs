@@ -11,15 +11,15 @@ use clap::Parser;
 use tracing::error;
 
 fn main() {
-    logging::init();
-    if let Err(err) = try_run() {
+    let args = Args::parse();
+    logging::init(args.quiet);
+    if let Err(err) = try_run(args) {
         error!(error = %err, "CLI failed");
         eprintln!("error: {err:#}");
         std::process::exit(1);
     }
 }
 
-fn try_run() -> Result<()> {
-    let args = Args::parse();
+fn try_run(args: Args) -> Result<()> {
     app::run(args)
 }
