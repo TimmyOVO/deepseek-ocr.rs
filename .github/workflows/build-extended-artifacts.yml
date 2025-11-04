@@ -124,6 +124,12 @@ jobs:
           restore-keys: |
             windows-cargo-
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        if: matrix.cuda == '13.0.2'
+        with:
+          python-version: '3.x'
+
       - name: Install CUDA Toolkit ${{ matrix.cuda }}
         uses: Jimver/cuda-toolkit@v0.2.29
         with:
@@ -135,7 +141,7 @@ jobs:
         if: matrix.cuda == '13.0.2'
         shell: pwsh
         run: |
-          python - <<'PY'
+          $pythonCode = @"
           from pathlib import Path
 
           path = Path('Cargo.toml')
@@ -149,7 +155,8 @@ jobs:
           text = text.replace(stable_core, git_core, 1)
           text = text.replace(stable_nn, git_nn, 1)
           path.write_text(text)
-          PY
+          "@
+          python -c $pythonCode
 
       - name: Upgrade Candle to git tip for CUDA 13
         if: matrix.cuda == '13.0.2'
