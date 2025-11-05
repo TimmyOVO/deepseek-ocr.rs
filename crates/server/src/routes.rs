@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
-    generation::{convert_messages, generate_async},
+    generation::{DecodeParameters, convert_messages, generate_async},
     models::{
         ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessageResponse, ModelInfo,
         ModelsResponse, ResponseContent, ResponseOutput, ResponsesRequest, ResponsesResponse,
@@ -47,8 +47,21 @@ pub async fn responses_endpoint(
         .max_output_tokens
         .or(req.max_tokens)
         .unwrap_or(state.max_new_tokens);
+    let mut decode = DecodeParameters::from_inputs(&gen_inputs, max_tokens);
+    apply_decode_overrides(
+        &mut decode,
+        req.do_sample,
+        req.temperature,
+        req.top_p,
+        req.top_k,
+        req.repetition_penalty,
+        req.no_repeat_ngram_size,
+        req.seed,
+        req.use_cache,
+    );
     if req.stream.unwrap_or(false) {
         let stream_inputs = gen_inputs.clone();
+        let decode_for_task = decode.clone();
         let created = current_timestamp();
         let response_id = format!("resp-{}", Uuid::new_v4());
         let output_id = format!("msg-{}", Uuid::new_v4());
@@ -69,14 +82,14 @@ pub async fn responses_endpoint(
                 stream_inputs,
                 prompt,
                 images,
-                max_tokens,
+                decode_for_task,
                 Some(task_context),
             )
             .await;
         });
         return Ok(Either::Right(stream));
     }
-    let generation = generate_async(gen_inputs, prompt, images, max_tokens, None).await?;
+    let generation = generate_async(gen_inputs, prompt, images, decode, None).await?;
     let created = current_timestamp();
     let response = ResponsesResponse {
         id: format!("resp-{}", Uuid::new_v4()),
@@ -111,8 +124,21 @@ pub async fn chat_completions_endpoint(
     let (prompt, images) = convert_messages(&req.messages)?;
     debug!(prompt = %prompt, "Prepared chat prompt");
     let max_tokens = req.max_tokens.unwrap_or(state.max_new_tokens);
+    let mut decode = DecodeParameters::from_inputs(&gen_inputs, max_tokens);
+    apply_decode_overrides(
+        &mut decode,
+        req.do_sample,
+        req.temperature,
+        req.top_p,
+        req.top_k,
+        req.repetition_penalty,
+        req.no_repeat_ngram_size,
+        req.seed,
+        req.use_cache,
+    );
     if req.stream.unwrap_or(false) {
         let stream_inputs = gen_inputs.clone();
+        let decode_for_task = decode.clone();
         let created = current_timestamp();
         let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
         let (sender, rx) = mpsc::unbounded_channel();
@@ -131,14 +157,14 @@ pub async fn chat_completions_endpoint(
                 stream_inputs,
                 prompt,
                 images,
-                max_tokens,
+                decode_for_task,
                 Some(task_context),
             )
             .await;
         });
         return Ok(Either::Right(stream));
     }
-    let generation = generate_async(gen_inputs, prompt, images, max_tokens, None).await?;
+    let generation = generate_async(gen_inputs, prompt, images, decode, None).await?;
     let created = current_timestamp();
     let response = ChatCompletionResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
@@ -181,6 +207,42 @@ fn ensure_model(requested: &str, available: &str) -> Result<(), ApiError> {
     }
 }
 
+fn apply_decode_overrides(
+    params: &mut DecodeParameters,
+    do_sample: Option<bool>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    top_k: Option<usize>,
+    repetition_penalty: Option<f32>,
+    no_repeat_ngram_size: Option<usize>,
+    seed: Option<u64>,
+    use_cache: Option<bool>,
+) {
+    if let Some(sample) = do_sample {
+        params.do_sample = sample;
+    }
+    if let Some(temp) = temperature {
+        params.temperature = temp;
+    }
+    if let Some(prob) = top_p {
+        params.top_p = if prob < 1.0 { Some(prob) } else { None };
+    }
+    if let Some(k) = top_k {
+        params.top_k = if k == 0 { None } else { Some(k) };
+    }
+    if let Some(penalty) = repetition_penalty {
+        params.repetition_penalty = penalty;
+    }
+    if let Some(size) = no_repeat_ngram_size {
+        params.no_repeat_ngram_size = if size == 0 { None } else { Some(size) };
+    }
+    if let Some(seed) = seed {
+        params.seed = Some(seed);
+    }
+    if let Some(use_cache) = use_cache {
+        params.use_cache = use_cache;
+    }
+}
 fn current_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

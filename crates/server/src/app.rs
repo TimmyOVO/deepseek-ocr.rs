@@ -54,6 +54,14 @@ pub async fn run(args: Args) -> Result<()> {
         app_config.inference.image_size,
         app_config.inference.crop_mode,
         app_config.inference.max_new_tokens,
+        app_config.inference.use_cache,
+        app_config.inference.do_sample,
+        app_config.inference.temperature,
+        app_config.inference.top_p,
+        app_config.inference.top_k,
+        app_config.inference.repetition_penalty,
+        app_config.inference.no_repeat_ngram_size,
+        app_config.inference.seed,
         app_config.server.model_id.clone(),
     );
 

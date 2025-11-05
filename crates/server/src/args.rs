@@ -51,6 +51,34 @@ pub struct Args {
     #[arg(long, help_heading = "Inference")]
     pub max_new_tokens: Option<usize>,
 
+    /// Enable sampling during decoding (true/false).
+    #[arg(long, help_heading = "Inference", value_name = "BOOL")]
+    pub do_sample: Option<bool>,
+
+    /// Softmax temperature for sampling.
+    #[arg(long, help_heading = "Inference")]
+    pub temperature: Option<f64>,
+
+    /// Nucleus sampling probability mass.
+    #[arg(long, help_heading = "Inference")]
+    pub top_p: Option<f64>,
+
+    /// Top-k sampling cutoff.
+    #[arg(long, help_heading = "Inference")]
+    pub top_k: Option<usize>,
+
+    /// Repetition penalty (>1 discourages repeats).
+    #[arg(long, help_heading = "Inference")]
+    pub repetition_penalty: Option<f32>,
+
+    /// Enforce no-repeat n-gram constraint of the given size.
+    #[arg(long, help_heading = "Inference")]
+    pub no_repeat_ngram_size: Option<usize>,
+
+    /// RNG seed for sampling.
+    #[arg(long, help_heading = "Inference")]
+    pub seed: Option<u64>,
+
     /// Host/IP for Rocket to bind to.
     #[arg(long, help_heading = "Application")]
     pub host: Option<String>,
@@ -78,6 +106,13 @@ impl From<&Args> for ConfigOverrides {
         overrides.inference.image_size = args.image_size;
         overrides.inference.crop_mode = args.crop_mode;
         overrides.inference.max_new_tokens = args.max_new_tokens;
+        overrides.inference.do_sample = args.do_sample;
+        overrides.inference.temperature = args.temperature;
+        overrides.inference.top_p = args.top_p;
+        overrides.inference.top_k = args.top_k;
+        overrides.inference.repetition_penalty = args.repetition_penalty;
+        overrides.inference.no_repeat_ngram_size = args.no_repeat_ngram_size;
+        overrides.inference.seed = args.seed;
         overrides.server.host = args.host.clone();
         overrides.server.port = args.port;
         overrides.server.model_id = args.model_id.clone();

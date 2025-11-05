@@ -81,6 +81,22 @@ pub struct ResponsesRequest {
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+    #[serde(default)]
+    pub no_repeat_ngram_size: Option<usize>,
+    #[serde(default)]
+    pub do_sample: Option<bool>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub use_cache: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +108,22 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+    #[serde(default)]
+    pub no_repeat_ngram_size: Option<usize>,
+    #[serde(default)]
+    pub do_sample: Option<bool>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub use_cache: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -28,11 +28,44 @@ pub struct GenerationResult {
     pub response_tokens: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct DecodeParameters {
+    pub max_new_tokens: usize,
+    pub do_sample: bool,
+    pub temperature: f64,
+    pub top_p: Option<f64>,
+    pub top_k: Option<usize>,
+    pub repetition_penalty: f32,
+    pub no_repeat_ngram_size: Option<usize>,
+    pub seed: Option<u64>,
+    pub use_cache: bool,
+}
+
+impl DecodeParameters {
+    pub fn from_inputs(inputs: &GenerationInputs, max_new_tokens: usize) -> Self {
+        Self {
+            max_new_tokens,
+            do_sample: inputs.do_sample,
+            temperature: inputs.temperature,
+            top_p: if inputs.top_p < 1.0 {
+                Some(inputs.top_p)
+            } else {
+                None
+            },
+            top_k: inputs.top_k,
+            repetition_penalty: inputs.repetition_penalty,
+            no_repeat_ngram_size: inputs.no_repeat_ngram_size,
+            seed: inputs.seed,
+            use_cache: inputs.use_cache,
+        }
+    }
+}
+
 pub async fn generate_async(
     inputs: GenerationInputs,
     prompt: String,
     images: Vec<DynamicImage>,
-    max_new_tokens: usize,
+    params: DecodeParameters,
     stream: Option<StreamContext>,
 ) -> Result<GenerationResult, ApiError> {
     let stream_for_block = stream.clone();
@@ -45,7 +78,7 @@ pub async fn generate_async(
             inputs.base_size,
             inputs.image_size,
             inputs.crop_mode,
-            max_new_tokens,
+            params,
             stream_for_block,
         )
     })
@@ -77,7 +110,7 @@ fn generate_blocking(
     base_size: u32,
     image_size: u32,
     crop_mode: bool,
-    max_new_tokens: usize,
+    params: DecodeParameters,
     stream: Option<StreamContext>,
 ) -> Result<GenerationResult, ApiError> {
     let guard = model
@@ -112,12 +145,20 @@ fn generate_blocking(
         .to_dtype(DType::U8)
         .map_err(|err| ApiError::Internal(format!("mask cast failed: {err}")))?;
 
-    let mut options = GenerateOptions::new(max_new_tokens);
+    let mut options = GenerateOptions::new(params.max_new_tokens);
     options.images_seq_mask = Some(&mask_tensor);
     if !embeddings.is_empty() {
         options.image_embeddings = Some(embeddings.as_slice());
     }
     options.eos_token_id = guard.language_model().config().eos_token_id;
+    options.use_cache = params.use_cache;
+    options.do_sample = params.do_sample;
+    options.temperature = params.temperature;
+    options.top_p = params.top_p;
+    options.top_k = params.top_k;
+    options.repetition_penalty = params.repetition_penalty;
+    options.no_repeat_ngram_size = params.no_repeat_ngram_size;
+    options.seed = params.seed;
 
     let mut _progress_guard: Option<Box<dyn Fn(usize, &[i64]) + Send + Sync>> = None;
     if let Some(controller) = &stream_controller {

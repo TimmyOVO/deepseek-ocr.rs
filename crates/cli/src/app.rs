@@ -149,6 +149,17 @@ pub fn run(args: Args) -> Result<()> {
     }
     options.eos_token_id = model.language_model().config().eos_token_id;
     options.use_cache = app_config.inference.use_cache;
+    options.do_sample = app_config.inference.do_sample;
+    options.temperature = app_config.inference.temperature;
+    options.top_p = if app_config.inference.top_p < 1.0 {
+        Some(app_config.inference.top_p)
+    } else {
+        None
+    };
+    options.top_k = app_config.inference.top_k;
+    options.repetition_penalty = app_config.inference.repetition_penalty;
+    options.no_repeat_ngram_size = app_config.inference.no_repeat_ngram_size;
+    options.seed = app_config.inference.seed;
 
     let tokenizer_for_stream = tokenizer.clone();
     let progress_state = Rc::new(RefCell::new(StreamProgress::default()));

@@ -78,6 +78,13 @@ pub struct InferenceSettings {
     pub crop_mode: bool,
     pub max_new_tokens: usize,
     pub use_cache: bool,
+    pub do_sample: bool,
+    pub temperature: f64,
+    pub top_p: f64,
+    pub top_k: Option<usize>,
+    pub repetition_penalty: f32,
+    pub no_repeat_ngram_size: Option<usize>,
+    pub seed: Option<u64>,
 }
 
 impl Default for InferenceSettings {
@@ -91,6 +98,13 @@ impl Default for InferenceSettings {
             crop_mode: true,
             max_new_tokens: 512,
             use_cache: true,
+            do_sample: false,
+            temperature: 0.0,
+            top_p: 1.0,
+            top_k: None,
+            repetition_penalty: 1.0,
+            no_repeat_ngram_size: Some(20),
+            seed: None,
         }
     }
 }
@@ -244,6 +258,27 @@ impl AppConfig {
         if let Some(use_cache) = overrides.inference.use_cache {
             self.inference.use_cache = use_cache;
         }
+        if let Some(do_sample) = overrides.inference.do_sample {
+            self.inference.do_sample = do_sample;
+        }
+        if let Some(temperature) = overrides.inference.temperature {
+            self.inference.temperature = temperature;
+        }
+        if let Some(top_p) = overrides.inference.top_p {
+            self.inference.top_p = top_p;
+        }
+        if let Some(top_k) = overrides.inference.top_k {
+            self.inference.top_k = Some(top_k);
+        }
+        if let Some(repetition_penalty) = overrides.inference.repetition_penalty {
+            self.inference.repetition_penalty = repetition_penalty;
+        }
+        if let Some(no_repeat) = overrides.inference.no_repeat_ngram_size {
+            self.inference.no_repeat_ngram_size = Some(no_repeat);
+        }
+        if overrides.inference.seed.is_some() {
+            self.inference.seed = overrides.inference.seed;
+        }
         if let Some(host) = overrides.server.host.as_ref() {
             self.server.host = host.clone();
         }
@@ -372,6 +407,13 @@ pub struct InferenceOverride {
     pub crop_mode: Option<bool>,
     pub max_new_tokens: Option<usize>,
     pub use_cache: Option<bool>,
+    pub do_sample: Option<bool>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<usize>,
+    pub repetition_penalty: Option<f32>,
+    pub no_repeat_ngram_size: Option<usize>,
+    pub seed: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone)]

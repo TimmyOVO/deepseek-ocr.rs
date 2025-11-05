@@ -727,6 +727,7 @@ dependencies = [
  "ndarray",
  "ndarray-npy",
  "once_cell",
+ "rand 0.8.5",
  "rayon",
  "serde",
  "serde_json",

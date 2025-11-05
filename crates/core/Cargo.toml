@@ -17,6 +17,7 @@ dhat = "0.3.3"
 candle-flash-attn = { version = "0.9", default-features = false, optional = true }
 tokenizers = { version = "0.22", default-features = true }
 rayon = "1.10"
+rand = { version = "0.8.5", features = ["std"] }
 
 [features]
 default = []
