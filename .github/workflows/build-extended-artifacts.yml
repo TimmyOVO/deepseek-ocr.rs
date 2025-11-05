@@ -114,6 +114,8 @@ jobs:
         exclude:
           - cuda: '12.4.1'
             compute_cap: 120
+          - cuda: '13.0.2'
+            compute_cap: 70
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
