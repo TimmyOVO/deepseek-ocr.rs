@@ -9,6 +9,8 @@ on:
   pull_request:
     branches:
       - master
+  workflow_dispatch:
+
 
 permissions:
   contents: write
@@ -94,19 +96,26 @@ jobs:
           files: deepseek-ocr-${{ matrix.variant }}-linux.tar.gz
 
   windows-cuda-binaries:
-    name: Build Windows CUDA binaries (${{ matrix.cuda }})
+    name: Build Windows CUDA binaries (${{ matrix.cuda }}, sm_${{ matrix.compute_cap }})
     runs-on: windows-latest
     timeout-minutes: 120
     env:
-      CUDA_COMPUTE_CAP: "80"
+      CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
     strategy:
       fail-fast: false
       matrix:
+        cuda: ['12.4.1', '13.0.2']
+        compute_cap: [70, 75, 80, 86, 89, 120]
         include:
           - cuda: '12.4.1'
-            artifact_suffix: cuda12-4-1
+            artifact_suffix_base: cuda12-4-1
           - cuda: '13.0.2'
-            artifact_suffix: cuda13-0-2-preview
+            artifact_suffix_base: cuda13-0-2-preview
+        exclude:
+          - cuda: '12.4.1'
+            compute_cap: 120
+          - cuda: '13.0.2'
+            compute_cap: 70
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -193,7 +202,7 @@ jobs:
       - name: Collect CUDA binaries
         shell: pwsh
         run: |
-          $artifactPath = "artifacts\\windows-${{ matrix.artifact_suffix }}"
+          $artifactPath = "artifacts\\windows-${{ matrix.artifact_suffix_base }}-sm${{ matrix.compute_cap }}"
           New-Item -ItemType Directory -Force -Path $artifactPath | Out-Null
           Copy-Item target\release\deepseek-ocr-cli.exe $artifactPath
           Copy-Item target\release\deepseek-ocr-server.exe $artifactPath
@@ -201,21 +210,21 @@ jobs:
       - name: Upload CUDA Windows binaries
         uses: actions/upload-artifact@v4
         with:
-          name: deepseek-ocr-windows-${{ matrix.artifact_suffix }}
-          path: artifacts\windows-${{ matrix.artifact_suffix }}
+          name: deepseek-ocr-windows-${{ matrix.artifact_suffix_base }}-sm${{ matrix.compute_cap }}
+          path: artifacts\windows-${{ matrix.artifact_suffix_base }}-sm${{ matrix.compute_cap }}
 
       - name: Package CUDA Windows binaries
         shell: pwsh
         run: |
-          $artifactPath = "artifacts\\windows-${{ matrix.artifact_suffix }}"
-          $zipName = "deepseek-ocr-windows-${{ matrix.artifact_suffix }}.zip"
+          $artifactPath = "artifacts\\windows-${{ matrix.artifact_suffix_base }}-sm${{ matrix.compute_cap }}"
+          $zipName = "deepseek-ocr-windows-${{ matrix.artifact_suffix_base }}-sm${{ matrix.compute_cap }}.zip"
           Compress-Archive -Path "$artifactPath\*" -DestinationPath $zipName -Force
 
       - name: Publish release asset (Windows CUDA)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: deepseek-ocr-windows-${{ matrix.artifact_suffix }}.zip
+          files: deepseek-ocr-windows-${{ matrix.artifact_suffix_base }}-sm${{ matrix.compute_cap }}.zip
 
       - name: Restore manifest and lockfile
         if: matrix.cuda == '13.0.2'
