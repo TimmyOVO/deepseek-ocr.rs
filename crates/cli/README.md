@@ -26,6 +26,13 @@ cargo run -p deepseek-ocr-cli --release -- \
 | `--crop-mode` | `true` | Toggle dynamic crop sampling (`false` to disable). |
 | `--max-new-tokens` | `512` | Maximum number of tokens generated during decoding. |
 | `--no-cache` | `false` | Disable the decoder KV-cache. Helpful for debugging only. |
+| `--do-sample` | `false` | Enable sampling (requires `--temperature > 0`). |
+| `--temperature` | `0.0` | Softmax temperature used when sampling is enabled. |
+| `--top-p` | `1.0` | Nucleus sampling mass; ignored unless sampling. |
+| `--top-k` | – | Top-k cutoff during sampling. |
+| `--repetition-penalty` | `1.0` | Penalise previously generated tokens (>1 discourages repeats). |
+| `--no-repeat-ngram-size` | `20` | N-gram blocking window applied to every decode step. |
+| `--seed` | – | RNG seed for reproducible sampling runs. |
 
 > **Heads-up:** If the final markdown appears truncated, increase `--max-new-tokens`. The model stops once it has emitted the configured number of tokens even if the prompt is unfinished.
 

@@ -167,6 +167,9 @@ deepseek-ocr-cli --help
 - `--image`：与 `<image>` 数量一致的图片路径
 - `--device` / `--dtype`：macOS 建议 `--device metal --dtype f16`，NVIDIA 用户使用 `--device cuda --dtype f16`
 - `--max-new-tokens`：生成长度上限
+- 采样相关：`--do-sample`、`--temperature`、`--top-p`、`--top-k`、`--repetition-penalty`、`--no-repeat-ngram-size`、`--seed`
+  - 默认保持确定性输出（`do_sample=false`、`temperature=0.0`、`no_repeat_ngram_size=20`）
+  - 若需要随机采样，请显式指定 `--do-sample true --temperature 0.8`，并按需调整其他参数
 
 ## HTTP Server ☁️
 

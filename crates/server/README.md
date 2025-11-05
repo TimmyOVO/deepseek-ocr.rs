@@ -23,6 +23,13 @@ cargo run -p deepseek-ocr-server --release -- \
 | `--crop-mode` | `true` | Enables dynamic crop mode (`false` to disable). |
 | `--max-new-tokens` | `512` | Default decoding budget applied to incoming requests. |
 | `--host` | `0.0.0.0` | Address Rocket binds to. |
+| `--do-sample` | `false` | Enable sampling for all requests unless overridden per-call. |
+| `--temperature` | `0.0` | Sampling temperature; must be >0 alongside `--do-sample`. |
+| `--top-p` | `1.0` | Nucleus sampling mass (fraction of probability kept). |
+| `--top-k` | – | Top-k cutoff applied during sampling. |
+| `--repetition-penalty` | `1.0` | Token repetition penalty (>1 discourages repeats). |
+| `--no-repeat-ngram-size` | `20` | N-gram blocking window enforced during decoding. |
+| `--seed` | – | RNG seed for sampling (mainly for debugging). |
 | `--port` | `8000` | TCP port for the HTTP server. |
 | `--model-id` | `deepseek-ocr` | Model name returned by `/v1/models` and streamed responses. |
 

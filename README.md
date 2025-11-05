@@ -166,6 +166,9 @@ Key flags:
 - `--image`: path(s) matching `<image>` placeholders
 - `--device` and `--dtype`: choose `metal` + `f16` on Apple Silicon or `cuda` + `f16` on NVIDIA GPUs
 - `--max-new-tokens`: decoding budget
+- Sampling controls: `--do-sample`, `--temperature`, `--top-p`, `--top-k`, `--repetition-penalty`, `--no-repeat-ngram-size`, `--seed`
+  - By default decoding stays deterministic (`do_sample=false`, `temperature=0.0`, `no_repeat_ngram_size=20`)
+  - To use stochastic sampling set `--do-sample true --temperature 0.8` (and optionally adjust the other knobs)
 
 ## HTTP Server ☁️
 

@@ -26,6 +26,13 @@ cargo run -p deepseek-ocr-cli --release -- \
 | `--crop-mode` | `true` | 是否启用动态裁剪（传 `false` 可关闭）。 |
 | `--max-new-tokens` | `512` | 解码阶段允许输出的最大 token 数。 |
 | `--no-cache` | `false` | 禁用解码 KV 缓存，仅在调试时使用。 |
+| `--do-sample` | `false` | 是否启用采样（需搭配 `--temperature > 0`）。 |
+| `--temperature` | `0.0` | 采样温度，越大越随机。 |
+| `--top-p` | `1.0` | 核心采样累计概率，采样时有效。 |
+| `--top-k` | – | Top-k 截断，配合采样使用。 |
+| `--repetition-penalty` | `1.0` | 重复惩罚系数（>1 会降低重复概率）。 |
+| `--no-repeat-ngram-size` | `20` | n-gram 阻断窗口，生成时始终生效。 |
+| `--seed` | – | 随机种子，便于复现采样结果。 |
 
 > **重要提醒：** 如果生成的 Markdown 被提前截断，请调大 `--max-new-tokens`。模型在达到该上限后会立刻停止，即便尚未完成回答。
 

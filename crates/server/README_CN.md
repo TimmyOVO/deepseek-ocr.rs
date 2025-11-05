@@ -23,6 +23,13 @@ cargo run -p deepseek-ocr-server --release -- \
 | `--crop-mode` | `true` | 是否启用动态裁剪（`false` 可关闭）。 |
 | `--max-new-tokens` | `512` | 服务端默认的解码上限，可被请求体中的 `max_tokens` 覆盖。 |
 | `--host` | `0.0.0.0` | Rocket 绑定的地址。 |
+| `--do-sample` | `false` | 是否默认启用采样（请求体可再次覆写）。 |
+| `--temperature` | `0.0` | 采样温度，需要与 `--do-sample` 配合且 >0 才生效。 |
+| `--top-p` | `1.0` | 核心采样累计概率，仅在采样时生效。 |
+| `--top-k` | – | Top-k 截断，同样仅在采样时使用。 |
+| `--repetition-penalty` | `1.0` | 重复惩罚系数（>1 会降低重复概率）。 |
+| `--no-repeat-ngram-size` | `20` | 全局 n-gram 阻断窗口。 |
+| `--seed` | – | 采样随机种子，主要用于调试复现。 |
 | `--port` | `8000` | HTTP 监听端口。 |
 | `--model-id` | `deepseek-ocr` | `/v1/models` 以及流式响应中返回的模型名。 |
 
