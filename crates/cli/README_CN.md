@@ -11,38 +11,39 @@ cargo run -p deepseek-ocr-cli --release -- \
 
 ## 参数说明
 
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `--prompt` | – | 内联文本提示，使用 `<image>` 标记图片位置。 |
-| `--prompt-file` | – | 含提示词的 UTF-8 文件；提供后会覆盖 `--prompt`。 |
-| `--template` | `plain` | 会话模板，可选 `plain`、`deepseek`、`deepseekv2`、`alignment`。 |
-| `--image PATH` | – | 与 `<image>` 匹配的图片路径，按出现顺序重复传入该参数。 |
-| `--tokenizer PATH` | 资产默认路径 | 指定自定义分词器路径；默认自动下载并缓存。 |
-| `--weights PATH` | 自动探测 | 指定模型权重文件，覆盖默认的 safetensor。 |
-| `--device` | `cpu` | 执行后端：`cpu`、`metal` 或 `cuda`（测试阶段）。 |
-| `--dtype` | 取决于后端 | 数值精度覆盖选项，如 `f32`、`f16`、`bf16` 等。 |
-| `--base-size` | `1024` | 传入视觉模块的全局视图分辨率。 |
-| `--image-size` | `640` | 动态裁剪启用时的局部分辨率。 |
-| `--crop-mode` | `true` | 是否启用动态裁剪（传 `false` 可关闭）。 |
-| `--max-new-tokens` | `512` | 解码阶段允许输出的最大 token 数。 |
-| `--no-cache` | `false` | 禁用解码 KV 缓存，仅在调试时使用。 |
-| `--do-sample` | `false` | 是否启用采样（需搭配 `--temperature > 0`）。 |
-| `--temperature` | `0.0` | 采样温度，越大越随机。 |
-| `--top-p` | `1.0` | 核心采样累计概率，采样时有效。 |
-| `--top-k` | – | Top-k 截断，配合采样使用。 |
-| `--repetition-penalty` | `1.0` | 重复惩罚系数（>1 会降低重复概率）。 |
-| `--no-repeat-ngram-size` | `20` | n-gram 阻断窗口，生成时始终生效。 |
-| `--seed` | – | 随机种子，便于复现采样结果。 |
+| 参数                       | 默认值     | 说明                                                   |
+|--------------------------|---------|------------------------------------------------------|
+| `--prompt`               | –       | 内联文本提示，使用 `<image>` 标记图片位置。                          |
+| `--prompt-file`          | –       | 含提示词的 UTF-8 文件；提供后会覆盖 `--prompt`。                    |
+| `--template`             | `plain` | 会话模板，可选 `plain`、`deepseek`、`deepseekv2`、`alignment`。 |
+| `--image PATH`           | –       | 与 `<image>` 匹配的图片路径，按出现顺序重复传入该参数。                    |
+| `--tokenizer PATH`       | 资产默认路径  | 指定自定义分词器路径；默认自动下载并缓存。                                |
+| `--weights PATH`         | 自动探测    | 指定模型权重文件，覆盖默认的 safetensor。                           |
+| `--model-config PATH`    | 自动探测    | 指定模型架构配置文件，覆盖默认的 config.json。离线环境可配置下载好的配置路径         |
+| `--device`               | `cpu`   | 执行后端：`cpu`、`metal` 或 `cuda`（测试阶段）。                   |
+| `--dtype`                | 取决于后端   | 数值精度覆盖选项，如 `f32`、`f16`、`bf16` 等。                     |
+| `--base-size`            | `1024`  | 传入视觉模块的全局视图分辨率。                                      |
+| `--image-size`           | `640`   | 动态裁剪启用时的局部分辨率。                                       |
+| `--crop-mode`            | `true`  | 是否启用动态裁剪（传 `false` 可关闭）。                             |
+| `--max-new-tokens`       | `512`   | 解码阶段允许输出的最大 token 数。                                 |
+| `--no-cache`             | `false` | 禁用解码 KV 缓存，仅在调试时使用。                                  |
+| `--do-sample`            | `false` | 是否启用采样（需搭配 `--temperature > 0`）。                     |
+| `--temperature`          | `0.0`   | 采样温度，越大越随机。                                          |
+| `--top-p`                | `1.0`   | 核心采样累计概率，采样时有效。                                      |
+| `--top-k`                | –       | Top-k 截断，配合采样使用。                                     |
+| `--repetition-penalty`   | `1.0`   | 重复惩罚系数（>1 会降低重复概率）。                                  |
+| `--no-repeat-ngram-size` | `20`    | n-gram 阻断窗口，生成时始终生效。                                 |
+| `--seed`                 | –       | 随机种子，便于复现采样结果。                                       |
 
 > **重要提醒：** 如果生成的 Markdown 被提前截断，请调大 `--max-new-tokens`。模型在达到该上限后会立刻停止，即便尚未完成回答。
 
 ### 配置与覆盖
 
-| 平台 | 配置文件路径 | 权重缓存路径 |
-| --- | --- | --- |
-| Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/model.safetensors` |
-| macOS | `~/Library/Application Support/deepseek-ocr/config.toml` | `~/Library/Caches/deepseek-ocr/models/<id>/model.safetensors` |
-| Windows | `%APPDATA%\deepseek-ocr\config.toml` | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\model.safetensors` |
+| 平台      | 配置文件路径                                                   | 权重缓存路径                                                        |
+|---------|----------------------------------------------------------|---------------------------------------------------------------|
+| Linux   | `~/.config/deepseek-ocr/config.toml`                     | `~/.cache/deepseek-ocr/models/<id>/model.safetensors`         |
+| macOS   | `~/Library/Application Support/deepseek-ocr/config.toml` | `~/Library/Caches/deepseek-ocr/models/<id>/model.safetensors` |
+| Windows | `%APPDATA%\deepseek-ocr\config.toml`                     | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\model.safetensors`   |
 
 - 通过 `--config /path/to/config.toml` 可切换或初始化自定义路径；若文件不存在会自动填入默认值。
 - 参数生效顺序为：命令行参数 → `config.toml` → 内置默认值。资产路径同样遵循该顺序：显式的 `--weights`/`--tokenizer` 会覆盖配置文件，若都未指定则使用上表所列缓存目录。
