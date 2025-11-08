@@ -12,36 +12,37 @@ cargo run -p deepseek-ocr-server --release -- \
 
 ## Arguments
 
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--tokenizer PATH` | assets default | Override tokenizer path; otherwise downloaded automatically. |
-| `--weights PATH` | auto-detected | Alternate safetensor checkpoint for the model. |
-| `--device` | `cpu` | Backend for inference: `cpu`, `metal`, or `cuda` (preview). |
-| `--dtype` | backend default | Numeric precision override (`f32`, `f16`, `bf16`, …). |
-| `--base-size` | `1024` | Global canvas resolution for the vision stack. |
-| `--image-size` | `640` | Local crop size when dynamic tiling is enabled. |
-| `--crop-mode` | `true` | Enables dynamic crop mode (`false` to disable). |
-| `--max-new-tokens` | `512` | Default decoding budget applied to incoming requests. |
-| `--host` | `0.0.0.0` | Address Rocket binds to. |
-| `--do-sample` | `false` | Enable sampling for all requests unless overridden per-call. |
-| `--temperature` | `0.0` | Sampling temperature; must be >0 alongside `--do-sample`. |
-| `--top-p` | `1.0` | Nucleus sampling mass (fraction of probability kept). |
-| `--top-k` | – | Top-k cutoff applied during sampling. |
-| `--repetition-penalty` | `1.0` | Token repetition penalty (>1 discourages repeats). |
-| `--no-repeat-ngram-size` | `20` | N-gram blocking window enforced during decoding. |
-| `--seed` | – | RNG seed for sampling (mainly for debugging). |
-| `--port` | `8000` | TCP port for the HTTP server. |
-| `--model-id` | `deepseek-ocr` | Model name returned by `/v1/models` and streamed responses. |
+| Flag                     | Default         | Description                                                                                                                                                 |
+|--------------------------|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--model-config PATH`    | auto-detected   | Specify the model architecture configuration file, overriding the default config.json. In offline environments, point to a pre-downloaded config file path. |
+| `--tokenizer PATH`       | assets default  | Override tokenizer path; otherwise downloaded automatically.                                                                                                |
+| `--weights PATH`         | auto-detected   | Alternate safetensor checkpoint for the model.                                                                                                              |
+| `--device`               | `cpu`           | Backend for inference: `cpu`, `metal`, or `cuda` (preview).                                                                                                 |
+| `--dtype`                | backend default | Numeric precision override (`f32`, `f16`, `bf16`, …).                                                                                                       |
+| `--base-size`            | `1024`          | Global canvas resolution for the vision stack.                                                                                                              |
+| `--image-size`           | `640`           | Local crop size when dynamic tiling is enabled.                                                                                                             |
+| `--crop-mode`            | `true`          | Enables dynamic crop mode (`false` to disable).                                                                                                             |
+| `--max-new-tokens`       | `512`           | Default decoding budget applied to incoming requests.                                                                                                       |
+| `--host`                 | `0.0.0.0`       | Address Rocket binds to.                                                                                                                                    |
+| `--do-sample`            | `false`         | Enable sampling for all requests unless overridden per-call.                                                                                                |
+| `--temperature`          | `0.0`           | Sampling temperature; must be >0 alongside `--do-sample`.                                                                                                   |
+| `--top-p`                | `1.0`           | Nucleus sampling mass (fraction of probability kept).                                                                                                       |
+| `--top-k`                | –               | Top-k cutoff applied during sampling.                                                                                                                       |
+| `--repetition-penalty`   | `1.0`           | Token repetition penalty (>1 discourages repeats).                                                                                                          |
+| `--no-repeat-ngram-size` | `20`            | N-gram blocking window enforced during decoding.                                                                                                            |
+| `--seed`                 | –               | RNG seed for sampling (mainly for debugging).                                                                                                               |
+| `--port`                 | `8000`          | TCP port for the HTTP server.                                                                                                                               |
+| `--model-id`             | `deepseek-ocr`  | Model name returned by `/v1/models` and streamed responses.                                                                                                 |
 
 > **Truncation reminder:** If client responses appear cut off, raise `--max-new-tokens` (or the per-request `max_tokens` body field). The server stops generation once the configured budget is consumed.
 
 ## Configuration & Overrides
 
-| Platform | Config path | Weights cache path |
-| --- | --- | --- |
-| Linux | `~/.config/deepseek-ocr/config.toml` | `~/.cache/deepseek-ocr/models/<id>/model.safetensors` |
-| macOS | `~/Library/Application Support/deepseek-ocr/config.toml` | `~/Library/Caches/deepseek-ocr/models/<id>/model.safetensors` |
-| Windows | `%APPDATA%\deepseek-ocr\config.toml` | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\model.safetensors` |
+| Platform | Config path                                              | Weights cache path                                            |
+|----------|----------------------------------------------------------|---------------------------------------------------------------|
+| Linux    | `~/.config/deepseek-ocr/config.toml`                     | `~/.cache/deepseek-ocr/models/<id>/model.safetensors`         |
+| macOS    | `~/Library/Application Support/deepseek-ocr/config.toml` | `~/Library/Caches/deepseek-ocr/models/<id>/model.safetensors` |
+| Windows  | `%APPDATA%\deepseek-ocr\config.toml`                     | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\model.safetensors`   |
 
 - Use `--config /path/to/config.toml` to load or bootstrap a custom file. Missing files are generated with defaults.
 - Effective values resolve in this order: CLI/server flags → entries in `config.toml` → baked-in defaults. For per-request behaviour the JSON payload wins last (for example `max_tokens` overrides both the CLI flag and config setting). Asset paths behave the same way; explicit flags beat config entries which beat the auto-managed cache paths listed above.
