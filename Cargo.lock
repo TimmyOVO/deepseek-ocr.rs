@@ -676,6 +676,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "deepseek-ocr-core",
+ "deepseek-ocr-infer-deepseek",
  "hf-hub",
  "indicatif",
  "once_cell",
@@ -694,6 +695,8 @@ dependencies = [
  "deepseek-ocr-assets",
  "deepseek-ocr-config",
  "deepseek-ocr-core",
+ "deepseek-ocr-infer-deepseek",
+ "deepseek-ocr-infer-paddleocr",
  "image",
  "serde",
  "serde_json",
@@ -736,6 +739,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepseek-ocr-infer-deepseek"
+version = "0.3.7"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-flash-attn",
+ "candle-nn",
+ "deepseek-ocr-core",
+ "image",
+ "ndarray",
+ "ndarray-npy",
+ "once_cell",
+ "rand 0.8.5",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "tracing",
+]
+
+[[package]]
+name = "deepseek-ocr-infer-paddleocr"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "candle-core",
+ "candle-flash-attn",
+ "candle-nn",
+ "deepseek-ocr-core",
+ "fast_image_resize",
+ "image",
+ "memmap2",
+ "ndarray",
+ "ndarray-npy",
+ "rand 0.8.5",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "tracing",
+]
+
+[[package]]
 name = "deepseek-ocr-server"
 version = "0.3.7"
 dependencies = [
@@ -746,6 +793,8 @@ dependencies = [
  "deepseek-ocr-assets",
  "deepseek-ocr-config",
  "deepseek-ocr-core",
+ "deepseek-ocr-infer-deepseek",
+ "deepseek-ocr-infer-paddleocr",
  "image",
  "reqwest 0.12.24",
  "rocket",
@@ -932,6 +981,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "document-features"
+version = "0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
+dependencies = [
+ "litrs",
+]
+
+[[package]]
 name = "dyn-stack"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1013,6 +1071,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "fast_image_resize"
+version = "5.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bd1eda71e8af93f8b00e189404235d82f4de77ea4a0d182b44a7f03994d647c"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "num-traits",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -2055,6 +2125,12 @@ name = "litemap"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "241eaef5fd12c88705a01fc1066c48c4b36e0dd4377dcdc7ec3942cea7a69956"
+
+[[package]]
+name = "litrs"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lock_api"

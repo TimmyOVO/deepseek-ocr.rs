@@ -3,7 +3,7 @@ mod common;
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use common::test_utils::with_shared_language_model;
-use deepseek_ocr_core::transformer::{cache::DynamicCache, model::DeepseekLanguageModel};
+use deepseek_ocr_infer_deepseek::transformer::{cache::DynamicCache, model::DeepseekLanguageModel};
 
 fn with_language_model<F>(label: &str, f: F) -> Result<()>
 where

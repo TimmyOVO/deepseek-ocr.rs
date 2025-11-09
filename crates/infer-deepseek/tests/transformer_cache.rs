@@ -1,6 +1,6 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use deepseek_ocr_core::transformer::cache::{DynamicCache, KvCacheChunk, LayerKvCache};
+use deepseek_ocr_infer_deepseek::transformer::cache::{DynamicCache, KvCacheChunk, LayerKvCache};
 
 fn make_chunk(
     device: &Device,

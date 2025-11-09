@@ -18,6 +18,8 @@ serde_json = { workspace = true }
 deepseek-ocr-core = { workspace = true }
 deepseek-ocr-assets = { workspace = true }
 deepseek-ocr-config = { workspace = true }
+deepseek-ocr-infer-deepseek = { path = "../infer-deepseek" }
+deepseek-ocr-infer-paddleocr = { path = "../infer-paddleocr" }
 tokenizers = { workspace = true }
 candle-core = { workspace = true }
 tracing = { workspace = true }
@@ -25,8 +27,8 @@ tracing-subscriber = { workspace = true }
 
 [features]
 default = []
-metal = ["deepseek-ocr-core/metal"]
-accelerate = ["deepseek-ocr-core/accelerate"]
-flash-attn = ["deepseek-ocr-core/flash-attn"]
-cuda = ["deepseek-ocr-core/cuda"]
-mkl = ["deepseek-ocr-core/mkl"]
+metal = ["deepseek-ocr-core/metal", "deepseek-ocr-infer-deepseek/metal"]
+accelerate = ["deepseek-ocr-core/accelerate", "deepseek-ocr-infer-deepseek/accelerate", "deepseek-ocr-infer-paddleocr/accelerate"]
+flash-attn = ["deepseek-ocr-core/flash-attn", "deepseek-ocr-infer-deepseek/flash-attn", "deepseek-ocr-infer-paddleocr/flash-attn"]
+cuda = ["deepseek-ocr-core/cuda", "deepseek-ocr-infer-deepseek/cuda", "deepseek-ocr-infer-paddleocr/cuda"]
+mkl = ["deepseek-ocr-core/mkl", "deepseek-ocr-infer-deepseek/mkl", "deepseek-ocr-infer-paddleocr/mkl"]

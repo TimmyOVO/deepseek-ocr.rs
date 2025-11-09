@@ -87,9 +87,6 @@ pub struct Args {
     #[arg(long, help_heading = "Application")]
     pub port: Option<u16>,
 
-    /// Model identifier returned by /models.
-    #[arg(long, help_heading = "Application")]
-    pub model_id: Option<String>,
 }
 
 impl From<&Args> for ConfigOverrides {
@@ -115,7 +112,6 @@ impl From<&Args> for ConfigOverrides {
         overrides.inference.seed = args.seed;
         overrides.server.host = args.host.clone();
         overrides.server.port = args.port;
-        overrides.server.model_id = args.model_id.clone();
         overrides
     }
 }

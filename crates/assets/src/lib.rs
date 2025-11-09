@@ -4,6 +4,7 @@ mod providers;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use deepseek_ocr_core::ModelKind;
 use once_cell::sync::OnceCell;
 use reqwest::blocking::Client;
 
@@ -14,8 +15,13 @@ pub const DEFAULT_CONFIG_PATH: &str = "DeepSeek-OCR/config.json";
 pub const DEFAULT_CONFIG_FILENAME: &str = "config.json";
 pub const DEFAULT_TOKENIZER_PATH: &str = "DeepSeek-OCR/tokenizer.json";
 pub const DEFAULT_TOKENIZER_FILENAME: &str = "tokenizer.json";
-pub const DEFAULT_WEIGHTS_PATH: &str = deepseek_ocr_core::model::DEFAULT_WEIGHTS_PATH;
+pub const DEFAULT_WEIGHTS_PATH: &str = deepseek_ocr_infer_deepseek::model::DEFAULT_WEIGHTS_PATH;
 pub const DEFAULT_WEIGHTS_FILENAME: &str = "model-00001-of-000001.safetensors";
+
+const PADDLE_REPO_ID: &str = "PaddlePaddle/PaddleOCR-VL";
+const PADDLE_CONFIG_FILENAME: &str = "config.json";
+const PADDLE_TOKENIZER_FILENAME: &str = "tokenizer.json";
+const PADDLE_WEIGHTS_FILENAME: &str = "model.safetensors";
 
 const HTTP_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0";
 
@@ -26,11 +32,7 @@ pub fn ensure_config() -> Result<PathBuf> {
 }
 
 pub fn ensure_config_at(target: &Path) -> Result<PathBuf> {
-    if target.exists() {
-        return Ok(target.to_path_buf());
-    }
-
-    download_asset(DEFAULT_CONFIG_FILENAME, target)
+    ensure_model_config(ModelKind::Deepseek, target)
 }
 
 pub fn ensure_tokenizer(path: &Path) -> Result<PathBuf> {
@@ -38,16 +40,7 @@ pub fn ensure_tokenizer(path: &Path) -> Result<PathBuf> {
 }
 
 pub fn ensure_tokenizer_at(path: &Path) -> Result<PathBuf> {
-    if path.exists() {
-        return Ok(path.to_path_buf());
-    }
-
-    if path != Path::new(DEFAULT_TOKENIZER_PATH) {
-        ensure_parent(path)?;
-        return download_asset(DEFAULT_TOKENIZER_FILENAME, path);
-    }
-
-    download_asset(DEFAULT_TOKENIZER_FILENAME, path)
+    ensure_model_tokenizer(ModelKind::Deepseek, path)
 }
 
 pub fn resolve_weights(custom: Option<&Path>) -> Result<PathBuf> {
@@ -55,6 +48,14 @@ pub fn resolve_weights(custom: Option<&Path>) -> Result<PathBuf> {
 }
 
 pub fn resolve_weights_with_default(custom: Option<&Path>, default_path: &Path) -> Result<PathBuf> {
+    resolve_weights_with_kind(custom, default_path, ModelKind::Deepseek)
+}
+
+pub fn resolve_weights_with_kind(
+    custom: Option<&Path>,
+    default_path: &Path,
+    kind: ModelKind,
+) -> Result<PathBuf> {
     if let Some(path) = custom {
         if path.exists() {
             return Ok(path.to_path_buf());
@@ -65,18 +66,26 @@ pub fn resolve_weights_with_default(custom: Option<&Path>, default_path: &Path) 
         ));
     }
 
-    if default_path.exists() {
-        return Ok(default_path.to_path_buf());
-    }
-
-    download_asset(DEFAULT_WEIGHTS_FILENAME, default_path)
+    ensure_model_weights(kind, default_path)
 }
 
-fn download_asset(remote_name: &str, target: &Path) -> Result<PathBuf> {
+pub fn ensure_model_config(kind: ModelKind, target: &Path) -> Result<PathBuf> {
+    ensure_asset(kind, target, AssetFile::Config)
+}
+
+pub fn ensure_model_tokenizer(kind: ModelKind, target: &Path) -> Result<PathBuf> {
+    ensure_asset(kind, target, AssetFile::Tokenizer)
+}
+
+pub fn ensure_model_weights(kind: ModelKind, target: &Path) -> Result<PathBuf> {
+    ensure_asset(kind, target, AssetFile::Weights)
+}
+
+fn download_asset(repo_id: &str, remote_name: &str, target: &Path) -> Result<PathBuf> {
     let mut last_err: Option<anyhow::Error> = None;
     for provider in providers_in_download_order() {
-        providers::announce_provider(provider, remote_name, target);
-        match provider.download(remote_name, target) {
+        providers::announce_provider(provider, repo_id, remote_name, target);
+        match provider.download(repo_id, remote_name, target) {
             Ok(path) => return Ok(path),
             Err(err) => last_err = Some(err),
         }
@@ -111,6 +120,52 @@ pub(crate) fn copy_to_target(cached: &Path, target: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum AssetFile {
+    Config,
+    Tokenizer,
+    Weights,
+}
+
+struct ModelAssetSpec {
+    repo_id: &'static str,
+    config: &'static str,
+    tokenizer: &'static str,
+    weights: &'static str,
+}
+
+fn asset_spec(kind: ModelKind) -> ModelAssetSpec {
+    match kind {
+        ModelKind::Deepseek => ModelAssetSpec {
+            repo_id: DEFAULT_REPO_ID,
+            config: DEFAULT_CONFIG_FILENAME,
+            tokenizer: DEFAULT_TOKENIZER_FILENAME,
+            weights: DEFAULT_WEIGHTS_FILENAME,
+        },
+        ModelKind::PaddleOcrVl => ModelAssetSpec {
+            repo_id: PADDLE_REPO_ID,
+            config: PADDLE_CONFIG_FILENAME,
+            tokenizer: PADDLE_TOKENIZER_FILENAME,
+            weights: PADDLE_WEIGHTS_FILENAME,
+        },
+    }
+}
+
+fn ensure_asset(kind: ModelKind, target: &Path, file: AssetFile) -> Result<PathBuf> {
+    if target.exists() {
+        return Ok(target.to_path_buf());
+    }
+
+    let spec = asset_spec(kind);
+    let remote = match file {
+        AssetFile::Config => spec.config,
+        AssetFile::Tokenizer => spec.tokenizer,
+        AssetFile::Weights => spec.weights,
+    };
+
+    download_asset(spec.repo_id, remote, target)
 }
 
 pub(crate) fn ensure_parent(path: &Path) -> Result<()> {

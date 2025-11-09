@@ -68,7 +68,7 @@ impl TransformerDecoder {
     pub fn reset_rope_cache(&self) {
         self.rope_cache.borrow_mut().take();
         #[cfg(feature = "memlog")]
-        crate::memlog::set_rope(0);
+        deepseek_ocr_core::memlog::set_rope(0);
     }
 
     /// Returns a guard that clears both the KV cache and the decoder's RoPE tables when dropped.

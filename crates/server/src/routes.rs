@@ -1,19 +1,21 @@
-use std::time::SystemTime;
+use std::{sync::Arc, time::SystemTime};
 
 use rocket::{Either, Route, State, serde::json::Json, tokio::sync::mpsc};
 use tracing::debug;
 use uuid::Uuid;
 
+use deepseek_ocr_core::{DecodeParameters, ModelKind};
+
 use crate::{
     error::ApiError,
-    generation::{DecodeParameters, convert_messages, generate_async},
+    generation::{base_decode_parameters, convert_messages, generate_async},
     models::{
         ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessageResponse, ModelInfo,
         ModelsResponse, ResponseContent, ResponseOutput, ResponsesRequest, ResponsesResponse,
         Usage,
     },
     state::{AppState, GenerationInputs},
-    stream::{BoxEventStream, StreamContext, StreamKind, into_event_stream},
+    stream::{BoxEventStream, StreamContext, StreamController, StreamKind, into_event_stream},
 };
 
 #[get("/health")]
@@ -24,14 +26,22 @@ pub fn health() -> &'static str {
 #[get("/models")]
 pub fn list_models(state: &State<AppState>) -> Json<ModelsResponse> {
     let now = current_timestamp();
-    Json(ModelsResponse {
-        object: "list".into(),
-        data: vec![ModelInfo {
-            id: state.model_id.clone(),
+    let data = state
+        .available_models()
+        .iter()
+        .map(|entry| ModelInfo {
+            id: entry.id.clone(),
             object: "model".into(),
             created: now,
-            owned_by: "deepseek".into(),
-        }],
+            owned_by: match entry.kind {
+                ModelKind::Deepseek => "deepseek-ocr".into(),
+                ModelKind::PaddleOcrVl => "paddleocr-vl".into(),
+            },
+        })
+        .collect();
+    Json(ModelsResponse {
+        object: "list".into(),
+        data,
     })
 }
 
@@ -40,14 +50,25 @@ pub async fn responses_endpoint(
     state: &State<AppState>,
     req: Json<ResponsesRequest>,
 ) -> Result<Either<Json<ResponsesResponse>, BoxEventStream>, ApiError> {
-    ensure_model(&req.model, &state.model_id)?;
-    let gen_inputs = GenerationInputs::from_app(state.inner());
-    let (prompt, images) = convert_messages(&req.input)?;
+    let (gen_inputs, active_model_id) = state.prepare_generation(&req.model)?;
+    let (prompt, images) = convert_messages(gen_inputs.kind, &req.input)?;
+    if prompt_missing_image(&prompt) {
+        let fallback = missing_image_markdown();
+        if req.stream.unwrap_or(false) {
+            return Ok(Either::Right(stream_fallback_response(
+                fallback,
+                &gen_inputs,
+                active_model_id,
+            )));
+        }
+        let response = fallback_response_response(active_model_id, &fallback);
+        return Ok(Either::Left(Json(response)));
+    }
     let max_tokens = req
         .max_output_tokens
         .or(req.max_tokens)
-        .unwrap_or(state.max_new_tokens);
-    let mut decode = DecodeParameters::from_inputs(&gen_inputs, max_tokens);
+        .unwrap_or(state.default_max_new_tokens());
+    let mut decode = base_decode_parameters(&gen_inputs, max_tokens);
     apply_decode_overrides(
         &mut decode,
         req.do_sample,
@@ -60,9 +81,9 @@ pub async fn responses_endpoint(
         req.use_cache,
     );
     if req.stream.unwrap_or(false) {
-        let stream_inputs = gen_inputs.clone();
-        let decode_for_task = decode.clone();
-        let created = current_timestamp();
+            let stream_inputs = gen_inputs.clone();
+            let decode_for_task = decode.clone();
+            let created = current_timestamp();
         let response_id = format!("resp-{}", Uuid::new_v4());
         let output_id = format!("msg-{}", Uuid::new_v4());
         let (sender, rx) = mpsc::unbounded_channel();
@@ -72,7 +93,7 @@ pub async fn responses_endpoint(
             kind: StreamKind::Responses {
                 response_id: response_id.clone(),
                 output_id: output_id.clone(),
-                model: state.model_id.clone(),
+                model: active_model_id.clone(),
                 created,
             },
         };
@@ -95,7 +116,7 @@ pub async fn responses_endpoint(
         id: format!("resp-{}", Uuid::new_v4()),
         object: "response".into(),
         created,
-        model: req.model.clone(),
+        model: active_model_id,
         output: vec![ResponseOutput {
             id: format!("msg-{}", Uuid::new_v4()),
             r#type: "message".into(),
@@ -119,12 +140,25 @@ pub async fn chat_completions_endpoint(
     state: &State<AppState>,
     req: Json<ChatCompletionRequest>,
 ) -> Result<Either<Json<ChatCompletionResponse>, BoxEventStream>, ApiError> {
-    ensure_model(&req.model, &state.model_id)?;
-    let gen_inputs = GenerationInputs::from_app(state.inner());
-    let (prompt, images) = convert_messages(&req.messages)?;
+    let (gen_inputs, active_model_id) = state.prepare_generation(&req.model)?;
+    let (prompt, images) = convert_messages(gen_inputs.kind, &req.messages)?;
+    if prompt_missing_image(&prompt) {
+        let fallback = missing_image_markdown();
+        if req.stream.unwrap_or(false) {
+            return Ok(Either::Right(stream_fallback_chat(
+                fallback,
+                &gen_inputs,
+                active_model_id,
+            )));
+        }
+        let response = fallback_chat_response(active_model_id, &fallback);
+        return Ok(Either::Left(Json(response)));
+    }
     debug!(prompt = %prompt, "Prepared chat prompt");
-    let max_tokens = req.max_tokens.unwrap_or(state.max_new_tokens);
-    let mut decode = DecodeParameters::from_inputs(&gen_inputs, max_tokens);
+    let max_tokens = req
+        .max_tokens
+        .unwrap_or(state.default_max_new_tokens());
+    let mut decode = base_decode_parameters(&gen_inputs, max_tokens);
     apply_decode_overrides(
         &mut decode,
         req.do_sample,
@@ -137,9 +171,9 @@ pub async fn chat_completions_endpoint(
         req.use_cache,
     );
     if req.stream.unwrap_or(false) {
-        let stream_inputs = gen_inputs.clone();
-        let decode_for_task = decode.clone();
-        let created = current_timestamp();
+            let stream_inputs = gen_inputs.clone();
+            let decode_for_task = decode.clone();
+            let created = current_timestamp();
         let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
         let (sender, rx) = mpsc::unbounded_channel();
         let stream = into_event_stream(rx);
@@ -147,7 +181,7 @@ pub async fn chat_completions_endpoint(
             sender,
             kind: StreamKind::Chat {
                 completion_id: completion_id.clone(),
-                model: state.model_id.clone(),
+                model: active_model_id.clone(),
                 created,
             },
         };
@@ -170,7 +204,7 @@ pub async fn chat_completions_endpoint(
         id: format!("chatcmpl-{}", Uuid::new_v4()),
         object: "chat.completion".into(),
         created,
-        model: req.model.clone(),
+        model: active_model_id,
         choices: vec![ChatChoice {
             index: 0,
             message: ChatMessageResponse {
@@ -195,16 +229,6 @@ pub fn v1_routes() -> Vec<Route> {
         responses_endpoint,
         chat_completions_endpoint
     ]
-}
-
-fn ensure_model(requested: &str, available: &str) -> Result<(), ApiError> {
-    if requested == available {
-        Ok(())
-    } else {
-        Err(ApiError::BadRequest(format!(
-            "requested model `{requested}` is not available"
-        )))
-    }
 }
 
 fn apply_decode_overrides(
@@ -248,4 +272,107 @@ fn current_timestamp() -> i64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|dur| dur.as_secs() as i64)
         .unwrap_or_default()
+}
+
+fn prompt_missing_image(prompt: &str) -> bool {
+    !prompt.contains("<image>")
+}
+
+fn missing_image_markdown() -> String {
+    "⚠️ **Image Required**\n\n- This OCR backend expects at least one `<image>` placeholder or attached image.\n- Please include `input_image` / `image_url`, or add `<image>` inside the prompt.\n\n---\n\n⚠️ **需要图像输入**\n\n- 当前 OCR 模型需要至少一个 `<image>` 占位符或实际图片。\n- 请在请求中附带 `input_image`/`image_url`，或在 prompt 中插入 `<image>`。".into()
+}
+
+fn fallback_response_response(model: String, text: &str) -> ResponsesResponse {
+    let created = current_timestamp();
+    ResponsesResponse {
+        id: format!("resp-{}", Uuid::new_v4()),
+        object: "response".into(),
+        created,
+        model,
+        output: vec![ResponseOutput {
+            id: format!("msg-{}", Uuid::new_v4()),
+            r#type: "message".into(),
+            role: "assistant".into(),
+            content: vec![ResponseContent {
+                r#type: "output_text".into(),
+                text: text.to_string(),
+            }],
+        }],
+        usage: Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        },
+    }
+}
+
+fn fallback_chat_response(model: String, text: &str) -> ChatCompletionResponse {
+    let created = current_timestamp();
+    ChatCompletionResponse {
+        id: format!("chatcmpl-{}", Uuid::new_v4()),
+        object: "chat.completion".into(),
+        created,
+        model,
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessageResponse {
+                role: "assistant".into(),
+                content: text.to_string(),
+            },
+            finish_reason: "stop".into(),
+        }],
+        usage: Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        },
+    }
+}
+
+fn stream_fallback_response(
+    text: String,
+    inputs: &GenerationInputs,
+    model: String,
+) -> BoxEventStream {
+    let response_id = format!("resp-{}", Uuid::new_v4());
+    let output_id = format!("msg-{}", Uuid::new_v4());
+    let created = current_timestamp();
+    let (sender, rx) = mpsc::unbounded_channel();
+    let stream = into_event_stream(rx);
+    let context = StreamContext {
+        sender,
+        kind: StreamKind::Responses {
+            response_id,
+            output_id,
+            model,
+            created,
+        },
+    };
+    let controller = StreamController::new(Arc::clone(&inputs.tokenizer), context);
+    controller.send_initial();
+    controller.emit_fallback(&text);
+    stream
+}
+
+fn stream_fallback_chat(
+    text: String,
+    inputs: &GenerationInputs,
+    model: String,
+) -> BoxEventStream {
+    let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
+    let created = current_timestamp();
+    let (sender, rx) = mpsc::unbounded_channel();
+    let stream = into_event_stream(rx);
+    let context = StreamContext {
+        sender,
+        kind: StreamKind::Chat {
+            completion_id,
+            model,
+            created,
+        },
+    };
+    let controller = StreamController::new(Arc::clone(&inputs.tokenizer), context);
+    controller.send_initial();
+    controller.emit_fallback(&text);
+    stream
 }

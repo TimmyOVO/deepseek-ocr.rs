@@ -7,17 +7,15 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Tensor};
 use deepseek_ocr_config::{AppConfig, LocalFileSystem};
 use deepseek_ocr_core::{
-    inference::{
-        build_prompt_tokens, compute_image_embeddings, normalize_text, prepare_vision_inputs,
-        render_prompt,
-    },
-    model::{DeepseekOcrModel, GenerateOptions},
+    ModelKind, ModelLoadArgs,
+    inference::{DecodeOutcome, DecodeParameters, VisionSettings, render_prompt},
     runtime::{default_dtype_for_device, prepare_device_and_dtype},
     streaming::DeltaTracker,
 };
+use deepseek_ocr_infer_deepseek::load_model as load_deepseek_model;
+use deepseek_ocr_infer_paddleocr::load_model as load_paddle_model;
 use image::DynamicImage;
 use tokenizers::Tokenizer;
 use tracing::info;
@@ -54,9 +52,9 @@ pub fn run(args: Args) -> Result<()> {
         app_config.models.active
     );
 
-    let config_path = ensure_config_file(&fs, &resources.config)?;
-    let tokenizer_path = ensure_tokenizer_file(&fs, &resources.tokenizer)?;
-    let weights_path = prepare_weights_path(&fs, &resources.weights)?;
+    let config_path = ensure_config_file(&fs, &resources.config, resources.kind)?;
+    let tokenizer_path = ensure_tokenizer_file(&fs, &resources.tokenizer, resources.kind)?;
+    let weights_path = prepare_weights_path(&fs, &resources.weights, resources.kind)?;
 
     let (device, maybe_precision) =
         prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
@@ -71,16 +69,22 @@ pub fn run(args: Args) -> Result<()> {
     );
 
     let load_start = Instant::now();
-    let model = DeepseekOcrModel::load(
-        Some(&config_path),
-        Some(&weights_path),
-        device.clone(),
+    let load_args = ModelLoadArgs {
+        kind: resources.kind,
+        config_path: Some(&config_path),
+        weights_path: Some(&weights_path),
+        device: device.clone(),
         dtype,
-    )
-    .context("failed to load DeepSeek-OCR model")?;
+    };
+    let model = match resources.kind {
+        ModelKind::Deepseek => load_deepseek_model(load_args)?,
+        ModelKind::PaddleOcrVl => load_paddle_model(load_args)?,
+    };
+    let load_elapsed = load_start.elapsed();
     info!(
-        "Model ready in {:.2?} (flash-attn: {}, weights={})",
-        load_start.elapsed(),
+        "Model ready in {:.2?} (kind={:?}, flash-attn: {}, weights={})",
+        load_elapsed,
+        model.kind(),
         model.flash_attention_enabled(),
         weights_path.display()
     );
@@ -108,58 +112,26 @@ pub fn run(args: Args) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let owned_inputs = prepare_vision_inputs(
-        &model,
-        &images,
-        app_config.inference.base_size,
-        app_config.inference.image_size,
-        app_config.inference.crop_mode,
-    )?;
-    let embeddings = compute_image_embeddings(&model, &owned_inputs)?;
-
-    let (input_ids_vec, mask_vec) = build_prompt_tokens(
-        &tokenizer,
-        &prompt_with_template,
-        &embeddings,
-        &owned_inputs,
-        app_config.inference.base_size,
-        app_config.inference.image_size,
-        app_config.inference.crop_mode,
-    )?;
-
-    info!(
-        "Prompt prepared: {} tokens ({} image tokens)",
-        input_ids_vec.len(),
-        mask_vec.iter().filter(|&&b| b != 0).count()
-    );
-
-    let input_ids = Tensor::from_vec(
-        input_ids_vec.clone(),
-        (1, input_ids_vec.len()),
-        model.device(),
-    )?
-    .to_dtype(DType::I64)?;
-    let mask_tensor = Tensor::from_vec(mask_vec.clone(), (1, mask_vec.len()), model.device())?
-        .to_dtype(DType::U8)?;
-
-    let mut options = GenerateOptions::new(app_config.inference.max_new_tokens);
-    options.images_seq_mask = Some(&mask_tensor);
-    if !embeddings.is_empty() {
-        options.image_embeddings = Some(embeddings.as_slice());
-    }
-    options.eos_token_id = model.language_model().config().eos_token_id;
-    options.use_cache = app_config.inference.use_cache;
-    options.do_sample = app_config.inference.do_sample;
-    options.temperature = app_config.inference.temperature;
-    options.top_p = if app_config.inference.top_p < 1.0 {
-        Some(app_config.inference.top_p)
-    } else {
-        None
+    let vision_settings = VisionSettings {
+        base_size: app_config.inference.base_size,
+        image_size: app_config.inference.image_size,
+        crop_mode: app_config.inference.crop_mode,
     };
-    options.top_k = app_config.inference.top_k;
-    options.repetition_penalty = app_config.inference.repetition_penalty;
-    options.no_repeat_ngram_size = app_config.inference.no_repeat_ngram_size;
-    options.seed = app_config.inference.seed;
+    let decode_params = DecodeParameters {
+        max_new_tokens: app_config.inference.max_new_tokens,
+        do_sample: app_config.inference.do_sample,
+        temperature: app_config.inference.temperature,
+        top_p: if app_config.inference.top_p < 1.0 {
+            Some(app_config.inference.top_p)
+        } else {
+            None
+        },
+        top_k: app_config.inference.top_k,
+        repetition_penalty: app_config.inference.repetition_penalty,
+        no_repeat_ngram_size: app_config.inference.no_repeat_ngram_size,
+        seed: app_config.inference.seed,
+        use_cache: app_config.inference.use_cache,
+    };
 
     let tokenizer_for_stream = tokenizer.clone();
     let progress_state = Rc::new(RefCell::new(StreamProgress::default()));
@@ -213,9 +185,9 @@ pub fn run(args: Args) -> Result<()> {
         }
     };
 
-    // Only enable streaming progress if not in quiet mode
+    let mut callback_holder: Option<Box<dyn Fn(usize, &[i64])>> = None;
     if !quiet {
-        options.progress_callback = Some(&progress_callback);
+        callback_holder = Some(Box::new(progress_callback));
     }
 
     info!(
@@ -225,15 +197,32 @@ pub fn run(args: Args) -> Result<()> {
     info!("--- Generation start ---");
     let gen_start = Instant::now();
     start_time_cell.set(Some(gen_start));
-    let generated = model.generate(&input_ids, options)?;
+    let outcome = model
+        .decode(
+            &tokenizer,
+            &prompt_with_template,
+            &images,
+            vision_settings,
+            &decode_params,
+            callback_holder.as_deref(),
+        )
+        .context("generation failed")?;
     let elapsed = gen_start.elapsed();
     info!("--- Generation done in {:.2?} ---", elapsed);
 
-    let generated_tokens = generated
-        .to_vec2::<i64>()?
-        .into_iter()
-        .next()
-        .unwrap_or_default();
+    let DecodeOutcome {
+        text: normalized,
+        prompt_tokens,
+        response_tokens,
+        generated_tokens,
+    } = outcome;
+
+    info!(
+        "Prompt prepared: {} tokens ({} image slots)",
+        prompt_tokens,
+        args.images.len()
+    );
+
     let decoded = tokenizer
         .decode(
             &generated_tokens
@@ -254,7 +243,6 @@ pub fn run(args: Args) -> Result<()> {
         let _ = write!(handle, "{}", final_delta);
         let _ = handle.flush();
     }
-    let normalized = normalize_text(&decoded);
     info!("Final output:\n{normalized}");
 
     {
@@ -266,8 +254,7 @@ pub fn run(args: Args) -> Result<()> {
         let decode_elapsed = total_elapsed
             .checked_sub(prefill_elapsed)
             .unwrap_or_default();
-        let prompt_tokens = input_ids_vec.len();
-        let generated_count = generated_tokens.len();
+        let generated_count = response_tokens;
         let prefill_secs = prefill_elapsed.as_secs_f64();
         let decode_secs = decode_elapsed.as_secs_f64();
         let prefill_rate = if prefill_secs > 0.0 {

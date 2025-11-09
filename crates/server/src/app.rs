@@ -1,18 +1,16 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use deepseek_ocr_config::{AppConfig, LocalFileSystem};
 use deepseek_ocr_core::{
-    model::DeepseekOcrModel,
+    DecodeParameters, VisionSettings,
     runtime::{default_dtype_for_device, prepare_device_and_dtype},
 };
 use rocket::{Config, data::ToByteUnit};
-use tokenizers::Tokenizer;
 use tracing::info;
 
 use crate::{
     args::Args,
-    resources::{ensure_config_file, ensure_tokenizer_file, prepare_weights_path},
     routes,
     state::AppState,
 };
@@ -22,50 +20,45 @@ pub async fn run(args: Args) -> Result<()> {
     let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.config.as_deref())?;
     app_config += &args;
     app_config.normalise(&fs)?;
-    let resources = app_config.active_model_resources(&fs)?;
-
     info!(
         "Using configuration {} (active model `{}`)",
         descriptor.location.display_with(&fs)?,
         app_config.models.active
     );
 
-    let config_path = ensure_config_file(&fs, &resources.config)?;
-    let tokenizer_path = ensure_tokenizer_file(&fs, &resources.tokenizer)?;
-    let weights_path = prepare_weights_path(&fs, &resources.weights)?;
-
     let (device, maybe_dtype) =
         prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
     let dtype = maybe_dtype.unwrap_or_else(|| default_dtype_for_device(&device));
 
-    let model = DeepseekOcrModel::load(Some(&config_path), Some(&weights_path), device, dtype)
-        .context("failed to load DeepSeek-OCR model")?;
-    let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|err| {
-        anyhow::anyhow!(
-            "failed to load tokenizer from {}: {err}",
-            tokenizer_path.display()
-        )
-    })?;
+    let vision_settings = VisionSettings {
+        base_size: app_config.inference.base_size,
+        image_size: app_config.inference.image_size,
+        crop_mode: app_config.inference.crop_mode,
+    };
+    let decode_defaults = DecodeParameters {
+        max_new_tokens: app_config.inference.max_new_tokens,
+        do_sample: app_config.inference.do_sample,
+        temperature: app_config.inference.temperature,
+        top_p: if app_config.inference.top_p < 1.0 {
+            Some(app_config.inference.top_p)
+        } else {
+            None
+        },
+        top_k: app_config.inference.top_k,
+        repetition_penalty: app_config.inference.repetition_penalty,
+        no_repeat_ngram_size: app_config.inference.no_repeat_ngram_size,
+        seed: app_config.inference.seed,
+        use_cache: app_config.inference.use_cache,
+    };
 
-    let state = AppState::new(
-        Arc::new(Mutex::new(model)),
-        Arc::new(tokenizer),
-        app_config.inference.base_size,
-        app_config.inference.image_size,
-        app_config.inference.crop_mode,
-        app_config.inference.max_new_tokens,
-        app_config.inference.use_cache,
-        app_config.inference.do_sample,
-        app_config.inference.temperature,
-        app_config.inference.top_p,
-        app_config.inference.top_k,
-        app_config.inference.repetition_penalty,
-        app_config.inference.no_repeat_ngram_size,
-        app_config.inference.seed,
-        app_config.server.model_id.clone(),
-    );
-
-    let model_id = state.model_id.clone();
+    let state = AppState::bootstrap(
+        fs.clone(),
+        Arc::new(app_config.clone()),
+        device.clone(),
+        dtype,
+        vision_settings,
+        decode_defaults,
+    )?;
 
     let figment = Config::figment()
         .merge(("port", app_config.server.port))
@@ -78,8 +71,9 @@ pub async fn run(args: Args) -> Result<()> {
         ));
 
     info!(
-        "Server ready on {}:{} ({model_id})",
-        app_config.server.host, app_config.server.port
+        "Server ready on {}:{}",
+        app_config.server.host,
+        app_config.server.port,
     );
 
     rocket::custom(figment)

@@ -14,7 +14,7 @@ pub(crate) use modelscope::ModelScopeProvider;
 
 pub(crate) trait AssetProvider: Sync {
     fn display_name(&self) -> &'static str;
-    fn download(&self, remote_name: &str, target: &Path) -> Result<PathBuf>;
+    fn download(&self, repo_id: &str, remote_name: &str, target: &Path) -> Result<PathBuf>;
     fn benchmark(&self) -> Option<Duration>;
 }
 
@@ -39,9 +39,14 @@ pub(crate) fn providers_in_download_order() -> Vec<&'static dyn AssetProvider> {
     measured.into_iter().map(|(provider, _)| provider).collect()
 }
 
-pub(crate) fn announce_provider(provider: &dyn AssetProvider, remote: &str, target: &Path) {
+pub(crate) fn announce_provider(
+    provider: &dyn AssetProvider,
+    repo_id: &str,
+    remote: &str,
+    target: &Path,
+) {
     tracing::info!(
-        "Downloading {remote} via {} -> {}",
+        "Downloading {remote} from {repo_id} via {} -> {}",
         provider.display_name(),
         target.display()
     );

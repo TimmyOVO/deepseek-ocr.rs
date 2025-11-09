@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::ops::rms_norm;
+use deepseek_ocr_core::tensor::gather_token_embeddings;
 
 use crate::{
     config::DeepseekV2Config,
@@ -98,7 +99,7 @@ impl DeepseekLanguageModel {
         } else {
             input_ids.to_dtype(DType::I64)?
         };
-        gather_embeddings(&self.token_embedding, &ids)
+        gather_token_embeddings(&self.token_embedding, &ids)
     }
 
     pub fn token_embedding_for_id(&self, token_id: usize) -> Result<Tensor> {
@@ -147,7 +148,7 @@ impl DeepseekLanguageModel {
                 } else {
                     ids.to_dtype(DType::I64)?
                 };
-                gather_embeddings(&self.token_embedding, &ids)?
+                gather_token_embeddings(&self.token_embedding, &ids)?
             }
         };
 
@@ -191,19 +192,4 @@ impl DeepseekLanguageModel {
             aux_loss: decoder_out.aux_loss,
         })
     }
-}
-
-fn gather_embeddings(weight: &Tensor, ids: &Tensor) -> Result<Tensor> {
-    ensure!(
-        ids.rank() == 2,
-        "input_ids must have shape [batch, seq], got rank {}",
-        ids.rank()
-    );
-    let (_vocab, hidden) = weight.shape().dims2()?;
-    let (batch, seq_len) = ids.shape().dims2()?;
-    let weight = weight.force_contiguous()?;
-    let flat = ids.reshape((batch * seq_len,))?.force_contiguous()?;
-    let gathered = weight.index_select(&flat, 0)?;
-    let reshaped = gathered.reshape((batch, seq_len, hidden))?;
-    Ok(reshaped)
 }

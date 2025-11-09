@@ -12,7 +12,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use image::DynamicImage;
 
-use deepseek_ocr_core::{
+use deepseek_ocr_infer_deepseek::{
     config::{DeepseekV2Config, load_ocr_config},
     model::{DEFAULT_WEIGHTS_PATH, DeepseekOcrModel, build_global_view, image_to_tensor},
     transformer::{model::DeepseekLanguageModel, weights::TransformerWeights},

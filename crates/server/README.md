@@ -16,11 +16,14 @@ cargo run -p deepseek-ocr-server --release -- \
 | --- | --- | --- |
 | `--tokenizer PATH` | assets default | Override tokenizer path; otherwise downloaded automatically. |
 | `--weights PATH` | auto-detected | Alternate safetensor checkpoint for the model. |
+| `--config PATH` | platform default | Load or bootstrap an alternate config file. |
+| `--model ID` | `deepseek-ocr` | Select a configured model entry to serve (`deepseek-ocr`, `paddleocr-vl`, or custom). |
+| `--model-config PATH` | per-model default | Override the JSON config for the selected model. |
 | `--device` | `cpu` | Backend for inference: `cpu`, `metal`, or `cuda` (preview). |
 | `--dtype` | backend default | Numeric precision override (`f32`, `f16`, `bf16`, …). |
 | `--base-size` | `1024` | Global canvas resolution for the vision stack. |
-| `--image-size` | `640` | Local crop size when dynamic tiling is enabled. |
-| `--crop-mode` | `true` | Enables dynamic crop mode (`false` to disable). |
+| `--image-size` | `640` | Local crop size when dynamic tiling is enabled (DeepSeek-OCR only). |
+| `--crop-mode` | `true` | Enables dynamic crop mode (DeepSeek-OCR only; ignored for PaddleOCR-VL). |
 | `--max-new-tokens` | `512` | Default decoding budget applied to incoming requests. |
 | `--host` | `0.0.0.0` | Address Rocket binds to. |
 | `--do-sample` | `false` | Enable sampling for all requests unless overridden per-call. |
@@ -31,9 +34,14 @@ cargo run -p deepseek-ocr-server --release -- \
 | `--no-repeat-ngram-size` | `20` | N-gram blocking window enforced during decoding. |
 | `--seed` | – | RNG seed for sampling (mainly for debugging). |
 | `--port` | `8000` | TCP port for the HTTP server. |
-| `--model-id` | `deepseek-ocr` | Model name returned by `/v1/models` and streamed responses. |
 
 > **Truncation reminder:** If client responses appear cut off, raise `--max-new-tokens` (or the per-request `max_tokens` body field). The server stops generation once the configured budget is consumed.
+
+## Model selection
+
+- `[models.entries]` in `config.toml` enumerates every supported backend (defaults: `deepseek-ocr`, `paddleocr-vl`). Use the `--model` CLI flag or edit `[models].active` to decide which one is preloaded at startup.
+- Every `/v1/responses` or `/v1/chat/completions` request must set the `model` field. When it differs from the currently cached backend, the server will unload the old engine, load the requested model (downloading assets if needed), and then process the call. Only one model stays in memory at a time, so rapid switching can incur reload latency.
+- `/v1/models` lists the same IDs so OpenAI-compatible clients can discover them dynamically.
 
 ## Configuration & Overrides
 

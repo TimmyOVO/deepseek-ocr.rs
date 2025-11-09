@@ -3,7 +3,7 @@ mod common;
 use anyhow::Result;
 use candle_core::{DType, Tensor};
 use common::test_utils::workspace_path;
-use deepseek_ocr_core::{
+use deepseek_ocr_infer_deepseek::{
     config::load_ocr_config,
     vision::clip::{ClipVisionParams, adapt_position_embedding_for_tests},
 };

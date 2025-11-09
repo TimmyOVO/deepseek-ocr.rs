@@ -11,7 +11,7 @@ use ndarray_npy::NpzReader;
 use serde_json::Value;
 use std::fs::File;
 
-use deepseek_ocr_core::vision::dynamic_preprocess;
+use deepseek_ocr_infer_deepseek::vision::dynamic_preprocess;
 use image::{DynamicImage, ImageBuffer, Rgb, open};
 
 #[test]

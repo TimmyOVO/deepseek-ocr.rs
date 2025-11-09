@@ -128,6 +128,11 @@ impl StreamController {
             inner.handle_progress(count, ids);
         }
     }
+
+    pub fn emit_fallback(&self, text: &str) {
+        self.inner.emit_delta(text.to_string(), true);
+        self.inner.finalize(text, 0, 0);
+    }
 }
 
 impl StreamControllerInner {

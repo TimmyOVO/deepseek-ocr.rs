@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -91,8 +91,12 @@ pub struct LocalFileSystem {
 impl LocalFileSystem {
     pub fn new(app_name: impl Into<String>) -> Self {
         let name = app_name.into();
-        let config_root = default_config_dir(&name);
-        let cache_root = default_cache_dir(&name);
+        let config_root = env::var("DEEPSEEK_OCR_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_config_dir(&name));
+        let cache_root = env::var("DEEPSEEK_OCR_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_cache_dir(&name));
         Self {
             app_name: name,
             config_root,

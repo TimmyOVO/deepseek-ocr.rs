@@ -1,13 +1,7 @@
 use std::{convert::TryFrom, sync::Arc};
 
 use base64::Engine;
-use candle_core::{DType, Tensor};
-use deepseek_ocr_core::{
-    inference::{
-        build_prompt_tokens, compute_image_embeddings, normalize_text, prepare_vision_inputs,
-    },
-    model::{DeepseekOcrModel, GenerateOptions, OwnedVisionInput},
-};
+use deepseek_ocr_core::{DecodeOutcome, DecodeParameters, ModelKind, VisionSettings};
 use image::DynamicImage;
 use reqwest::blocking::Client;
 use rocket::tokio;
@@ -28,37 +22,13 @@ pub struct GenerationResult {
     pub response_tokens: usize,
 }
 
-#[derive(Debug, Clone)]
-pub struct DecodeParameters {
-    pub max_new_tokens: usize,
-    pub do_sample: bool,
-    pub temperature: f64,
-    pub top_p: Option<f64>,
-    pub top_k: Option<usize>,
-    pub repetition_penalty: f32,
-    pub no_repeat_ngram_size: Option<usize>,
-    pub seed: Option<u64>,
-    pub use_cache: bool,
-}
-
-impl DecodeParameters {
-    pub fn from_inputs(inputs: &GenerationInputs, max_new_tokens: usize) -> Self {
-        Self {
-            max_new_tokens,
-            do_sample: inputs.do_sample,
-            temperature: inputs.temperature,
-            top_p: if inputs.top_p < 1.0 {
-                Some(inputs.top_p)
-            } else {
-                None
-            },
-            top_k: inputs.top_k,
-            repetition_penalty: inputs.repetition_penalty,
-            no_repeat_ngram_size: inputs.no_repeat_ngram_size,
-            seed: inputs.seed,
-            use_cache: inputs.use_cache,
-        }
-    }
+pub fn base_decode_parameters(
+    inputs: &GenerationInputs,
+    max_new_tokens: usize,
+) -> DecodeParameters {
+    let mut params = inputs.defaults.clone();
+    params.max_new_tokens = max_new_tokens;
+    params
 }
 
 pub async fn generate_async(
@@ -75,9 +45,7 @@ pub async fn generate_async(
             Arc::clone(&inputs.tokenizer),
             prompt,
             images,
-            inputs.base_size,
-            inputs.image_size,
-            inputs.crop_mode,
+            inputs.vision,
             params,
             stream_for_block,
         )
@@ -107,9 +75,7 @@ fn generate_blocking(
     tokenizer: Arc<Tokenizer>,
     prompt: String,
     images: Vec<DynamicImage>,
-    base_size: u32,
-    image_size: u32,
-    crop_mode: bool,
+    vision: VisionSettings,
     params: DecodeParameters,
     stream: Option<StreamContext>,
 ) -> Result<GenerationResult, ApiError> {
@@ -118,67 +84,46 @@ fn generate_blocking(
         .map_err(|_| ApiError::Internal("model lock poisoned".into()))?;
     let tokenizer_ref = tokenizer.as_ref();
     let stream_controller = stream.map(|ctx| StreamController::new(Arc::clone(&tokenizer), ctx));
-    let owned_inputs = prepare_inputs(&*guard, &images, base_size, image_size, crop_mode)?;
-    let embeddings = compute_image_embeddings(&*guard, &owned_inputs)
-        .map_err(|err| ApiError::Internal(format!("image embedding failed: {err:#}")))?;
-    let (input_ids_vec, mask_vec) = build_prompt_tokens(
-        tokenizer_ref,
-        &prompt,
-        &embeddings,
-        &owned_inputs,
-        base_size,
-        image_size,
-        crop_mode,
-    )
-    .map_err(|err| ApiError::BadRequest(format!("prompt formatting failed: {err:#}")))?;
-
-    let input_len = input_ids_vec.len();
-    let token_device = guard.device();
-
-    let input_ids = Tensor::from_vec(input_ids_vec.clone(), (1, input_len), token_device)
-        .map_err(|err| ApiError::Internal(format!("input tensor failed: {err}")))?
-        .to_dtype(DType::I64)
-        .map_err(|err| ApiError::Internal(format!("tensor cast failed: {err}")))?;
-
-    let mask_tensor = Tensor::from_vec(mask_vec.clone(), (1, mask_vec.len()), token_device)
-        .map_err(|err| ApiError::Internal(format!("mask tensor failed: {err}")))?
-        .to_dtype(DType::U8)
-        .map_err(|err| ApiError::Internal(format!("mask cast failed: {err}")))?;
-
-    let mut options = GenerateOptions::new(params.max_new_tokens);
-    options.images_seq_mask = Some(&mask_tensor);
-    if !embeddings.is_empty() {
-        options.image_embeddings = Some(embeddings.as_slice());
-    }
-    options.eos_token_id = guard.language_model().config().eos_token_id;
-    options.use_cache = params.use_cache;
-    options.do_sample = params.do_sample;
-    options.temperature = params.temperature;
-    options.top_p = params.top_p;
-    options.top_k = params.top_k;
-    options.repetition_penalty = params.repetition_penalty;
-    options.no_repeat_ngram_size = params.no_repeat_ngram_size;
-    options.seed = params.seed;
-
-    let mut _progress_guard: Option<Box<dyn Fn(usize, &[i64]) + Send + Sync>> = None;
-    if let Some(controller) = &stream_controller {
+    let mut callback_box: Option<Box<dyn Fn(usize, &[i64])>> = None;
+    if let Some(controller) = stream_controller.as_ref() {
         controller.send_initial();
         let callback = controller.callback();
-        _progress_guard = Some(Box::new(callback));
-        if let Some(cb) = _progress_guard.as_ref() {
-            options.progress_callback = Some(&**cb);
-        }
+        callback_box = Some(Box::new(callback));
     }
 
-    let generated = guard
-        .generate(&input_ids, options)
-        .map_err(|err| ApiError::Internal(format!("generation failed: {err:#}")))?;
-    let generated_tokens = generated
-        .to_vec2::<i64>()
-        .map_err(|err| ApiError::Internal(format!("token decode failed: {err:#}")))?
-        .into_iter()
-        .next()
-        .unwrap_or_default();
+    let decode_result = guard.decode(
+        tokenizer_ref,
+        &prompt,
+        &images,
+        vision,
+        &params,
+        callback_box.as_deref(),
+    );
+    drop(callback_box);
+
+    let outcome = match decode_result {
+        Ok(output) => output,
+        Err(err) => {
+            drop(guard);
+            let message = err.to_string();
+            if message.contains("prompt formatting failed")
+                || message.contains("prompt/image embedding mismatch")
+            {
+                return Err(ApiError::BadRequest(message));
+            }
+            return Err(ApiError::Internal(format!("generation failed: {err:#}")));
+        }
+    };
+
+    drop(guard);
+
+    let DecodeOutcome {
+        text: normalized,
+        prompt_tokens,
+        response_tokens,
+        generated_tokens,
+    } = outcome;
+
     let decoded = tokenizer_ref
         .decode(
             &generated_tokens
@@ -188,7 +133,6 @@ fn generate_blocking(
             true,
         )
         .unwrap_or_default();
-    let normalized = normalize_text(&decoded);
 
     info!(
         "[generate] decoded_raw=\"{}\" normalized=\"{}\"",
@@ -204,32 +148,50 @@ fn generate_blocking(
             .collect::<String>()
     );
 
-    drop(guard);
-
-    if let Some(controller) = &stream_controller {
+    if let Some(controller) = stream_controller.as_ref() {
         controller.flush_remaining(&generated_tokens);
-        controller.finalize(&normalized, input_len, generated_tokens.len());
+        controller.finalize(&normalized, prompt_tokens, response_tokens);
     }
 
     Ok(GenerationResult {
         text: normalized,
-        prompt_tokens: input_len,
-        response_tokens: generated_tokens.len(),
+        prompt_tokens,
+        response_tokens,
     })
 }
 
-fn prepare_inputs(
-    model: &DeepseekOcrModel,
-    images: &[DynamicImage],
-    base_size: u32,
-    image_size: u32,
-    crop_mode: bool,
-) -> Result<Vec<OwnedVisionInput>, ApiError> {
-    prepare_vision_inputs(model, images, base_size, image_size, crop_mode)
-        .map_err(|err| ApiError::Internal(format!("vision input failed: {err:#}")))
+pub fn convert_messages(
+    kind: ModelKind,
+    messages: &[ApiMessage],
+) -> Result<(String, Vec<DynamicImage>), ApiError> {
+    match kind {
+        ModelKind::Deepseek => convert_deepseek_messages(messages),
+        ModelKind::PaddleOcrVl => convert_paddle_messages(messages),
+    }
 }
 
-pub fn convert_messages(messages: &[ApiMessage]) -> Result<(String, Vec<DynamicImage>), ApiError> {
+fn convert_deepseek_messages(
+    messages: &[ApiMessage],
+) -> Result<(String, Vec<DynamicImage>), ApiError> {
+    let (sections, images) = collect_prompt_sections(messages)?;
+    let mut prompt = String::from("");
+    let body = sections.join("\n\n").trim().to_owned();
+    prompt.push_str(&body);
+
+    Ok((prompt, images))
+}
+
+fn convert_paddle_messages(
+    messages: &[ApiMessage],
+) -> Result<(String, Vec<DynamicImage>), ApiError> {
+    let (sections, images) = collect_prompt_sections(messages)?;
+    let prompt = sections.join("\n\n").trim().to_owned();
+    Ok((prompt, images))
+}
+
+fn collect_prompt_sections(
+    messages: &[ApiMessage],
+) -> Result<(Vec<String>, Vec<DynamicImage>), ApiError> {
     let latest_user_idx = messages
         .iter()
         .rposition(|message| message.role.eq_ignore_ascii_case("user"))
@@ -242,13 +204,14 @@ pub fn convert_messages(messages: &[ApiMessage]) -> Result<(String, Vec<DynamicI
 
     // OCR模型不是为对话训练的，所以只保留一轮的prompt，留多轮连正常输出都产生不了
     for message in &messages[..latest_user_idx] {
-        if message.role.eq_ignore_ascii_case("system") {
-            let (text, mut msg_images) = flatten_content(&message.content)?;
-            if !text.is_empty() {
-                sections.push(text);
-            }
-            all_images.append(&mut msg_images);
+        if !message.role.eq_ignore_ascii_case("system") {
+            continue;
         }
+        let (text, mut msg_images) = flatten_content(&message.content)?;
+        if !text.is_empty() {
+            sections.push(text);
+        }
+        all_images.append(&mut msg_images);
     }
 
     let (user_text, mut user_images) = flatten_content(&messages[latest_user_idx].content)?;
@@ -263,16 +226,13 @@ pub fn convert_messages(messages: &[ApiMessage]) -> Result<(String, Vec<DynamicI
         ));
     }
 
-    let mut prompt = String::from("<|User|>\n");
-    let body = sections.join("\n\n");
-    if !body.is_empty() {
-        prompt.push_str(&body);
-        if !body.ends_with('\n') {
-            prompt.push('\n');
-        }
+    if sections.is_empty() && all_images.is_empty() {
+        return Err(ApiError::BadRequest(
+            "user content must include text or images".into(),
+        ));
     }
-    prompt.push_str("<|Assistant|>\n");
-    Ok((prompt, all_images))
+
+    Ok((sections, all_images))
 }
 
 fn flatten_content(content: &MessageContent) -> Result<(String, Vec<DynamicImage>), ApiError> {

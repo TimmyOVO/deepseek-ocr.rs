@@ -3,18 +3,33 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use deepseek_ocr_assets as assets;
 use deepseek_ocr_config::{LocalFileSystem, ResourceLocation, VirtualFileSystem};
+use deepseek_ocr_core::ModelKind;
 
-pub fn ensure_config_file(fs: &LocalFileSystem, location: &ResourceLocation) -> Result<PathBuf> {
-    ensure_resource(fs, location, |path| assets::ensure_config_at(path))
+pub fn ensure_config_file(
+    fs: &LocalFileSystem,
+    location: &ResourceLocation,
+    kind: ModelKind,
+) -> Result<PathBuf> {
+    ensure_resource(fs, location, |path| assets::ensure_model_config(kind, path))
 }
 
-pub fn ensure_tokenizer_file(fs: &LocalFileSystem, location: &ResourceLocation) -> Result<PathBuf> {
-    ensure_resource(fs, location, |path| assets::ensure_tokenizer_at(path))
-}
-
-pub fn prepare_weights_path(fs: &LocalFileSystem, location: &ResourceLocation) -> Result<PathBuf> {
+pub fn ensure_tokenizer_file(
+    fs: &LocalFileSystem,
+    location: &ResourceLocation,
+    kind: ModelKind,
+) -> Result<PathBuf> {
     ensure_resource(fs, location, |path| {
-        assets::resolve_weights_with_default(None, path)
+        assets::ensure_model_tokenizer(kind, path)
+    })
+}
+
+pub fn prepare_weights_path(
+    fs: &LocalFileSystem,
+    location: &ResourceLocation,
+    kind: ModelKind,
+) -> Result<PathBuf> {
+    ensure_resource(fs, location, |path| {
+        assets::resolve_weights_with_kind(None, path, kind)
     })
 }
 

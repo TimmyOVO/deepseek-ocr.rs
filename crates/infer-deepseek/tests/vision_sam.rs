@@ -3,7 +3,7 @@ mod common;
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use common::test_utils::{with_shared_ocr_model, workspace_path};
-use deepseek_ocr_core::{
+use deepseek_ocr_infer_deepseek::{
     config::load_ocr_config,
     model::DeepseekOcrModel,
     vision::sam::{SamBackbone, window_partition_shape, window_unpartition_shape},

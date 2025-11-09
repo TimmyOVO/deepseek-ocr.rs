@@ -1,0 +1,34 @@
+[package]
+name = "deepseek-ocr-infer-paddleocr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+deepseek-ocr-core = { path = "../core" }
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+image = { workspace = true }
+fast_image_resize = "5.3.0"
+tracing = { workspace = true }
+tokenizers = { workspace = true }
+memmap2 = "0.9"
+safetensors = "0.4"
+rand = { version = "0.8", features = ["std"] }
+candle-flash-attn = { version = "0.9", default-features = false, optional = true }
+
+[features]
+default = []
+memlog = ["deepseek-ocr-core/memlog"]
+flash-attn = ["candle-flash-attn"]
+metal = []
+accelerate = []
+cuda = []
+mkl = []
+
+[dev-dependencies]
+ahash = "0.8"
+ndarray = "0.16"
+ndarray-npy = "0.9"

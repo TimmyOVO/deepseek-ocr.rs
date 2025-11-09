@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use candle_core::{DType, Device, Tensor};
 
 #[cfg(feature = "memlog")]
-use crate::memlog;
+use deepseek_ocr_core::memlog;
 
 /// Growable cache for RoPE cosine/sine tables keyed by `(dtype, rope_dim, device)`.
 ///

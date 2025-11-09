@@ -6,12 +6,16 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use deepseek_ocr_core::runtime::{DeviceKind, Precision};
+use deepseek_ocr_core::{
+    ModelKind,
+    runtime::{DeviceKind, Precision},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::{VirtualFileSystem, VirtualPath};
 
 const DEFAULT_MODEL_ID: &str = "deepseek-ocr";
+const PADDLE_MODEL_ID: &str = "paddleocr-vl";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -42,6 +46,15 @@ impl Default for ModelRegistry {
     fn default() -> Self {
         let mut entries = BTreeMap::new();
         entries.insert(DEFAULT_MODEL_ID.to_string(), ModelEntry::default());
+        entries.insert(
+            PADDLE_MODEL_ID.to_string(),
+            ModelEntry {
+                kind: ModelKind::PaddleOcrVl,
+                config: None,
+                tokenizer: None,
+                weights: None,
+            },
+        );
         Self {
             active: DEFAULT_MODEL_ID.to_string(),
             entries,
@@ -52,6 +65,7 @@ impl Default for ModelRegistry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelEntry {
+    pub kind: ModelKind,
     pub config: Option<PathBuf>,
     pub tokenizer: Option<PathBuf>,
     pub weights: Option<PathBuf>,
@@ -60,6 +74,7 @@ pub struct ModelEntry {
 impl Default for ModelEntry {
     fn default() -> Self {
         Self {
+            kind: ModelKind::Deepseek,
             config: None,
             tokenizer: None,
             weights: None,
@@ -114,7 +129,6 @@ impl Default for InferenceSettings {
 pub struct ServerSettings {
     pub host: String,
     pub port: u16,
-    pub model_id: String,
 }
 
 impl Default for ServerSettings {
@@ -122,7 +136,6 @@ impl Default for ServerSettings {
         Self {
             host: "0.0.0.0".to_string(),
             port: 8000,
-            model_id: DEFAULT_MODEL_ID.to_string(),
         }
     }
 }
@@ -149,6 +162,7 @@ pub struct ModelResources {
     pub config: ResourceLocation,
     pub tokenizer: ResourceLocation,
     pub weights: ResourceLocation,
+    pub kind: ModelKind,
 }
 
 pub struct ConfigDescriptor {
@@ -183,6 +197,15 @@ impl AppConfig {
             self.models
                 .entries
                 .insert(DEFAULT_MODEL_ID.to_string(), ModelEntry::default());
+        }
+        if !self.models.entries.contains_key(PADDLE_MODEL_ID) {
+            self.models.entries.insert(
+                PADDLE_MODEL_ID.to_string(),
+                ModelEntry {
+                    kind: ModelKind::PaddleOcrVl,
+                    ..ModelEntry::default()
+                },
+            );
         }
         if !self.models.entries.contains_key(&self.models.active) {
             self.models
@@ -285,9 +308,6 @@ impl AppConfig {
         if let Some(port) = overrides.server.port {
             self.server.port = port;
         }
-        if let Some(model_id) = overrides.server.model_id.as_ref() {
-            self.server.model_id = model_id.clone();
-        }
     }
 }
 
@@ -318,6 +338,7 @@ impl ModelEntry {
             config,
             tokenizer,
             weights,
+            kind: self.kind,
         }
     }
 }
@@ -420,7 +441,6 @@ pub struct InferenceOverride {
 pub struct ServerOverride {
     pub host: Option<String>,
     pub port: Option<u16>,
-    pub model_id: Option<String>,
 }
 
 pub trait ConfigOverride {

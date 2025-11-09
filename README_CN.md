@@ -1,19 +1,24 @@
 # deepseek-ocr.rs 🚀
 
-Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HTTP Server，统一打包模型加载、视觉输入预处理、提示词工具与服务端能力，方便在本地 CPU、Apple Metal 或 NVIDIA CUDA GPU(alpha) 上构建文档理解工作流。
+Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HTTP Server，统一打包多种 OCR 后端、视觉输入预处理、提示词工具与服务端能力，方便在本地 CPU、Apple Metal 或 NVIDIA CUDA GPU(alpha) 上构建文档理解工作流。
 
 > 英文文档请参见 [README.md](README.md)。  
 
 > 想直接下载可执行文件？访问 [Github Actions](https://github.com/TimmyOVO/deepseek-ocr.rs/actions/workflows/build-binaries.yml)，下载最新一次成功运行生成的 macOS（含 Metal）或 Windows 压缩包。
 
-## crates/core 技术细节 🔬
+## 模型选择指南 🔬
 
-- **视觉预处理**：`prepare_vision_input_from_image` 利用 `build_global_view` 构造方形全局画布，同时在启用 crop 模式时调用 `dynamic_preprocess` 进行高分辨率切片，并支持额外缩略图。
-- **SAM + CLIP 融合**：`image_to_tensor` 标准化每幅图像，送入 Candle 版 SAM (`SamBackbone`) 与 CLIP-L (`ClipVisionModel`)，通过 `build_clip_sam_tokens` 将视觉特征按网格拼接保持空间对齐。
-- **投影与布局 token**：自研 `ImageProjector` 对 SAM/CLIP 拼接通道做线性映射，并注入 `image_newline`/`view_separator` 学习 token，产出可直接喂入语言模型的多模态嵌入。
-- **Tokenizer 对齐**：`build_prompt_tokens` 为 `<image>` 段生成与投影 token 数完全一致的占位序列（涵盖全局+局部视图），保证在裁剪多轮对话后仍与 OpenAI 风格输入兼容。
-- **解码与缓存**：语言侧基于 Candle 重写 DeepSeek-V2 (`DeepseekLanguageModel`)，支持 FlashAttention、旋转位置编码与 `DynamicCache`，CLI/Server 均可高效流式输出。
-- **可观测性与对齐**：调试模式暴露 CLIP/SAM trace (`VisionDebugFeatures`)，可用来与 PyTorch 官方实现逐层比对，大部分阶段已实现数值对齐；剩余的微小差异（如投影归一化、局部裁剪策略）已纳入 Roadmap，后续版本会继续收敛。
+| 模型 | 内存占用* | 最佳硬件 | 适用场景 |
+| --- | --- | --- | --- |
+| **DeepSeek‑OCR** | **≈6.3 GB** FP16 权重，含激活/缓存约 **13 GB**（512 token） | Apple Silicon + Metal、24 GB VRAM NVIDIA、32 GB+ RAM 桌面 | 追求最高准确率、多视角文档、对延迟不敏感。SAM+CLIP 视觉 + DeepSeek‑V2 MoE（3 B 参数，单 token 激活 ≈570 M）。 |
+| **PaddleOCR‑VL** | **≈4.7 GB** FP16 权重，含激活/缓存约 **9 GB** | 16 GB 笔电、CPU-only 节点、中端 GPU | 更快冷启动，dense Ernie decoder（0.9 B）+ SigLIP 视觉，适合批量作业与轻量部署。 |
+
+\*默认 FP16 safetensors 容量；实际资源与序列长度、是否启用 KV Cache 相关。
+
+选择建议：
+
+- **有 16–24 GB 以上 VRAM / RAM、追求极致质量？** 选 **DeepSeek‑OCR**，SAM+CLIP 全局+局部视野、DeepSeek‑V2 MoE 解码能在复杂版式中保持更高还原度，但代价是更大的显存和更高延迟。
+- **硬件预算有限或需要低延迟 / 高吞吐？** 选 **PaddleOCR‑VL**，SigLIP + dense Ernie（18 层、hidden 1024）在 10 GB 以内即可运行，CPU 模式也更易部署。
 
 ## 为什么选择 Rust？💡
 
@@ -28,7 +33,7 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 
 - **Candle**：Rust 深度学习框架，支持 Metal/CUDA（alpha） 与 FlashAttention。
 - **Rocket**：异步 HTTP 框架，提供 `/v1/responses`、`/v1/chat/completions` 等 OpenAI 兼容路由。
-- **tokenizers**：上游模型提供的分词器，通过 `crates/assets` 在 Hugging Face / ModelScope 镜像间缓存与校验。
+- **tokenizers**：上游模型提供的 Tokenizer，通过 `crates/assets` 在 Hugging Face / ModelScope 镜像间缓存与校验。
 - **纯 Rust 视觉/Prompt 管线**：CLI 与 Server 复用，减少重复逻辑。
 
 ## 相比 Python 实现的优势 🥷
@@ -91,6 +96,8 @@ CLI 与 Server 共享同一份配置。首次启动会在系统配置目录生�
 | Windows | `%APPDATA%\deepseek-ocr\config.toml` | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\…` |
 
 - 可通过 `--config /path/to/config.toml`（CLI/Server 通用）自定义路径；当文件不存在时会自动创建并写入默认内容。
+- 默认的 `config.toml` 已包含 `deepseek-ocr`（默认）与 `paddleocr-vl` 两个模型条目，可通过 `--model paddleocr-vl`（或修改 `[models].active`）在 DeepSeek 与 PaddleOCR-VL 之间即时切换。
+- 需要自定义资源位置时，可在对应 `models.entries.<id>` 下设置 `config`/`tokenizer`/`weights`，或直接在运行时使用 `--model-config`、`--tokenizer`、`--weights` 覆盖。
 - `config.toml` 中的 `[models.entries."<id>"]` 节点允许为不同模型指定独立的 `config`、`tokenizer`、`weights` 路径；若留空则使用上表所示缓存目录并按需下载。
 - 参数覆盖顺序为：命令行参数 → `config.toml` → 内置默认值。HTTP API 请求体中的字段（例如 `max_tokens`）会在该次调用中继续覆盖前述设置。
 
@@ -114,10 +121,9 @@ use_cache = true
 [server]
 host = "0.0.0.0"
 port = 8000
-model_id = "deepseek-ocr"
 ```
 
-- `[models]` 用于指定当前激活的模型以及额外的模型条目（每个条目都可以指向各自的配置、分词器与权重文件）。
+- `[models]` 用于指定当前激活的模型以及额外的模型条目（每个条目都可以指向各自的配置、Tokenizer 与权重文件）。
 - `[inference]` 提供 CLI 与 Server 共用的推理默认值（设备、模板、视觉分辨率、生成长度与缓存策略）。
 - `[server]` 决定网络监听地址以及 `/v1/models` 返回的模型名。
 
@@ -167,9 +173,9 @@ deepseek-ocr-cli --help
 - `--image`：与 `<image>` 数量一致的图片路径
 - `--device` / `--dtype`：macOS 建议 `--device metal --dtype f16`，NVIDIA 用户使用 `--device cuda --dtype f16`
 - `--max-new-tokens`：生成长度上限
-- 采样相关：`--do-sample`、`--temperature`、`--top-p`、`--top-k`、`--repetition-penalty`、`--no-repeat-ngram-size`、`--seed`
+- Sampling 相关：`--do-sample`、`--temperature`、`--top-p`、`--top-k`、`--repetition-penalty`、`--no-repeat-ngram-size`、`--seed`
   - 默认保持确定性输出（`do_sample=false`、`temperature=0.0`、`no_repeat_ngram_size=20`）
-  - 若需要随机采样，请显式指定 `--do-sample true --temperature 0.8`，并按需调整其他参数
+  - 若需要随机 sampling，请显式指定 `--do-sample true --temperature 0.8`，并按需调整其他参数
 
 ## HTTP Server ☁️
 
@@ -194,7 +200,7 @@ cargo run -p deepseek-ocr-server --release -- \
 - 与 [Open WebUI](https://github.com/open-webui/open-webui) 等 OpenAI 兼容客户端开箱即用——只需在客户端设置 `base_url` 为 `http://localhost:8000/v1` 并选择 `deepseek-ocr` 模型。
 - 如果需要大图上传，可在 Rocket 配置里调高 JSON/body limit。
 
-![Open WebUI 连接 deepseek-ocr.rs](./assets/sample_1.png)
+![Open WebUI 连接 deepseek-ocr.rs](./baselines/sample_1.png)
 
 ## GPU 加速 ⚡
 
@@ -220,16 +226,6 @@ cargo run -p deepseek-ocr-server --release -- \
 - **下载失败**：确认 `HF_TOKEN` 已配置，或重试以利用 Hugging Face/ModelScope 缓存。
 - **首轮耗时长**：第一次推理需要加载模型并热启动 GPU（Metal/CUDA α)，后续会更快。
 - **图片过大被拒**：放大 Rocket 限额或对图像进行下采样。
-
-## Roadmap 🗺️
-
-- ✅ Apple Metal 后端 + FP16 支持，CLI/Server 已在 macOS 上对齐。
-- ✅ NVIDIA CUDA 后端(alpha)：`--features cuda` + `--device cuda --dtype f16` 可在 Linux/Windows 上尝鲜 GPU 加速。
-- 🔄 **对齐完善**：完成投影归一化、局部裁剪等细节的数值校准，并扩展中间张量对比用例。
-- 🔄 **Grounding 与流式体验**：移植 Python 版的框选/Markdown 后处理，提升 SSE 流式交互体验。
-- 🔄 **跨平台加速**：继续调优 CUDA 性能、补齐 CPU/Metal/CUDA 自动检测，并发布可选 GPU 基准测试。
-- 🔄 **打包与运维**：提供带校验的二进制发行版，增强日志/指标，并补充 Helm/Docker 部署示例。
-- 🔜 **结构化输出**：在对齐完成后引入可选 JSON Schema 工具，方便下游自动化。
 
 ## 致谢 🙏
 

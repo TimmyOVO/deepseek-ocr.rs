@@ -5,6 +5,8 @@ members = [
     "crates/cli",
     "crates/server",
     "crates/config",
+    "crates/infer-deepseek",
+    "crates/infer-paddleocr",
 ]
 resolver = "2"
 
@@ -25,7 +27,7 @@ tracing = "0.1"
 # See https://github.com/tokio-rs/tracing/issues/3378
 tracing-subscriber = { version = "=0.3.19", features = ["env-filter", "fmt", "ansi"] }
 
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
+# [profile.release]
+# opt-level = 3
+# lto = true
+# codegen-units = 1

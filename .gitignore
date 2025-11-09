@@ -3,5 +3,9 @@
 target
 .DS_Store
 DeepSeek-OCR
+PaddleOCR-VL
 baselines/sample
+baselines/fixtures
 __pycache__
+.venv
+.hf-cache

@@ -16,9 +16,9 @@ impl AssetProvider for HuggingFaceProvider {
         "Hugging Face Hub"
     }
 
-    fn download(&self, remote_name: &str, target: &Path) -> Result<PathBuf> {
+    fn download(&self, repo_id: &str, remote_name: &str, target: &Path) -> Result<PathBuf> {
         let api = Api::new().context("failed to initialise Hugging Face API client")?;
-        let repo = api.model(DEFAULT_REPO_ID.to_string());
+        let repo = api.model(repo_id.to_string());
         let cached = repo
             .get(remote_name)
             .with_context(|| format!("failed to download {remote_name} from Hugging Face"))?;

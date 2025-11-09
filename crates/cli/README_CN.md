@@ -17,24 +17,55 @@ cargo run -p deepseek-ocr-cli --release -- \
 | `--prompt-file` | – | 含提示词的 UTF-8 文件；提供后会覆盖 `--prompt`。 |
 | `--template` | `plain` | 会话模板，可选 `plain`、`deepseek`、`deepseekv2`、`alignment`。 |
 | `--image PATH` | – | 与 `<image>` 匹配的图片路径，按出现顺序重复传入该参数。 |
-| `--tokenizer PATH` | 资产默认路径 | 指定自定义分词器路径；默认自动下载并缓存。 |
+| `--config PATH` | 平台默认 | 指定配置文件路径（若不存在会自动生成）。 |
+| `--model ID` | `deepseek-ocr` | 选择要加载的模型条目（如 `deepseek-ocr`、`paddleocr-vl` 或自定义 ID）。 |
+| `--model-config PATH` | 模型默认 | 覆盖所选模型的 JSON 配置路径。 |
+| `--tokenizer PATH` | 资产默认路径 | 指定自定义 Tokenizer 路径；默认自动下载并缓存。 |
 | `--weights PATH` | 自动探测 | 指定模型权重文件，覆盖默认的 safetensor。 |
 | `--device` | `cpu` | 执行后端：`cpu`、`metal` 或 `cuda`（测试阶段）。 |
 | `--dtype` | 取决于后端 | 数值精度覆盖选项，如 `f32`、`f16`、`bf16` 等。 |
 | `--base-size` | `1024` | 传入视觉模块的全局视图分辨率。 |
-| `--image-size` | `640` | 动态裁剪启用时的局部分辨率。 |
-| `--crop-mode` | `true` | 是否启用动态裁剪（传 `false` 可关闭）。 |
+| `--image-size` | `640` | dynamic crop mode 启用时的局部分辨率（仅 DeepSeek-OCR 生效）。 |
+| `--crop-mode` | `true` | 是否启用 dynamic crop mode（仅 DeepSeek-OCR 生效，PaddleOCR-VL 会忽略）。 |
 | `--max-new-tokens` | `512` | 解码阶段允许输出的最大 token 数。 |
-| `--no-cache` | `false` | 禁用解码 KV 缓存，仅在调试时使用。 |
-| `--do-sample` | `false` | 是否启用采样（需搭配 `--temperature > 0`）。 |
-| `--temperature` | `0.0` | 采样温度，越大越随机。 |
-| `--top-p` | `1.0` | 核心采样累计概率，采样时有效。 |
-| `--top-k` | – | Top-k 截断，配合采样使用。 |
-| `--repetition-penalty` | `1.0` | 重复惩罚系数（>1 会降低重复概率）。 |
-| `--no-repeat-ngram-size` | `20` | n-gram 阻断窗口，生成时始终生效。 |
-| `--seed` | – | 随机种子，便于复现采样结果。 |
+| `--no-cache` | `false` | 禁用 decoder KV Cache，仅在调试时使用。 |
+| `--do-sample` | `false` | 是否启用 sampling（需搭配 `--temperature > 0`）。 |
+| `--temperature` | `0.0` | sampling temperature，越大越随机。 |
+| `--top-p` | `1.0` | top‑p（nucleus sampling 概率质量），仅在 sampling 时生效。 |
+| `--top-k` | – | top‑k 截断，配合 sampling 使用。 |
+| `--repetition-penalty` | `1.0` | repetition penalty（>1 会降低重复概率）。 |
+| `--no-repeat-ngram-size` | `20` | no‑repeat n‑gram size，生成时始终生效。 |
+| `--seed` | – | 随机种子，便于复现 sampling 结果。 |
 
 > **重要提醒：** 如果生成的 Markdown 被提前截断，请调大 `--max-new-tokens`。模型在达到该上限后会立刻停止，即便尚未完成回答。
+
+## 模型选择
+
+CLI 通过配置文件中的“模型注册表”支持多种推理引擎：
+
+- 默认内置两条目：
+  - `deepseek-ocr`（DeepSeek‑OCR；默认权重 `DeepSeek-OCR/model-00001-of-000001.safetensors`）
+  - `paddleocr-vl`（PaddleOCR‑VL；默认权重 `PaddleOCR-VL/model.safetensors`）
+
+可用命令行或配置切换所用模型：
+
+```bash
+# 本次运行切换为 PaddleOCR‑VL
+cargo run -p deepseek-ocr-cli --release -- \
+  --model paddleocr-vl \
+  --prompt "<image> 提取表格项" \
+  --image baselines/fixtures/paddleocr_vl/fixture_image.png
+
+# 或在配置文件中持久化该选择（TOML 片段）
+[models]
+active = "paddleocr-vl"
+
+[models.entries.deepseek-ocr]
+kind = "deepseek"
+
+[models.entries.paddleocr-vl]
+kind = "paddle_ocr_vl"
+```
 
 ### 配置与覆盖
 

@@ -14,26 +14,34 @@ cargo run -p deepseek-ocr-server --release -- \
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--tokenizer PATH` | 资产默认路径 | 指定自定义分词器路径，默认会自动下载。 |
+| `--tokenizer PATH` | 资产默认路径 | 指定自定义 Tokenizer 路径，默认会自动下载。 |
 | `--weights PATH` | 自动探测 | 指定替代模型权重的 safetensor 文件。 |
+| `--config PATH` | 平台默认 | 读取或初始化指定路径的配置文件。 |
+| `--model ID` | `deepseek-ocr` | 选择要服务的模型条目（`deepseek-ocr`、`paddleocr-vl` 或自定义）。 |
+| `--model-config PATH` | 模型默认 | 覆盖所选模型的 JSON 配置路径。 |
 | `--device` | `cpu` | 推理后端：`cpu`、`metal` 或 `cuda`（预览）。 |
 | `--dtype` | 依后端而定 | 精度覆盖，如 `f32`、`f16`、`bf16`。 |
 | `--base-size` | `1024` | 传入视觉模块的全局视图分辨率。 |
-| `--image-size` | `640` | 启用动态裁剪时的局部分辨率。 |
-| `--crop-mode` | `true` | 是否启用动态裁剪（`false` 可关闭）。 |
-| `--max-new-tokens` | `512` | 服务端默认的解码上限，可被请求体中的 `max_tokens` 覆盖。 |
+| `--image-size` | `640` | 启用 dynamic crop mode 时的局部分辨率（仅 DeepSeek-OCR 生效）。 |
+| `--crop-mode` | `true` | 是否启用 dynamic crop mode（仅 DeepSeek-OCR 生效，PaddleOCR-VL 会忽略）。 |
+| `--max-new-tokens` | `512` | 服务端默认的 decoding 上限，可被请求体中的 `max_tokens` 覆盖。 |
 | `--host` | `0.0.0.0` | Rocket 绑定的地址。 |
-| `--do-sample` | `false` | 是否默认启用采样（请求体可再次覆写）。 |
-| `--temperature` | `0.0` | 采样温度，需要与 `--do-sample` 配合且 >0 才生效。 |
-| `--top-p` | `1.0` | 核心采样累计概率，仅在采样时生效。 |
-| `--top-k` | – | Top-k 截断，同样仅在采样时使用。 |
-| `--repetition-penalty` | `1.0` | 重复惩罚系数（>1 会降低重复概率）。 |
-| `--no-repeat-ngram-size` | `20` | 全局 n-gram 阻断窗口。 |
-| `--seed` | – | 采样随机种子，主要用于调试复现。 |
+| `--do-sample` | `false` | 是否默认启用 sampling（请求体可再次覆写）。 |
+| `--temperature` | `0.0` | sampling temperature，需要与 `--do-sample` 配合且 >0 才生效。 |
+| `--top-p` | `1.0` | top‑p（nucleus sampling 概率质量），仅在 sampling 时生效。 |
+| `--top-k` | – | top‑k 截断，同样仅在 sampling 时使用。 |
+| `--repetition-penalty` | `1.0` | repetition penalty（>1 会降低重复概率）。 |
+| `--no-repeat-ngram-size` | `20` | 全局 no‑repeat n‑gram size。 |
+| `--seed` | – | sampling 随机种子，主要用于调试复现。 |
 | `--port` | `8000` | HTTP 监听端口。 |
-| `--model-id` | `deepseek-ocr` | `/v1/models` 以及流式响应中返回的模型名。 |
 
 > **截断提示：** 如果客户端响应过早结束，请调大 `--max-new-tokens`（或请求体 `max_tokens`）。只要达到该上限，模型就会停止生成。
+
+## 模型选择
+
+- `config.toml` 的 `[models.entries]` 定义了所有可用后端（默认包含 `deepseek-ocr`、`paddleocr-vl`）。通过 `--model` 或修改 `[models].active` 可以指定启动时预加载的模型。
+- 每个 `/v1/responses`、`/v1/chat/completions` 请求都必须携带 `model` 字段。若请求的模型与当前缓存不同，服务端会先卸载旧模型，再加载对应权重（必要时自动下载），随后执行推理——内存中始终只保留一个模型，因此频繁切换会带来一次性加载开销。
+- `/v1/models` 会列出同样的模型 ID，方便 OpenAI 兼容客户端动态发现。
 
 ## 配置与覆盖
 

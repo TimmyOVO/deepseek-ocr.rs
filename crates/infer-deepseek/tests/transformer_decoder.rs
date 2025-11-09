@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use common::test_utils::{shared_language_config, shared_transformer_weights};
-use deepseek_ocr_core::{
+use deepseek_ocr_infer_deepseek::{
     config::DeepseekV2Config,
     transformer::{cache::DynamicCache, decoder::TransformerDecoder, weights::TransformerWeights},
 };

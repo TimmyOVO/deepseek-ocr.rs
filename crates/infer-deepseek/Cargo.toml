@@ -1,0 +1,45 @@
+[package]
+name = "deepseek-ocr-infer-deepseek"
+version = "0.3.7"
+edition = "2024"
+
+[dependencies]
+deepseek-ocr-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+image = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+once_cell = "1.19"
+tokenizers = { workspace = true }
+rayon = "1.10"
+rand = { version = "0.8.5", features = ["std"] }
+candle-flash-attn = { version = "0.9", default-features = false, optional = true }
+
+[features]
+default = []
+dhat-heap = ["deepseek-ocr-core/dhat-heap"]
+memlog = ["deepseek-ocr-core/memlog"]
+flash-attn = ["candle-flash-attn"]
+metal = [
+    "candle-core/metal",
+    "candle-nn/metal",
+]
+accelerate = [
+    "candle-core/accelerate",
+    "candle-nn/accelerate",
+]
+cuda = [
+    "candle-core/cuda",
+    "candle-nn/cuda",
+]
+mkl = [
+    "candle-core/mkl",
+    "candle-nn/mkl",
+]
+
+[dev-dependencies]
+ndarray = "0.16"
+ndarray-npy = "0.9"

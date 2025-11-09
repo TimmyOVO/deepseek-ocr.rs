@@ -1,7 +1,9 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -18,7 +20,8 @@ const MODELSCOPE_FILES_URL: &str =
 const MODELSCOPE_DOWNLOAD_URL: &str =
     "https://modelscope.cn/models/{model_id}/resolve/master/{path}";
 
-static MODELSCOPE_MANIFEST: OnceCell<Vec<ModelScopeFile>> = OnceCell::new();
+static MODELSCOPE_MANIFESTS: OnceCell<Mutex<HashMap<String, Arc<Vec<ModelScopeFile>>>>> =
+    OnceCell::new();
 
 #[derive(Debug, Deserialize)]
 struct ModelScopeResponse {
@@ -37,7 +40,7 @@ struct ModelScopeData {
 #[derive(Debug, Clone, Deserialize)]
 struct ModelScopeFile {
     #[serde(rename = "Name")]
-    name: String,
+    _name: String,
     #[serde(rename = "Path")]
     path: String,
     #[serde(rename = "Size")]
@@ -53,15 +56,15 @@ impl AssetProvider for ModelScopeProvider {
         "ModelScope"
     }
 
-    fn download(&self, remote_name: &str, target: &Path) -> Result<PathBuf> {
-        let entries = modelscope_manifest()?;
+    fn download(&self, repo_id: &str, remote_name: &str, target: &Path) -> Result<PathBuf> {
+        let entries = modelscope_manifest(repo_id)?;
         let entry = entries
             .iter()
             .find(|file| match_path(file, remote_name))
             .ok_or_else(|| {
                 anyhow!(
                     "file {remote_name} was not found in ModelScope manifest for {}",
-                    DEFAULT_MODELSCOPE_ID
+                    repo_id
                 )
             })?;
 
@@ -80,7 +83,7 @@ impl AssetProvider for ModelScopeProvider {
         ensure_parent(target)?;
 
         let url = MODELSCOPE_DOWNLOAD_URL
-            .replace("{model_id}", DEFAULT_MODELSCOPE_ID)
+            .replace("{model_id}", repo_id)
             .replace("{path}", &entry.path);
 
         let response = http_client()
@@ -140,24 +143,52 @@ impl AssetProvider for ModelScopeProvider {
     }
 
     fn benchmark(&self) -> Option<Duration> {
-        if MODELSCOPE_MANIFEST.get().is_some() {
+        if manifest_exists(DEFAULT_MODELSCOPE_ID) {
             return Some(Duration::ZERO);
         }
 
         let start = Instant::now();
-        modelscope_manifest().ok()?;
+        modelscope_manifest(DEFAULT_MODELSCOPE_ID).ok()?;
         Some(start.elapsed())
     }
 }
 
-fn modelscope_manifest() -> Result<&'static [ModelScopeFile]> {
-    MODELSCOPE_MANIFEST
-        .get_or_try_init(fetch_modelscope_manifest)
-        .map(|entries| entries.as_slice())
+fn manifest_cache() -> &'static Mutex<HashMap<String, Arc<Vec<ModelScopeFile>>>> {
+    MODELSCOPE_MANIFESTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn fetch_modelscope_manifest() -> Result<Vec<ModelScopeFile>> {
-    let url = MODELSCOPE_FILES_URL.replace("{model_id}", DEFAULT_MODELSCOPE_ID);
+fn manifest_exists(repo_id: &str) -> bool {
+    if let Some(cache) = MODELSCOPE_MANIFESTS.get() {
+        if let Ok(guard) = cache.lock() {
+            return guard.contains_key(repo_id);
+        }
+    }
+    false
+}
+
+fn modelscope_manifest(repo_id: &str) -> Result<Arc<Vec<ModelScopeFile>>> {
+    {
+        let cache = manifest_cache();
+        if let Some(entries) = cache
+            .lock()
+            .expect("ModelScope manifest cache poisoned")
+            .get(repo_id)
+        {
+            return Ok(entries.clone());
+        }
+    }
+
+    let entries = Arc::new(fetch_modelscope_manifest(repo_id)?);
+    let cache = manifest_cache();
+    let mut guard = cache.lock().expect("ModelScope manifest cache poisoned");
+    Ok(guard
+        .entry(repo_id.to_string())
+        .or_insert_with(|| entries.clone())
+        .clone())
+}
+
+fn fetch_modelscope_manifest(repo_id: &str) -> Result<Vec<ModelScopeFile>> {
+    let url = MODELSCOPE_FILES_URL.replace("{model_id}", repo_id);
     let response = http_client()
         .get(url)
         .send()
@@ -192,7 +223,9 @@ fn fetch_modelscope_manifest() -> Result<Vec<ModelScopeFile>> {
 }
 
 fn match_path(file: &ModelScopeFile, remote_path: &str) -> bool {
-    let normalized = remote_path.trim_start_matches('/');
-    let path = file.path.trim_start_matches('/');
-    path == normalized || file.name == normalized || path.ends_with(normalized)
+    let normalized = remote_path.trim_start_matches('/').replace('\\', "/");
+    if file.path == normalized {
+        return true;
+    }
+    false
 }

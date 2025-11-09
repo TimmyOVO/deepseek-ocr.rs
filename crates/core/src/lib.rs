@@ -1,12 +1,16 @@
 pub mod benchmark;
-pub mod config;
+pub mod cache;
 pub mod conversation;
 pub mod inference;
-pub mod model;
+pub mod sampling;
 pub mod runtime;
+pub mod tensor;
 pub mod streaming;
-pub mod transformer;
-pub mod vision;
+
+pub use inference::{
+    DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
+    normalize_text, render_prompt,
+};
 
 // #[cfg(feature = "mkl")]
 // extern crate intel_mkl_src;

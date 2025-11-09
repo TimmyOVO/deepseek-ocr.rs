@@ -2,7 +2,7 @@ mod common;
 
 use anyhow::{Context, Result};
 use common::test_utils::workspace_path;
-use deepseek_ocr_core::config::{DeepseekOcrConfig, load_ocr_config};
+use deepseek_ocr_infer_deepseek::config::{DeepseekOcrConfig, load_ocr_config};
 
 fn load_test_config() -> Result<DeepseekOcrConfig> {
     let path = workspace_path("DeepSeek-OCR/config.json");

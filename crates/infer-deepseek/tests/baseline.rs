@@ -12,8 +12,10 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use candle_core::{DType, Tensor};
 use common::test_utils::{with_shared_ocr_model, workspace_path};
-use deepseek_ocr_core::model::{DEFAULT_WEIGHTS_PATH, GenerateOptions, VisionProjectionOutputs};
-use deepseek_ocr_core::vision::dynamic_preprocess;
+use deepseek_ocr_infer_deepseek::model::{
+    DEFAULT_WEIGHTS_PATH, GenerateOptions, VisionProjectionOutputs,
+};
+use deepseek_ocr_infer_deepseek::vision::dynamic_preprocess;
 use image::{GenericImageView, open};
 use ndarray::Array2;
 use serde::Deserialize;

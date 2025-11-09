@@ -2,7 +2,7 @@ mod common;
 
 use anyhow::Result;
 use common::test_utils::{shared_language_config, shared_transformer_weights};
-use deepseek_ocr_core::transformer::weights::MlpWeights;
+use deepseek_ocr_infer_deepseek::transformer::weights::MlpWeights;
 
 #[test]
 fn transformer_weights_load_from_safetensor() -> Result<()> {

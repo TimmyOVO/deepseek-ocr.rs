@@ -1,25 +1,19 @@
 use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
     convert::TryFrom,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use candle_core::{DType, Device, Tensor, shape::D};
 use candle_nn::VarBuilder;
 use image::GenericImageView;
 use image::{DynamicImage, Rgb, RgbImage, imageops};
-use rand::{
-    SeedableRng,
-    distributions::{Distribution, WeightedIndex},
-    rngs::StdRng,
-};
 use rayon::prelude::*;
+use tokenizers::Tokenizer;
+use tracing::trace;
 
 use crate::{
-    benchmark::Timer,
     config::{DeepseekOcrConfig, ProjectorConfig, load_ocr_config},
     transformer::{
         cache::{DynamicCache, PromptCacheGuard},
@@ -30,6 +24,33 @@ use crate::{
         resample::resize_bicubic,
     },
 };
+use deepseek_ocr_core::{
+    benchmark::Timer,
+    inference::{
+        DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
+        normalize_text,
+    },
+    sampling::{TokenSelectionParams, init_rng, select_token_id},
+};
+
+pub fn load_model(args: ModelLoadArgs<'_>) -> Result<Box<dyn OcrEngine>> {
+    let ModelLoadArgs {
+        kind,
+        config_path,
+        weights_path,
+        device,
+        dtype,
+    } = args;
+    match kind {
+        ModelKind::Deepseek => {
+            let model = DeepseekOcrModel::load(config_path, weights_path, device, dtype)?;
+            Ok(Box::new(model))
+        }
+        ModelKind::PaddleOcrVl => Err(anyhow!(
+            "ModelKind::PaddleOcrVl cannot be loaded by the Deepseek engine"
+        )),
+    }
+}
 
 pub const DEFAULT_WEIGHTS_PATH: &str = "DeepSeek-OCR/model-00001-of-000001.safetensors";
 
@@ -131,6 +152,32 @@ impl<'a> GenerateOptions<'a> {
             do_sample: false,
             seed: None,
         }
+    }
+}
+
+impl<'a> TokenSelectionParams for GenerateOptions<'a> {
+    fn do_sample(&self) -> bool {
+        self.do_sample
+    }
+
+    fn temperature(&self) -> f64 {
+        self.temperature
+    }
+
+    fn top_p(&self) -> Option<f64> {
+        self.top_p
+    }
+
+    fn top_k(&self) -> Option<usize> {
+        self.top_k
+    }
+
+    fn repetition_penalty(&self) -> f32 {
+        self.repetition_penalty
+    }
+
+    fn no_repeat_ngram_size(&self) -> Option<usize> {
+        self.no_repeat_ngram_size
     }
 }
 
@@ -1431,7 +1478,7 @@ impl DeepseekOcrModel {
             .get(seq_len - 1)
             .context("prefill logits missing final timestep")?;
         let mut current =
-            self.select_token_id(&last_logits, &options, &context_tokens, &mut rng)?;
+            select_token_id(&last_logits, &options, &context_tokens, &mut rng)?;
         if let Some(eos) = options.eos_token_id {
             if current == eos {
                 total_timer.finish(|event| {
@@ -1480,7 +1527,7 @@ impl DeepseekOcrModel {
                 .context("decode logits missing batch dimension")?
                 .get(0)
                 .context("decode logits missing timestep")?;
-            current = self.select_token_id(&next_logits, &options, &context_tokens, &mut rng)?;
+            current = select_token_id(&next_logits, &options, &context_tokens, &mut rng)?;
             if let Some(eos) = options.eos_token_id {
                 if current == eos {
                     break;
@@ -1648,7 +1695,7 @@ impl DeepseekOcrModel {
             .context("prefill logits missing batch dimension")?
             .get(tokens.len() - 1)
             .context("prefill logits missing final timestep")?;
-        let mut current = self.select_token_id(&logits, &options, &tokens, &mut rng)?;
+        let mut current = select_token_id(&logits, &options, &tokens, &mut rng)?;
         if let Some(eos) = options.eos_token_id {
             if current == eos {
                 total_timer.finish(|event| {
@@ -1713,7 +1760,7 @@ impl DeepseekOcrModel {
                 .context("decode logits missing batch dimension")?
                 .get(seq_pos)
                 .context("decode logits missing timestep")?;
-            current = self.select_token_id(&next_logits, &options, &tokens, &mut rng)?;
+            current = select_token_id(&next_logits, &options, &tokens, &mut rng)?;
             if let Some(eos) = options.eos_token_id {
                 if current == eos {
                     break;
@@ -1738,234 +1785,6 @@ impl DeepseekOcrModel {
         Ok(Tensor::from_vec(Vec::<i64>::new(), (1, 0), self.device())?.to_dtype(DType::I64)?)
     }
 
-    fn select_token_id(
-        &self,
-        logits: &Tensor,
-        options: &GenerateOptions<'_>,
-        context: &[i64],
-        rng: &mut StdRng,
-    ) -> Result<i64> {
-        let logits = logits
-            .to_dtype(DType::F32)?
-            .to_vec1::<f32>()
-            .context("failed to extract logits for token selection")?;
-        ensure!(!logits.is_empty(), "logits tensor is empty");
-
-        let mut adjusted = logits.clone();
-        apply_repetition_penalty(&mut adjusted, context, options.repetition_penalty);
-
-        let mut filtered = adjusted.clone();
-        if let Some(ngram) = options.no_repeat_ngram_size {
-            if ngram > 1 {
-                for token in banned_ngram_tokens(context, ngram) {
-                    if let Ok(index) = usize::try_from(token) {
-                        if index < filtered.len() {
-                            filtered[index] = f32::NEG_INFINITY;
-                        }
-                    }
-                }
-            }
-        }
-        if !has_valid_logits(&filtered) {
-            filtered.clone_from(&adjusted);
-        }
-
-        if options.do_sample && options.temperature > 0.0 {
-            let mut logits64: Vec<f64> = filtered
-                .iter()
-                .map(|&v| (v as f64) / options.temperature)
-                .collect();
-            if let Some(k) = options.top_k {
-                if k > 0 && k < logits64.len() {
-                    apply_top_k(&mut logits64, k);
-                }
-            }
-            if let Some(top_p) = options.top_p {
-                if top_p > 0.0 && top_p < 1.0 {
-                    apply_top_p(&mut logits64, top_p);
-                }
-            }
-            if let Some(sampled) = sample_from_logits(&logits64, rng) {
-                return Ok(sampled as i64);
-            }
-        }
-
-        if let Some(best) = argmax_index(&filtered) {
-            return Ok(best as i64);
-        }
-        if let Some(best) = argmax_index(&adjusted) {
-            return Ok(best as i64);
-        }
-        if let Some(best) = argmax_index(&logits) {
-            return Ok(best as i64);
-        }
-        Ok(0)
-    }
-}
-
-fn init_rng(seed: Option<u64>) -> StdRng {
-    match seed {
-        Some(value) => StdRng::seed_from_u64(value),
-        None => StdRng::from_entropy(),
-    }
-}
-
-fn has_valid_logits(values: &[f32]) -> bool {
-    values
-        .iter()
-        .any(|v| v.is_finite() && *v > f32::NEG_INFINITY)
-}
-
-fn argmax_index(values: &[f32]) -> Option<usize> {
-    values
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| v.is_finite() && **v > f32::NEG_INFINITY)
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-        .map(|(idx, _)| idx)
-}
-
-fn apply_repetition_penalty(scores: &mut [f32], context: &[i64], penalty: f32) {
-    if penalty <= 0.0 || (penalty - 1.0).abs() <= f32::EPSILON {
-        return;
-    }
-    let penalty = penalty.max(f32::MIN_POSITIVE);
-    let mut seen = HashSet::new();
-    for &token in context {
-        if let Ok(index) = usize::try_from(token) {
-            if index < scores.len() && seen.insert(index) {
-                let entry = &mut scores[index];
-                if *entry > 0.0 {
-                    *entry /= penalty;
-                } else {
-                    *entry *= penalty;
-                }
-            }
-        }
-    }
-}
-
-fn banned_ngram_tokens(sequence: &[i64], ngram: usize) -> HashSet<i64> {
-    let mut banned = HashSet::new();
-    if ngram <= 1 || sequence.len() < ngram - 1 {
-        return banned;
-    }
-
-    let mut history: HashMap<Vec<i64>, HashSet<i64>> = HashMap::new();
-    for window in sequence.windows(ngram) {
-        let prefix = window[..ngram - 1].to_vec();
-        let next = window[ngram - 1];
-        history.entry(prefix).or_default().insert(next);
-    }
-    let prefix = &sequence[sequence.len() - (ngram - 1)..];
-    if let Some(tokens) = history.get(prefix) {
-        banned.extend(tokens.iter().copied());
-    }
-    banned
-}
-
-fn apply_top_k(logits: &mut [f64], top_k: usize) {
-    if top_k == 0 || logits.is_empty() {
-        return;
-    }
-    let mut indices: Vec<usize> = (0..logits.len())
-        .filter(|&idx| logits[idx].is_finite())
-        .collect();
-    if indices.len() <= top_k {
-        return;
-    }
-    indices.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(Ordering::Equal));
-    for &idx in indices.iter().skip(top_k) {
-        logits[idx] = f64::NEG_INFINITY;
-    }
-}
-
-fn apply_top_p(logits: &mut [f64], top_p: f64) {
-    if !(0.0..1.0).contains(&top_p) || logits.is_empty() {
-        return;
-    }
-    let mut pairs: Vec<(usize, f64)> = logits
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, value)| {
-            if value.is_finite() {
-                Some((idx, *value))
-            } else {
-                None
-            }
-        })
-        .collect();
-    if pairs.is_empty() {
-        return;
-    }
-    pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-    let max_logit = pairs[0].1;
-    let mut exp_scores = Vec::with_capacity(pairs.len());
-    let mut total = 0.0;
-    for (_, logit) in &pairs {
-        let weight = (logit - max_logit).exp();
-        exp_scores.push(weight);
-        total += weight;
-    }
-    if total <= 0.0 {
-        return;
-    }
-    let mut cumulative = 0.0;
-    let mut keep = pairs.len();
-    for (idx, weight) in exp_scores.iter().enumerate() {
-        cumulative += *weight / total;
-        if cumulative > top_p {
-            keep = idx + 1;
-            break;
-        }
-    }
-    if keep == 0 {
-        keep = 1;
-    }
-    let mut mask = vec![false; logits.len()];
-    for (idx, (token_idx, _)) in pairs.iter().enumerate() {
-        if idx < keep {
-            mask[*token_idx] = true;
-        }
-    }
-    for (idx, keep) in mask.into_iter().enumerate() {
-        if !keep {
-            logits[idx] = f64::NEG_INFINITY;
-        }
-    }
-}
-
-fn sample_from_logits(logits: &[f64], rng: &mut StdRng) -> Option<usize> {
-    let indices: Vec<usize> = (0..logits.len())
-        .filter(|&idx| logits[idx].is_finite() && logits[idx] > f64::NEG_INFINITY)
-        .collect();
-    if indices.is_empty() {
-        return None;
-    }
-    let max_logit = indices
-        .iter()
-        .map(|&idx| logits[idx])
-        .fold(f64::NEG_INFINITY, f64::max);
-    if !max_logit.is_finite() {
-        return None;
-    }
-    let mut weights = Vec::with_capacity(indices.len());
-    for &idx in &indices {
-        let weight = (logits[idx] - max_logit).exp();
-        weights.push(if weight.is_finite() && weight > 0.0 {
-            weight
-        } else {
-            0.0
-        });
-    }
-    if weights.iter().all(|w| *w <= 0.0) {
-        return indices
-            .iter()
-            .copied()
-            .max_by(|&a, &b| logits[a].partial_cmp(&logits[b]).unwrap_or(Ordering::Equal));
-    }
-    let dist = WeightedIndex::new(&weights).ok()?;
-    indices.get(dist.sample(rng)).copied()
 }
 
 fn round_ties_to_even(value: f64) -> f64 {
@@ -2024,4 +1843,306 @@ pub fn image_to_tensor(image: &DynamicImage, device: &Device, dtype: DType) -> R
     } else {
         Ok(tensor.to_dtype(dtype)?)
     }
+}
+
+impl deepseek_ocr_core::inference::OcrEngine for DeepseekOcrModel {
+    fn kind(&self) -> ModelKind {
+        ModelKind::Deepseek
+    }
+
+    fn device(&self) -> &Device {
+        self.device()
+    }
+
+    fn dtype(&self) -> DType {
+        self.dtype()
+    }
+
+    fn weights_path(&self) -> Option<&Path> {
+        Some(self.weights_path())
+    }
+
+    fn flash_attention_enabled(&self) -> bool {
+        self.flash_attention_enabled()
+    }
+
+    fn decode(
+        &self,
+        tokenizer: &Tokenizer,
+        prompt: &str,
+        images: &[DynamicImage],
+        vision: VisionSettings,
+        params: &DecodeParameters,
+        stream: Option<&dyn Fn(usize, &[i64])>,
+    ) -> Result<DecodeOutcome> {
+        let owned_inputs = prepare_vision_inputs(
+            self,
+            images,
+            vision.base_size,
+            vision.image_size,
+            vision.crop_mode,
+        )
+        .with_context(|| "vision input failed")?;
+        let embeddings = compute_image_embeddings(self, &owned_inputs)
+            .with_context(|| "image embedding failed")?;
+        let (input_ids_vec, mask_vec) = build_prompt_tokens(
+            tokenizer,
+            prompt,
+            &embeddings,
+            &owned_inputs,
+            vision.base_size,
+            vision.image_size,
+            vision.crop_mode,
+        )
+        .with_context(|| "prompt formatting failed")?;
+
+        let input_len = input_ids_vec.len();
+        let device = self.device();
+
+        let input_ids = Tensor::from_vec(input_ids_vec.clone(), (1, input_len), device)?
+            .to_dtype(DType::I64)?;
+        let mask_tensor =
+            Tensor::from_vec(mask_vec.clone(), (1, mask_vec.len()), device)?.to_dtype(DType::U8)?;
+
+        let mut options = GenerateOptions::new(params.max_new_tokens);
+        options.images_seq_mask = Some(&mask_tensor);
+        if !embeddings.is_empty() {
+            options.image_embeddings = Some(embeddings.as_slice());
+        }
+        options.eos_token_id = self.language_model().config().eos_token_id;
+        options.use_cache = params.use_cache;
+        options.do_sample = params.do_sample;
+        options.temperature = params.temperature;
+        options.top_p = params.top_p;
+        options.top_k = params.top_k;
+        options.repetition_penalty = params.repetition_penalty;
+        options.no_repeat_ngram_size = params.no_repeat_ngram_size;
+        options.seed = params.seed;
+        options.progress_callback = stream;
+
+        let generated = self.generate(&input_ids, options)?;
+        let generated_tokens = generated
+            .to_vec2::<i64>()?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let decoded = tokenizer
+            .decode(
+                &generated_tokens
+                    .iter()
+                    .filter_map(|&id| u32::try_from(id).ok())
+                    .collect::<Vec<_>>(),
+                true,
+            )
+            .unwrap_or_default();
+        let normalized = normalize_text(&decoded);
+
+        Ok(DecodeOutcome {
+            text: normalized,
+            prompt_tokens: input_len,
+            response_tokens: generated_tokens.len(),
+            generated_tokens,
+        })
+    }
+}
+
+fn prepare_vision_inputs(
+    model: &DeepseekOcrModel,
+    images: &[DynamicImage],
+    base_size: u32,
+    image_size: u32,
+    crop_mode: bool,
+) -> Result<Vec<OwnedVisionInput>> {
+    let timer = Timer::new("vision.prepare_inputs");
+    if !images.is_empty() {
+        trace!(
+            "Preparing vision input (base_size={base_size}, image_size={image_size}, crop_mode={crop_mode})"
+        );
+    }
+    let result = images
+        .iter()
+        .map(|image| {
+            model
+                .prepare_vision_input_from_image(image, base_size, image_size, crop_mode)
+                .with_context(|| "failed to build vision input")
+        })
+        .collect::<Result<Vec<_>>>();
+    match &result {
+        Ok(inputs) => {
+            timer.finish(|event| {
+                event.add_field("images", inputs.len());
+                event.add_field("base_size", base_size as u64);
+                event.add_field("image_size", image_size as u64);
+                event.add_field("crop_mode", crop_mode);
+            });
+        }
+        Err(_) => {
+            timer.finish(|_| {});
+        }
+    }
+    result
+}
+
+fn compute_image_embeddings(
+    model: &DeepseekOcrModel,
+    owned_inputs: &[OwnedVisionInput],
+) -> Result<Vec<Tensor>> {
+    let timer = Timer::new("vision.compute_embeddings");
+    if owned_inputs.is_empty() {
+        timer.finish(|event| {
+            event.add_field("images", 0u64);
+        });
+        return Ok(Vec::new());
+    }
+    let refs: Vec<Option<VisionInput<'_>>> = owned_inputs
+        .iter()
+        .map(|owned| Some(owned.as_ref()))
+        .collect();
+    trace!("Computing image embeddings for {} image(s)...", refs.len());
+    let outputs = model.compute_image_embeddings(&refs);
+    match &outputs {
+        Ok(values) => {
+            let tokens_total: u64 = values
+                .iter()
+                .map(|tensor| tensor.shape().dims().first().copied().unwrap_or(0) as u64)
+                .sum();
+            timer.finish(|event| {
+                event.add_field("images", refs.len());
+                event.add_field("device_is_cuda", model.device().is_cuda());
+                event.add_field("device_is_metal", model.device().is_metal());
+                event.add_field("token_rows_total", tokens_total);
+            });
+        }
+        Err(_) => {
+            timer.finish(|_| {});
+        }
+    }
+    outputs
+}
+
+fn build_prompt_tokens(
+    tokenizer: &Tokenizer,
+    prompt: &str,
+    embeddings: &[Tensor],
+    vision_inputs: &[OwnedVisionInput],
+    base_size: u32,
+    image_size: u32,
+    crop_mode: bool,
+) -> Result<(Vec<i64>, Vec<u8>)> {
+    let timer = Timer::new("prompt.build_tokens");
+    let image_token_id = tokenizer
+        .token_to_id("<image>")
+        .ok_or_else(|| anyhow!("tokenizer missing <image> token"))? as i64;
+    let bos_id = 0i64;
+
+    let segments: Vec<&str> = prompt.split("<image>").collect();
+    anyhow::ensure!(
+        segments.len().saturating_sub(1) == embeddings.len(),
+        "prompt/image embedding mismatch: {} slots vs {} embeddings",
+        segments.len().saturating_sub(1),
+        embeddings.len()
+    );
+    anyhow::ensure!(
+        embeddings.len() == vision_inputs.len(),
+        "vision input count {} does not match embeddings {}",
+        vision_inputs.len(),
+        embeddings.len()
+    );
+
+    let mut tokens = Vec::new();
+    let mut mask = Vec::new();
+    tokens.push(bos_id);
+    mask.push(0);
+
+    for (idx, segment) in segments.iter().enumerate() {
+        let encoding = tokenizer
+            .encode(*segment, false)
+            .map_err(|err| anyhow!("tokenization failed: {err}"))?;
+        tokens.extend(encoding.get_ids().iter().map(|&id| id as i64));
+        mask.extend(std::iter::repeat(0u8).take(encoding.len()));
+        if idx < embeddings.len() {
+            let placeholders = build_image_placeholders(
+                image_token_id,
+                &vision_inputs[idx],
+                embeddings[idx]
+                    .shape()
+                    .dims2()
+                    .context("vision embedding must be 2D")?
+                    .0,
+                base_size,
+                image_size,
+                crop_mode,
+            )?;
+            tokens.extend(&placeholders);
+            mask.extend(std::iter::repeat(1u8).take(placeholders.len()));
+        }
+    }
+
+    let total_tokens = tokens.len();
+    let image_tokens = mask.iter().filter(|&&flag| flag != 0).count();
+    timer.finish(|event| {
+        event.add_field("tokens", total_tokens);
+        event.add_field("image_tokens", image_tokens);
+        event.add_field("segments", segments.len());
+        event.add_field("crop_mode", crop_mode);
+    });
+
+    Ok((tokens, mask))
+}
+
+fn build_image_placeholders(
+    image_token_id: i64,
+    input: &OwnedVisionInput,
+    expected_tokens: usize,
+    base_size: u32,
+    image_size: u32,
+    crop_mode: bool,
+) -> Result<Vec<i64>> {
+    const PATCH_SIZE: u32 = 16;
+    const DOWNSAMPLE_RATIO: u32 = 4;
+
+    let mut placeholders = Vec::new();
+
+    let push_grid = |placeholders: &mut Vec<i64>, rows: usize, cols: usize, add_terminal: bool| {
+        for _ in 0..rows {
+            placeholders.extend(std::iter::repeat(image_token_id).take(cols));
+            placeholders.push(image_token_id);
+        }
+        if add_terminal {
+            placeholders.push(image_token_id);
+        }
+    };
+
+    if crop_mode {
+        let grid = (base_size / PATCH_SIZE) as usize;
+        let num_queries_global = ((grid as f32) / (DOWNSAMPLE_RATIO as f32)).ceil() as usize;
+        push_grid(
+            &mut placeholders,
+            num_queries_global,
+            num_queries_global,
+            true,
+        );
+
+        let (width_crops, height_crops) = input.crop_shape.unwrap_or((1, 1));
+        if width_crops > 1 || height_crops > 1 {
+            let local_grid = (image_size / PATCH_SIZE) as usize;
+            let num_queries_local =
+                ((local_grid as f32) / (DOWNSAMPLE_RATIO as f32)).ceil() as usize;
+            let rows = num_queries_local * height_crops;
+            let cols = num_queries_local * width_crops;
+            push_grid(&mut placeholders, rows, cols, false);
+        }
+    } else {
+        let grid = (image_size / PATCH_SIZE) as usize;
+        let num_queries = ((grid as f32) / (DOWNSAMPLE_RATIO as f32)).ceil() as usize;
+        push_grid(&mut placeholders, num_queries, num_queries, true);
+    }
+
+    anyhow::ensure!(
+        placeholders.len() == expected_tokens,
+        "placeholder count {} does not match expected {}",
+        placeholders.len(),
+        expected_tokens
+    );
+    Ok(placeholders)
 }
