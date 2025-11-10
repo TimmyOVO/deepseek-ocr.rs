@@ -47,19 +47,11 @@ impl DeepseekLanguageModel {
     /// Construct the language model from pre-loaded weight tensors.
     pub fn from_weights(cfg: Arc<DeepseekV2Config>, weights: DeepseekLanguageModelWeights) -> Self {
         let transformer = Arc::new(weights.transformer);
-        let flash_from_config = cfg
+        let use_flash_attention = cfg
             .attn_implementation
             .as_deref()
             .map(|s| s.eq_ignore_ascii_case("flash_attention_2"))
             .unwrap_or(false);
-        let flash_override = std::env::var("DEEPSEEK_OCR_FLASH_ATTENTION")
-            .ok()
-            .and_then(|value| match value.to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" => Some(true),
-                "0" | "false" | "no" => Some(false),
-                _ => None,
-            });
-        let use_flash_attention = flash_override.unwrap_or(flash_from_config);
         let decoder = TransformerDecoder::new(
             Arc::clone(&cfg),
             Arc::clone(&transformer),

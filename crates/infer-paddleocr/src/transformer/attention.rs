@@ -319,11 +319,11 @@ fn flash_attention_forward(
         let num_heads = cfg.num_attention_heads;
         let num_kv_heads = cfg.resolved_num_key_value_heads();
 
-        let mut q = apply_linear(hidden_states, &weights.q_proj)?
+        let q = apply_linear(hidden_states, &weights.q_proj)?
             .reshape((batch, seq_len, num_heads, head_dim))?
             .to_dtype(dtype)?
             .to_device(device)?;
-        let mut k = apply_linear(hidden_states, &weights.k_proj)?
+        let k = apply_linear(hidden_states, &weights.k_proj)?
             .reshape((batch, seq_len, num_kv_heads, head_dim))?
             .to_dtype(dtype)?
             .to_device(device)?;
@@ -333,10 +333,10 @@ fn flash_attention_forward(
             .to_device(device)?;
 
         let sections = ctx.rotary.doubled_sections();
-        let (q, k) = apply_multimodal_rotary(q, k, cos, sin, sections)?;
+        let (mut q, mut k) = apply_multimodal_rotary(q, k, cos, sin, sections)?;
 
         let repeats = num_heads / num_kv_heads;
-        let mut k = repeat_kv(&k, repeats)?;
+        k = repeat_kv(&k, repeats)?;
         let mut v = repeat_kv(&v, repeats)?;
 
         q = q.contiguous()?;
