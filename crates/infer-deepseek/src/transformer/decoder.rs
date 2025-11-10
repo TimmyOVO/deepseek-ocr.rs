@@ -8,7 +8,7 @@ use crate::{
     },
 };
 use anyhow::{Result, ensure};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Tensor};
 use std::{cell::RefCell, sync::Arc};
 
 /// Runs the stacked transformer decoder layers, handling optional KV cache reuse.
