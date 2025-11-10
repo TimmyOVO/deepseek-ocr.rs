@@ -8,7 +8,7 @@ use crate::{
     },
 };
 use anyhow::{Result, ensure};
-use candle_core::{DType, Tensor};
+use candle_core::{DType, Device, Tensor};
 use std::{cell::RefCell, sync::Arc};
 
 /// Runs the stacked transformer decoder layers, handling optional KV cache reuse.
@@ -158,7 +158,8 @@ impl TransformerDecoder {
                         let want = if q_len == 0 {
                             past_len
                         } else {
-                            let max_pos = ids.max_all()?.to_scalar::<i64>()? as usize;
+                            let ids_cpu = ids.to_device(&candle_core::Device::Cpu)?;
+                            let max_pos = ids_cpu.max_all()?.to_scalar::<i64>()? as usize;
                             (past_len + q_len).max(max_pos + 1)
                         };
                         cache.ensure_len(&self.cfg, want)?;
