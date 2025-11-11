@@ -9,9 +9,7 @@ use tokenizers::Tokenizer;
 use tracing::info;
 
 use deepseek_ocr_config::{AppConfig, LocalFileSystem};
-use deepseek_ocr_core::{
-    DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
-};
+use deepseek_ocr_core::{DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings};
 use deepseek_ocr_infer_deepseek::load_model as load_deepseek_model;
 use deepseek_ocr_infer_paddleocr::load_model as load_paddle_model;
 
@@ -137,12 +135,11 @@ impl AppState {
             .manager
             .load_model(model_id)
             .map_err(|err| ApiError::Internal(err.to_string()))?;
-        let mut guard = self
-            .current
-            .lock()
-            .expect("model mutex poisoning detected");
+        let mut guard = self.current.lock().expect("model mutex poisoning detected");
         *guard = Some(loaded);
-        let loaded = guard.as_ref().expect("loaded model missing after assignment");
+        let loaded = guard
+            .as_ref()
+            .expect("loaded model missing after assignment");
         Ok((
             Arc::clone(&loaded.model),
             Arc::clone(&loaded.tokenizer),
@@ -205,14 +202,12 @@ impl ModelManager {
             model.flash_attention_enabled(),
             weights_path.display()
         );
-        let tokenizer = Arc::new(
-            Tokenizer::from_file(&tokenizer_path).map_err(|err| {
-                anyhow::anyhow!(
-                    "failed to load tokenizer from {}: {err}",
-                    tokenizer_path.display()
-                )
-            })?,
-        );
+        let tokenizer = Arc::new(Tokenizer::from_file(&tokenizer_path).map_err(|err| {
+            anyhow::anyhow!(
+                "failed to load tokenizer from {}: {err}",
+                tokenizer_path.display()
+            )
+        })?);
         Ok(LoadedModel {
             id: model_id.to_string(),
             kind: resources.kind,

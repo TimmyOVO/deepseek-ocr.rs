@@ -402,11 +402,7 @@ fn apply_linear(input: &Tensor, weights: &LinearWeights) -> Result<Tensor> {
     let dims = input.shape().dims();
     ensure!(dims.len() >= 2, "linear expects rank >= 2");
     let last_dim = *dims.last().expect("at least one dim");
-    let (out_dim, in_dim) = weights
-        .weight
-        .shape()
-        .dims2()
-        .context("linear weights must be 2D")?;
+    let (out_dim, in_dim) = (weights.out_dim, weights.in_dim);
     ensure!(
         in_dim == last_dim,
         "linear weight expects input dim {}, got {}",
@@ -415,7 +411,11 @@ fn apply_linear(input: &Tensor, weights: &LinearWeights) -> Result<Tensor> {
     );
     let leading = dims[..dims.len() - 1].iter().product::<usize>();
     let input2d = input.reshape((leading, in_dim))?;
-    let mut proj = input2d.matmul(&weights.weight.transpose(0, 1)?)?;
+    let weight = weights
+        .weight
+        .as_ref()
+        .context("vision linear weights require float tensors")?;
+    let mut proj = input2d.matmul(&weight.transpose(0, 1)?)?;
     if let Some(bias) = &weights.bias {
         proj = proj.broadcast_add(&bias.reshape((1, out_dim))?)?;
     }
@@ -454,7 +454,13 @@ fn load_linear(
     } else {
         None
     };
-    Ok(LinearWeights { weight, bias })
+    Ok(LinearWeights {
+        weight: Some(weight),
+        bias,
+        qmatmul: None,
+        out_dim,
+        in_dim,
+    })
 }
 
 fn adapt_position_embedding(table: &Tensor, target_tokens: usize) -> Result<Tensor> {

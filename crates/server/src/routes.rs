@@ -81,9 +81,9 @@ pub async fn responses_endpoint(
         req.use_cache,
     );
     if req.stream.unwrap_or(false) {
-            let stream_inputs = gen_inputs.clone();
-            let decode_for_task = decode.clone();
-            let created = current_timestamp();
+        let stream_inputs = gen_inputs.clone();
+        let decode_for_task = decode.clone();
+        let created = current_timestamp();
         let response_id = format!("resp-{}", Uuid::new_v4());
         let output_id = format!("msg-{}", Uuid::new_v4());
         let (sender, rx) = mpsc::unbounded_channel();
@@ -155,9 +155,7 @@ pub async fn chat_completions_endpoint(
         return Ok(Either::Left(Json(response)));
     }
     debug!(prompt = %prompt, "Prepared chat prompt");
-    let max_tokens = req
-        .max_tokens
-        .unwrap_or(state.default_max_new_tokens());
+    let max_tokens = req.max_tokens.unwrap_or(state.default_max_new_tokens());
     let mut decode = base_decode_parameters(&gen_inputs, max_tokens);
     apply_decode_overrides(
         &mut decode,
@@ -171,9 +169,9 @@ pub async fn chat_completions_endpoint(
         req.use_cache,
     );
     if req.stream.unwrap_or(false) {
-            let stream_inputs = gen_inputs.clone();
-            let decode_for_task = decode.clone();
-            let created = current_timestamp();
+        let stream_inputs = gen_inputs.clone();
+        let decode_for_task = decode.clone();
+        let created = current_timestamp();
         let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
         let (sender, rx) = mpsc::unbounded_channel();
         let stream = into_event_stream(rx);
@@ -354,11 +352,7 @@ fn stream_fallback_response(
     stream
 }
 
-fn stream_fallback_chat(
-    text: String,
-    inputs: &GenerationInputs,
-    model: String,
-) -> BoxEventStream {
+fn stream_fallback_chat(text: String, inputs: &GenerationInputs, model: String) -> BoxEventStream {
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = current_timestamp();
     let (sender, rx) = mpsc::unbounded_channel();

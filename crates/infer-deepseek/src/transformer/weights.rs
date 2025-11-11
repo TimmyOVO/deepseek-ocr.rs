@@ -1,22 +1,54 @@
-use std::fmt::Write as _;
+use std::{
+    fmt::{self, Write as _},
+    sync::Arc,
+};
 
-use crate::config::DeepseekV2Config;
+use crate::{
+    config::DeepseekV2Config,
+    quantization::{LinearLayerGroup, QuantizationKind, QuantizationOutcome, QuantizationState},
+};
 use anyhow::{Context, Result, ensure};
-use candle_core::Tensor;
+use candle_core::{
+    Tensor,
+    quantized::{GgmlDType, QMatMul, QTensor},
+};
 use candle_nn::VarBuilder;
+use tracing::debug;
 
 /// Fully connected layer weights captured directly from safetensors via [`VarBuilder`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LinearWeights {
-    pub weight: Tensor,
+    pub weight: Option<Tensor>,
     pub bias: Option<Tensor>,
+    pub qmatmul: Option<Arc<QMatMul>>,
+    pub out_dim: usize,
+    pub in_dim: usize,
+}
+
+impl fmt::Debug for LinearWeights {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinearWeights")
+            .field("has_weight", &self.weight.is_some())
+            .field("bias", &self.bias)
+            .field("qmatmul", &self.qmatmul.is_some())
+            .field("out_dim", &self.out_dim)
+            .field("in_dim", &self.in_dim)
+            .finish()
+    }
 }
 
 impl LinearWeights {
-    fn load(vb: &VarBuilder, out_dim: usize, in_dim: usize, bias: bool) -> Result<Self> {
+    fn load(
+        vb: &VarBuilder,
+        out_dim: usize,
+        in_dim: usize,
+        bias: bool,
+        group: LinearLayerGroup,
+    ) -> Result<Self> {
         let weight = vb
             .get((out_dim, in_dim), "weight")
             .with_context(|| format!("missing linear weight `{}`", qualified_name(vb, "weight")))?;
+        let weight = weight.contiguous()?;
         let bias =
             if bias && vb.contains_tensor("bias") {
                 Some(vb.get(out_dim, "bias").with_context(|| {
@@ -25,7 +57,22 @@ impl LinearWeights {
             } else {
                 None
             };
-        Ok(Self { weight, bias })
+        let qmatmul = maybe_quantize_linear(&weight, in_dim, group, &qualified_name(vb, "weight"))?;
+        let keep_fp = QuantizationState::global()
+            .config()
+            .keep_full_precision_weights;
+        let weight = if qmatmul.is_some() && !keep_fp {
+            None
+        } else {
+            Some(weight)
+        };
+        Ok(Self {
+            weight,
+            bias,
+            qmatmul,
+            out_dim,
+            in_dim,
+        })
     }
 }
 
@@ -70,24 +117,28 @@ impl AttentionWeights {
             num_heads * head_dim,
             hidden_size,
             true,
+            LinearLayerGroup::Text,
         )?;
         let k_proj = LinearWeights::load(
             &attn_vb.pp("k_proj"),
             num_kv_heads * kv_head_dim,
             hidden_size,
             true,
+            LinearLayerGroup::Text,
         )?;
         let v_proj = LinearWeights::load(
             &attn_vb.pp("v_proj"),
             num_kv_heads * v_head_dim,
             hidden_size,
             true,
+            LinearLayerGroup::Text,
         )?;
         let o_proj = LinearWeights::load(
             &attn_vb.pp("o_proj"),
             hidden_size,
             num_heads * v_head_dim,
             true,
+            LinearLayerGroup::Text,
         )?;
         Ok(Self {
             q_proj,
@@ -107,11 +158,27 @@ pub struct DenseMlpWeights {
 
 impl DenseMlpWeights {
     fn load(vb: &VarBuilder, hidden_size: usize, intermediate_size: usize) -> Result<Self> {
-        let gate_proj =
-            LinearWeights::load(&vb.pp("gate_proj"), intermediate_size, hidden_size, true)?;
-        let up_proj = LinearWeights::load(&vb.pp("up_proj"), intermediate_size, hidden_size, true)?;
-        let down_proj =
-            LinearWeights::load(&vb.pp("down_proj"), hidden_size, intermediate_size, true)?;
+        let gate_proj = LinearWeights::load(
+            &vb.pp("gate_proj"),
+            intermediate_size,
+            hidden_size,
+            true,
+            LinearLayerGroup::Text,
+        )?;
+        let up_proj = LinearWeights::load(
+            &vb.pp("up_proj"),
+            intermediate_size,
+            hidden_size,
+            true,
+            LinearLayerGroup::Text,
+        )?;
+        let down_proj = LinearWeights::load(
+            &vb.pp("down_proj"),
+            hidden_size,
+            intermediate_size,
+            true,
+            LinearLayerGroup::Text,
+        )?;
         Ok(Self {
             gate_proj,
             up_proj,
@@ -331,5 +398,69 @@ fn qualified_name(vb: &VarBuilder, tensor: &str) -> String {
         let mut composed = String::with_capacity(prefix.len() + tensor.len() + 1);
         let _ = write!(composed, "{prefix}.{tensor}");
         composed
+    }
+}
+
+const Q8_BLOCK_SIZE: usize = 32;
+
+fn maybe_quantize_linear(
+    weight: &Tensor,
+    in_dim: usize,
+    group: LinearLayerGroup,
+    tensor_name: &str,
+) -> Result<Option<Arc<QMatMul>>> {
+    let quant = QuantizationState::global();
+    let config = quant.config();
+    if !quant.enabled_for(group) {
+        if config.kind.is_enabled() {
+            debug!(
+                tensor = tensor_name,
+                ?group,
+                "skipping quantization because target `{}` is disabled",
+                config.targets
+            );
+        }
+        return Ok(None);
+    }
+    match config.kind {
+        QuantizationKind::Q8_0 => {
+            if in_dim % Q8_BLOCK_SIZE != 0 {
+                debug!(
+                    tensor = tensor_name,
+                    ?group,
+                    in_dim,
+                    block = Q8_BLOCK_SIZE,
+                    "skipping Q8_0 quantization: input dim not divisible by block size"
+                );
+                quant.record_attempt(QuantizationOutcome::Fallback);
+                return Ok(None);
+            }
+            match QTensor::quantize(weight, GgmlDType::Q8_0).and_then(QMatMul::from_qtensor) {
+                Ok(qm) => {
+                    quant.record_attempt(QuantizationOutcome::Quantized);
+                    Ok(Some(Arc::new(qm)))
+                }
+                Err(err) => {
+                    debug!(
+                        tensor = tensor_name,
+                        ?group,
+                        error = %err,
+                        "failed to quantize weights, keeping float tensor"
+                    );
+                    quant.record_attempt(QuantizationOutcome::Fallback);
+                    Ok(None)
+                }
+            }
+        }
+        QuantizationKind::Q4K => {
+            debug!(
+                tensor = tensor_name,
+                ?group,
+                "Q4_K runtime quantization path not implemented, keeping float weights"
+            );
+            quant.record_attempt(QuantizationOutcome::Fallback);
+            Ok(None)
+        }
+        QuantizationKind::None => Ok(None),
     }
 }

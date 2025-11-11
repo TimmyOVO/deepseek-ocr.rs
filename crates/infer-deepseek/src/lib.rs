@@ -1,5 +1,6 @@
 pub mod config;
 pub mod model;
+pub mod quantization;
 pub mod transformer;
 pub mod vision;
 

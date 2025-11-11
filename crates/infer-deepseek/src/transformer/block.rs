@@ -9,7 +9,7 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, bail, ensure};
-use candle_core::{DType, Device, Tensor, shape::D};
+use candle_core::{DType, Device, Module, Tensor, shape::D};
 #[cfg(feature = "flash-attn")]
 use candle_flash_attn::flash_attn;
 use candle_nn::ops::{rms_norm, sigmoid, softmax};
@@ -525,11 +525,7 @@ fn apply_linear(input: &Tensor, weights: &LinearWeights) -> Result<Tensor> {
         bail!("linear expects rank >= 2, received {:?}", dims);
     }
     let last_dim = *dims.last().expect("at least one dim");
-    let (out_dim, in_dim) = weights
-        .weight
-        .shape()
-        .dims2()
-        .context("linear weights must be 2D")?;
+    let (out_dim, in_dim) = (weights.out_dim, weights.in_dim);
     if in_dim != last_dim {
         bail!(
             "linear weight expects input dim {}, got {}",
@@ -539,8 +535,21 @@ fn apply_linear(input: &Tensor, weights: &LinearWeights) -> Result<Tensor> {
     }
 
     let leading = dims[..dims.len() - 1].iter().product::<usize>();
-    let input2d = input.reshape((leading, in_dim))?;
-    let proj = input2d.matmul(&transpose(&weights.weight, 0, 1)?)?;
+    let input2d = input.reshape((leading, in_dim))?.contiguous()?;
+    let proj = if let Some(qm) = &weights.qmatmul {
+        let out = qm.forward(&input2d)?;
+        if out.dtype() == input2d.dtype() {
+            out
+        } else {
+            out.to_dtype(input2d.dtype())?
+        }
+    } else {
+        let weight = weights
+            .weight
+            .as_ref()
+            .context("float linear weight missing for non-quantized layer")?;
+        input2d.matmul(&transpose(weight, 0, 1)?)?
+    };
     let proj = if let Some(bias) = &weights.bias {
         proj.broadcast_add(&bias.reshape((1, out_dim))?)?
     } else {

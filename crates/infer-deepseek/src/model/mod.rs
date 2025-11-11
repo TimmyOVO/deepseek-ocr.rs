@@ -15,6 +15,7 @@ use tracing::trace;
 
 use crate::{
     config::{DeepseekOcrConfig, ProjectorConfig, load_ocr_config},
+    quantization::QuantizationState,
     transformer::{
         cache::{DynamicCache, PromptCacheGuard},
         model::{DeepseekLanguageModel, LanguageModelOutput},
@@ -730,6 +731,7 @@ impl DeepseekOcrModel {
         .with_context(|| format!("failed to mmap weights at {}", resolved_weights.display()))?;
         let language = DeepseekLanguageModel::load(language_cfg, &vb)
             .context("failed to load language model")?;
+        QuantizationState::global().log_summary(&device);
         let projector_cfg = Arc::new(
             cfg.resolved_projector_config()
                 .context("projector configuration missing")?,
@@ -1477,8 +1479,7 @@ impl DeepseekOcrModel {
         let last_logits = logits
             .get(seq_len - 1)
             .context("prefill logits missing final timestep")?;
-        let mut current =
-            select_token_id(&last_logits, &options, &context_tokens, &mut rng)?;
+        let mut current = select_token_id(&last_logits, &options, &context_tokens, &mut rng)?;
         if let Some(eos) = options.eos_token_id {
             if current == eos {
                 total_timer.finish(|event| {
@@ -1784,7 +1785,6 @@ impl DeepseekOcrModel {
     fn empty_generation(&self) -> Result<Tensor> {
         Ok(Tensor::from_vec(Vec::<i64>::new(), (1, 0), self.device())?.to_dtype(DType::I64)?)
     }
-
 }
 
 fn round_ties_to_even(value: f64) -> f64 {

@@ -86,7 +86,6 @@ pub struct Args {
     /// TCP port for Rocket.
     #[arg(long, help_heading = "Application")]
     pub port: Option<u16>,
-
 }
 
 impl From<&Args> for ConfigOverrides {

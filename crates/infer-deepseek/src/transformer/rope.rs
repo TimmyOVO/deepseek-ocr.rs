@@ -127,7 +127,10 @@ impl RopeCache {
             } else {
                 ids.to_dtype(DType::I64)?
             };
-            let max_pos = ids_i64.to_device(&Device::Cpu)?.max_all()?.to_scalar::<i64>()? as usize;
+            let max_pos = ids_i64
+                .to_device(&Device::Cpu)?
+                .max_all()?
+                .to_scalar::<i64>()? as usize;
             ensure!(
                 self.len > max_pos,
                 "rope cache length {} insufficient for max position {}",

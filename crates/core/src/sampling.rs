@@ -4,7 +4,7 @@ use std::{
     convert::TryFrom,
 };
 
-use anyhow::{ensure, Result, Context};
+use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Tensor};
 use rand::{
     SeedableRng,

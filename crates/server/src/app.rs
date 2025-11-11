@@ -9,11 +9,7 @@ use deepseek_ocr_core::{
 use rocket::{Config, data::ToByteUnit};
 use tracing::info;
 
-use crate::{
-    args::Args,
-    routes,
-    state::AppState,
-};
+use crate::{args::Args, routes, state::AppState};
 
 pub async fn run(args: Args) -> Result<()> {
     let fs = LocalFileSystem::new("deepseek-ocr");
@@ -72,8 +68,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     info!(
         "Server ready on {}:{}",
-        app_config.server.host,
-        app_config.server.port,
+        app_config.server.host, app_config.server.port,
     );
 
     rocket::custom(figment)

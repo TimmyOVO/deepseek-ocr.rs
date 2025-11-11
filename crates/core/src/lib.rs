@@ -2,10 +2,10 @@ pub mod benchmark;
 pub mod cache;
 pub mod conversation;
 pub mod inference;
-pub mod sampling;
 pub mod runtime;
-pub mod tensor;
+pub mod sampling;
 pub mod streaming;
+pub mod tensor;
 
 pub use inference::{
     DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
