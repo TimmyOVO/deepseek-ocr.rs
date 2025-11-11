@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
-use candle_core::{DType, Device, Tensor, shape::D};
+use candle_core::{DType, Device, Module, Tensor, shape::D};
 use candle_nn::VarBuilder;
 use image::GenericImageView;
 use image::{DynamicImage, Rgb, RgbImage, imageops};
@@ -15,7 +15,10 @@ use tracing::trace;
 
 use crate::{
     config::{DeepseekOcrConfig, ProjectorConfig, load_ocr_config},
-    quantization::QuantizationState,
+    quantization::{
+        LinearLayerGroup, QuantModule, QuantizationKind, QuantizationOutcome, QuantizationState,
+        backend_label,
+    },
     transformer::{
         cache::{DynamicCache, PromptCacheGuard},
         model::{DeepseekLanguageModel, LanguageModelOutput},
@@ -185,7 +188,8 @@ impl<'a> TokenSelectionParams for GenerateOptions<'a> {
 struct ImageProjector {
     input_dim: usize,
     hidden: usize,
-    weight: Tensor,
+    weight: Option<Tensor>,
+    qmatmul: Option<std::sync::Arc<candle_core::quantized::QMatMul>>,
     bias: Option<Tensor>,
     image_newline: Tensor,
     view_separator: Tensor,
@@ -210,6 +214,7 @@ impl ImageProjector {
             .get((cfg.n_embed, input_dim), "weight")
             .with_context(|| "missing projector weight tensor")?
             .contiguous()?;
+        // Optional bias
         let bias = if layers_vb.contains_tensor("bias") {
             Some(
                 layers_vb
@@ -229,10 +234,100 @@ impl ImageProjector {
             .with_context(|| "missing projector view_seperator tensor")?
             .contiguous()?;
 
+        // Try runtime quantization if enabled for projector
+        use candle_core::quantized::{GgmlDType, QMatMul, QTensor};
+        use tracing::trace;
+        let quant = QuantizationState::global();
+        let config = quant.config();
+        let mut qmatmul: Option<std::sync::Arc<QMatMul>> = None;
+        if quant.enabled_for(LinearLayerGroup::Projector) {
+            match config.kind {
+                QuantizationKind::Q8_0 => {
+                    const Q8_BLOCK: usize = 32;
+                    if input_dim % Q8_BLOCK != 0 {
+                        trace!(
+                            module = "projector",
+                            in_dim = input_dim,
+                            block = Q8_BLOCK,
+                            action = "fallback",
+                            reason = "unaligned",
+                            "quant-linear"
+                        );
+                        quant.record_attempt(QuantModule::Projector, QuantizationOutcome::Fallback);
+                    } else {
+                        match QTensor::quantize(&weight, GgmlDType::Q8_0)
+                            .and_then(QMatMul::from_qtensor)
+                        {
+                            Ok(qm) => {
+                                quant.record_attempt(
+                                    QuantModule::Projector,
+                                    QuantizationOutcome::Quantized,
+                                );
+                                trace!(
+                                    module = "projector",
+                                    in_dim = input_dim,
+                                    out_dim = cfg.n_embed,
+                                    from = ?weight.dtype(),
+                                    to = "Q8_0",
+                                    backend = backend_label(&weight.device()),
+                                    action = "quantized",
+                                    "quant-linear"
+                                );
+                                qmatmul = Some(std::sync::Arc::new(qm));
+                            }
+                            Err(err) => {
+                                trace!(
+                                    module = "projector",
+                                    in_dim = input_dim,
+                                    error = %err,
+                                    action = "fallback",
+                                    reason = "quantize_error",
+                                    "quant-linear"
+                                );
+                                quant.record_attempt(
+                                    QuantModule::Projector,
+                                    QuantizationOutcome::Fallback,
+                                );
+                            }
+                        }
+                    }
+                }
+                QuantizationKind::Q4K => {
+                    trace!(
+                        module = "projector",
+                        in_dim = input_dim,
+                        action = "fallback",
+                        reason = "q4k_unimplemented",
+                        "quant-linear"
+                    );
+                    quant.record_attempt(QuantModule::Projector, QuantizationOutcome::Fallback);
+                }
+                QuantizationKind::None => {}
+            }
+        } else {
+            trace!(
+                module = "projector",
+                in_dim = input_dim,
+                action = "disabled",
+                reason = "target not enabled",
+                targets = %config.targets,
+                "quant-linear"
+            );
+            quant.record_attempt(QuantModule::Projector, QuantizationOutcome::Fallback);
+        }
+
+        let keep_fp = config.keep_full_precision_weights;
+        let weight = if qmatmul.is_some() && !keep_fp {
+            None
+        } else {
+            Some(weight)
+        };
+
         Ok(Self {
             input_dim,
             hidden: cfg.n_embed,
             weight,
+            qmatmul,
             bias,
             image_newline,
             view_separator,
@@ -254,9 +349,22 @@ impl ImageProjector {
             last_dim
         );
         let leading = dims[..dims.len() - 1].iter().product::<usize>();
-        let flat = input.reshape((leading, self.input_dim))?;
-        let weight_t = self.weight.transpose(0, 1)?;
-        let mut proj = flat.matmul(&weight_t)?;
+        let flat = input.reshape((leading, self.input_dim))?.contiguous()?;
+        let mut proj = if let Some(qm) = &self.qmatmul {
+            let out = qm.forward(&flat)?;
+            if out.dtype() == flat.dtype() {
+                out
+            } else {
+                out.to_dtype(flat.dtype())?
+            }
+        } else {
+            let weight = self
+                .weight
+                .as_ref()
+                .context("projector float weight missing for non-quantized path")?;
+            let weight_t = weight.transpose(0, 1)?;
+            flat.matmul(&weight_t)?
+        };
         if let Some(bias) = &self.bias {
             proj = proj.broadcast_add(&bias.reshape((1, self.hidden))?)?;
         }
@@ -731,7 +839,6 @@ impl DeepseekOcrModel {
         .with_context(|| format!("failed to mmap weights at {}", resolved_weights.display()))?;
         let language = DeepseekLanguageModel::load(language_cfg, &vb)
             .context("failed to load language model")?;
-        QuantizationState::global().log_summary(&device);
         let projector_cfg = Arc::new(
             cfg.resolved_projector_config()
                 .context("projector configuration missing")?,
@@ -749,6 +856,8 @@ impl DeepseekOcrModel {
         let clip = ClipVisionModel::load(cfg.as_ref(), &vb.pp("model").pp("vision_model"))
             .context("failed to load CLIP vision model")?;
         let vision = VisionModules { sam, clip };
+        // Log quantization summary after all quantizable modules (language + projector) are loaded.
+        QuantizationState::global().log_summary(&device);
 
         Ok(Self {
             cfg,

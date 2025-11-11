@@ -5,7 +5,10 @@ use std::{
 
 use crate::{
     config::DeepseekV2Config,
-    quantization::{LinearLayerGroup, QuantizationKind, QuantizationOutcome, QuantizationState},
+    quantization::{
+        LinearLayerGroup, QuantModule, QuantizationKind, QuantizationOutcome, QuantizationState,
+        backend_label,
+    },
 };
 use anyhow::{Context, Result, ensure};
 use candle_core::{
@@ -13,7 +16,7 @@ use candle_core::{
     quantized::{GgmlDType, QMatMul, QTensor},
 };
 use candle_nn::VarBuilder;
-use tracing::debug;
+use tracing::trace;
 
 /// Fully connected layer weights captured directly from safetensors via [`VarBuilder`].
 #[derive(Clone)]
@@ -57,7 +60,13 @@ impl LinearWeights {
             } else {
                 None
             };
-        let qmatmul = maybe_quantize_linear(&weight, in_dim, group, &qualified_name(vb, "weight"))?;
+        let qmatmul = maybe_quantize_linear(
+            &weight,
+            in_dim,
+            group,
+            &qualified_name(vb, "weight"),
+            QuantModule::TextLinear,
+        )?;
         let keep_fp = QuantizationState::global()
             .config()
             .keep_full_precision_weights;
@@ -318,7 +327,10 @@ pub struct DeepseekLanguageModelWeights {
     pub token_embedding: Tensor,
     pub transformer: TransformerWeights,
     pub final_layernorm: RmsNormWeights,
-    pub lm_head: Tensor,
+    pub lm_head_weight: Option<Tensor>,
+    pub lm_head_q: Option<Arc<QMatMul>>,
+    pub lm_out_dim: usize,
+    pub lm_in_dim: usize,
 }
 
 impl DeepseekLanguageModelWeights {
@@ -350,23 +362,43 @@ impl DeepseekLanguageModelWeights {
                     "missing lm_head weight `{}`",
                     qualified_name(&lm_head_vb, "weight")
                 )
-            })?;
-        let lm_head = lm_head.contiguous()?;
+            })?
+            .contiguous()?;
 
         if cfg.tie_word_embeddings {
             ensure!(
-                token_embedding.shape().dims() == lm_head.shape().dims(),
+                token_embedding.shape().dims() == [cfg.vocab_size, cfg.hidden_size],
                 "tie_word_embeddings enabled but embedding/logit weights differ: {:?} vs {:?}",
                 token_embedding.shape().dims(),
-                lm_head.shape().dims()
+                [cfg.vocab_size, cfg.hidden_size]
             );
         }
+
+        // Try runtime quantization for lm_head under the Text target.
+        let lm_q = maybe_quantize_linear(
+            &lm_head,
+            cfg.hidden_size,
+            LinearLayerGroup::Text,
+            &qualified_name(&lm_head_vb, "weight"),
+            QuantModule::LmHead,
+        )?;
+        let keep_fp = QuantizationState::global()
+            .config()
+            .keep_full_precision_weights;
+        let lm_head_weight = if lm_q.is_some() && !keep_fp {
+            None
+        } else {
+            Some(lm_head)
+        };
 
         Ok(Self {
             token_embedding,
             transformer,
             final_layernorm,
-            lm_head,
+            lm_head_weight,
+            lm_head_q: lm_q,
+            lm_out_dim: cfg.vocab_size,
+            lm_in_dim: cfg.hidden_size,
         })
     }
 }
@@ -408,57 +440,78 @@ fn maybe_quantize_linear(
     in_dim: usize,
     group: LinearLayerGroup,
     tensor_name: &str,
+    module: QuantModule,
 ) -> Result<Option<Arc<QMatMul>>> {
     let quant = QuantizationState::global();
     let config = quant.config();
     if !quant.enabled_for(group) {
-        if config.kind.is_enabled() {
-            debug!(
-                tensor = tensor_name,
-                ?group,
-                "skipping quantization because target `{}` is disabled",
-                config.targets
-            );
-        }
+        trace!(
+            tensor = tensor_name,
+            ?group,
+            action = "disabled",
+            reason = "target not enabled",
+            targets = %config.targets,
+            "quant-linear"
+        );
+        quant.record_attempt(module, QuantizationOutcome::Fallback);
         return Ok(None);
     }
     match config.kind {
         QuantizationKind::Q8_0 => {
             if in_dim % Q8_BLOCK_SIZE != 0 {
-                debug!(
+                trace!(
                     tensor = tensor_name,
                     ?group,
                     in_dim,
                     block = Q8_BLOCK_SIZE,
-                    "skipping Q8_0 quantization: input dim not divisible by block size"
+                    action = "fallback",
+                    reason = "unaligned",
+                    "quant-linear"
                 );
-                quant.record_attempt(QuantizationOutcome::Fallback);
+                quant.record_attempt(module, QuantizationOutcome::Fallback);
                 return Ok(None);
             }
             match QTensor::quantize(weight, GgmlDType::Q8_0).and_then(QMatMul::from_qtensor) {
                 Ok(qm) => {
-                    quant.record_attempt(QuantizationOutcome::Quantized);
+                    quant.record_attempt(module, QuantizationOutcome::Quantized);
+                    trace!(
+                        tensor = tensor_name,
+                        ?group,
+                        in_dim,
+                        out_dim = weight.shape().dims()[0],
+                        from = ?weight.dtype(),
+                        to = "Q8_0",
+                        backend = backend_label(&weight.device()),
+                        action = "quantized",
+                        "quant-linear"
+                    );
                     Ok(Some(Arc::new(qm)))
                 }
                 Err(err) => {
-                    debug!(
+                    trace!(
                         tensor = tensor_name,
                         ?group,
+                        in_dim,
                         error = %err,
-                        "failed to quantize weights, keeping float tensor"
+                        action = "fallback",
+                        reason = "quantize_error",
+                        "quant-linear"
                     );
-                    quant.record_attempt(QuantizationOutcome::Fallback);
+                    quant.record_attempt(module, QuantizationOutcome::Fallback);
                     Ok(None)
                 }
             }
         }
         QuantizationKind::Q4K => {
-            debug!(
+            trace!(
                 tensor = tensor_name,
                 ?group,
-                "Q4_K runtime quantization path not implemented, keeping float weights"
+                in_dim,
+                action = "fallback",
+                reason = "q4k_unimplemented",
+                "quant-linear"
             );
-            quant.record_attempt(QuantizationOutcome::Fallback);
+            quant.record_attempt(module, QuantizationOutcome::Fallback);
             Ok(None)
         }
         QuantizationKind::None => Ok(None),

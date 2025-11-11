@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use anyhow::{Result, ensure};
-use candle_core::{DType, IndexOp, Tensor};
+use anyhow::{Context, Result, ensure};
+use candle_core::{DType, IndexOp, Module, Tensor, quantized::QMatMul};
 use candle_nn::ops::rms_norm;
 use deepseek_ocr_core::tensor::gather_token_embeddings;
 
@@ -34,7 +34,10 @@ pub struct DeepseekLanguageModel {
     transformer_weights: Arc<TransformerWeights>,
     token_embedding: Tensor,
     final_layernorm: Tensor,
-    lm_head: Tensor,
+    lm_head_weight: Option<Tensor>,
+    lm_head_q: Option<Arc<QMatMul>>,
+    lm_out_dim: usize,
+    lm_in_dim: usize,
 }
 
 impl DeepseekLanguageModel {
@@ -63,7 +66,10 @@ impl DeepseekLanguageModel {
             transformer_weights: transformer,
             token_embedding: weights.token_embedding,
             final_layernorm: weights.final_layernorm.weight,
-            lm_head: weights.lm_head,
+            lm_head_weight: weights.lm_head_weight,
+            lm_head_q: weights.lm_head_q,
+            lm_out_dim: weights.lm_out_dim,
+            lm_in_dim: weights.lm_in_dim,
         }
     }
 
@@ -174,9 +180,28 @@ impl DeepseekLanguageModel {
             self.cfg.rms_norm_eps as f32,
         )?;
         let (b, s, h) = normed.shape().dims3()?;
-        let flat = normed.reshape((b * s, h))?;
-        let logits = flat.matmul(&self.lm_head.transpose(0, 1)?)?;
-        let logits = logits.reshape((b, s, self.cfg.vocab_size))?;
+        ensure!(
+            h == self.lm_in_dim,
+            "lm_head expects hidden {}, got {}",
+            self.lm_in_dim,
+            h
+        );
+        let flat = normed.reshape((b * s, h))?.contiguous()?;
+        let logits = if let Some(qm) = &self.lm_head_q {
+            let out = qm.forward(&flat)?;
+            if out.dtype() == flat.dtype() {
+                out
+            } else {
+                out.to_dtype(flat.dtype())?
+            }
+        } else {
+            let w = self
+                .lm_head_weight
+                .as_ref()
+                .context("lm_head float weight missing for non-quantized path")?;
+            flat.matmul(&w.transpose(0, 1)?)?
+        };
+        let logits = logits.reshape((b, s, self.lm_out_dim))?;
 
         Ok(LanguageModelOutput {
             hidden_states: normed,

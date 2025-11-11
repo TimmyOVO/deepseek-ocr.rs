@@ -42,6 +42,24 @@ pub enum LinearLayerGroup {
     Vision,
 }
 
+/// Module categories used for per-module stats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantModule {
+    TextLinear,
+    Projector,
+    LmHead,
+}
+
+impl fmt::Display for QuantModule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TextLinear => f.write_str("text-linear"),
+            Self::Projector => f.write_str("projector"),
+            Self::LmHead => f.write_str("lm_head"),
+        }
+    }
+}
+
 /// Which modules should participate in quantization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuantizationTargets {
@@ -63,6 +81,14 @@ pub struct QuantizationConfig {
     pub kind: QuantizationKind,
     pub targets: QuantizationTargets,
     pub keep_full_precision_weights: bool,
+    pub verbose_per_layer: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModuleStats {
+    pub candidates: usize,
+    pub quantized: usize,
+    pub fallback: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -70,6 +96,9 @@ pub struct QuantizationStats {
     pub candidates: usize,
     pub quantized: usize,
     pub fallback: usize,
+    pub text_linear: ModuleStats,
+    pub projector: ModuleStats,
+    pub lm_head: ModuleStats,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -89,11 +118,13 @@ impl QuantizationState {
         let kind = parse_kind_from_env();
         let targets = parse_targets_from_env();
         let keep_full_precision_weights = parse_keep_full_precision_from_env();
+        let verbose_per_layer = parse_verbose_from_env();
         Self {
             config: QuantizationConfig {
                 kind,
                 targets,
                 keep_full_precision_weights,
+                verbose_per_layer,
             },
             stats: Mutex::new(QuantizationStats::default()),
             summary_logged: AtomicBool::new(false),
@@ -109,6 +140,10 @@ impl QuantizationState {
         self.config
     }
 
+    pub fn verbose(&self) -> bool {
+        self.config.verbose_per_layer
+    }
+
     pub fn enabled_for(&self, group: LinearLayerGroup) -> bool {
         if !self.config.kind.is_enabled() {
             return false;
@@ -122,7 +157,7 @@ impl QuantizationState {
         }
     }
 
-    pub fn record_attempt(&self, outcome: QuantizationOutcome) {
+    pub fn record_attempt(&self, module: QuantModule, outcome: QuantizationOutcome) {
         let mut stats = self
             .stats
             .lock()
@@ -131,6 +166,16 @@ impl QuantizationState {
         match outcome {
             QuantizationOutcome::Quantized => stats.quantized += 1,
             QuantizationOutcome::Fallback => stats.fallback += 1,
+        }
+        let mstats = match module {
+            QuantModule::TextLinear => &mut stats.text_linear,
+            QuantModule::Projector => &mut stats.projector,
+            QuantModule::LmHead => &mut stats.lm_head,
+        };
+        mstats.candidates += 1;
+        match outcome {
+            QuantizationOutcome::Quantized => mstats.quantized += 1,
+            QuantizationOutcome::Fallback => mstats.fallback += 1,
         }
     }
 
@@ -148,9 +193,19 @@ impl QuantizationState {
             quant = %self.config.kind,
             targets = %self.config.targets,
             keep_fp = self.config.keep_full_precision_weights,
+            verbose = self.config.verbose_per_layer,
             candidates = stats.candidates,
             quantized = stats.quantized,
             fallback = stats.fallback,
+            text_cand = stats.text_linear.candidates,
+            text_quant = stats.text_linear.quantized,
+            text_fallback = stats.text_linear.fallback,
+            proj_cand = stats.projector.candidates,
+            proj_quant = stats.projector.quantized,
+            proj_fallback = stats.projector.fallback,
+            lm_cand = stats.lm_head.candidates,
+            lm_quant = stats.lm_head.quantized,
+            lm_fallback = stats.lm_head.fallback,
             "language runtime quantization summary"
         );
     }
@@ -199,7 +254,14 @@ fn parse_keep_full_precision_from_env() -> bool {
     }
 }
 
-fn backend_label(device: &Device) -> &'static str {
+fn parse_verbose_from_env() -> bool {
+    match env::var("DEEPSEEK_OCR_QUANT_VERBOSE") {
+        Ok(value) => matches!(value.trim(), "" | "1" | "true" | "TRUE"),
+        Err(_) => false,
+    }
+}
+
+pub(crate) fn backend_label(device: &Device) -> &'static str {
     if device.is_cuda() {
         "CUDA"
     } else if device.is_metal() {
