@@ -240,6 +240,19 @@ impl ImageProjector {
         let quant = QuantizationState::global();
         let config = quant.config();
         let mut qmatmul: Option<std::sync::Arc<QMatMul>> = None;
+        // GPU fast-fail: disallow runtime quantization on Metal/CUDA for projector as well.
+        if (weight.device().is_metal() || weight.device().is_cuda())
+            && config.kind.is_enabled()
+            && quant.enabled_for(LinearLayerGroup::Projector)
+        {
+            anyhow::bail!(
+                "GPU backend: runtime quantization is disabled on Metal/CUDA. Refusing to fallback.\n\
+                 Disable quantization (DEEPSEEK_OCR_QUANT=none) or run on CPU.\n\
+                 Context: module=projector, in_dim={}, backend={}",
+                input_dim,
+                crate::quantization::backend_label(&weight.device())
+            );
+        }
         if quant.enabled_for(LinearLayerGroup::Projector) {
             match config.kind {
                 QuantizationKind::Q8_0 => {

@@ -444,18 +444,19 @@ fn maybe_quantize_linear(
 ) -> Result<Option<Arc<QMatMul>>> {
     let quant = QuantizationState::global();
     let config = quant.config();
-    // Disable runtime quantization entirely on Metal to avoid MPS kernel issues.
-    if weight.device().is_metal() {
-        tracing::trace!(
-            tensor = tensor_name,
-            ?group,
-            action = "fallback",
-            reason = "metal_disabled",
-            backend = crate::quantization::backend_label(&weight.device()),
-            "quant-linear"
+    // GPU fast-fail: if quant is requested for this group on Metal/CUDA, error out (awaiting upstream kernel fixes).
+    if (weight.device().is_metal() || weight.device().is_cuda())
+        && config.kind.is_enabled()
+        && quant.enabled_for(group)
+    {
+        anyhow::bail!(
+            "GPU backend: runtime quantization is disabled on Metal/CUDA. Refusing to fallback.\n\
+             Disable quantization (DEEPSEEK_OCR_QUANT=none) or run on CPU.\n\
+             Context: tensor={}, group={:?}, backend={}",
+            tensor_name,
+            group,
+            crate::quantization::backend_label(&weight.device())
         );
-        quant.record_attempt(module, QuantizationOutcome::Fallback);
-        return Ok(None);
     }
     if !quant.enabled_for(group) {
         trace!(
