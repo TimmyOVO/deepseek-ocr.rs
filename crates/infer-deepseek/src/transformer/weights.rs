@@ -444,6 +444,19 @@ fn maybe_quantize_linear(
 ) -> Result<Option<Arc<QMatMul>>> {
     let quant = QuantizationState::global();
     let config = quant.config();
+    // Disable runtime quantization entirely on Metal to avoid MPS kernel issues.
+    if weight.device().is_metal() {
+        tracing::trace!(
+            tensor = tensor_name,
+            ?group,
+            action = "fallback",
+            reason = "metal_disabled",
+            backend = crate::quantization::backend_label(&weight.device()),
+            "quant-linear"
+        );
+        quant.record_attempt(module, QuantizationOutcome::Fallback);
+        return Ok(None);
+    }
     if !quant.enabled_for(group) {
         trace!(
             tensor = tensor_name,
