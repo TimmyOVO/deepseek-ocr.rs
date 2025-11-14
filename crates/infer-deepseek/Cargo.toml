@@ -45,8 +45,3 @@ qtensor-bytes = ["deepseek-ocr-dsq-runtime/qtensor-bytes"]
 [dev-dependencies]
 ndarray = "0.16"
 ndarray-npy = "0.9"
-criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name = "snapshot_load"
-harness = false
