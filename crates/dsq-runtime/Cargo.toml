@@ -1,0 +1,16 @@
+[package]
+name = "deepseek-ocr-dsq-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+candle-core = { workspace = true }
+deepseek-ocr-dsq = { workspace = true }
+half = "2.4"
+rayon = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+qtensor-bytes = []

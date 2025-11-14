@@ -1,27 +1,24 @@
-use std::{
-    convert::TryFrom,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{convert::TryFrom, path::{Path, PathBuf}, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, ensure};
-use candle_core::{DType, Device, Module, Tensor, shape::D};
+use candle_core::{DType, Device, Tensor, shape::D};
 use candle_nn::VarBuilder;
 use image::GenericImageView;
 use image::{DynamicImage, Rgb, RgbImage, imageops};
 use rayon::prelude::*;
 use tokenizers::Tokenizer;
-use tracing::trace;
+use tracing::{info, trace};
 
 use crate::{
     config::{DeepseekOcrConfig, ProjectorConfig, load_ocr_config},
+    quant_snapshot::{LinearSpec, QuantizedSnapshot, SnapshotLinear, SnapshotLoadPlan},
     quantization::{
-        LinearLayerGroup, QuantModule, QuantizationKind, QuantizationOutcome, QuantizationState,
-        backend_label,
+        QuantModule, QuantizationOutcome, QuantizationState, backend_label, run_quantized_matmul,
     },
     transformer::{
         cache::{DynamicCache, PromptCacheGuard},
         model::{DeepseekLanguageModel, LanguageModelOutput},
+        weights::qualified_name,
     },
     vision::{
         ClipDebugTrace, ClipVisionModel, SamBackbone, SamDebugTrace, dynamic_preprocess,
@@ -42,12 +39,14 @@ pub fn load_model(args: ModelLoadArgs<'_>) -> Result<Box<dyn OcrEngine>> {
         kind,
         config_path,
         weights_path,
+        snapshot_path,
         device,
         dtype,
     } = args;
     match kind {
         ModelKind::Deepseek => {
-            let model = DeepseekOcrModel::load(config_path, weights_path, device, dtype)?;
+            let model =
+                DeepseekOcrModel::load(config_path, weights_path, snapshot_path, device, dtype)?;
             Ok(Box::new(model))
         }
         ModelKind::PaddleOcrVl => Err(anyhow!(
@@ -193,10 +192,15 @@ struct ImageProjector {
     bias: Option<Tensor>,
     image_newline: Tensor,
     view_separator: Tensor,
+    weight_label: String,
 }
 
 impl ImageProjector {
-    fn load(vb: &VarBuilder, cfg: &ProjectorConfig) -> Result<Self> {
+    fn load(
+        vb: &VarBuilder,
+        cfg: &ProjectorConfig,
+        snapshot: Option<&QuantizedSnapshot>,
+    ) -> Result<Self> {
         let input_dim = cfg
             .input_dim
             .with_context(|| "projector input_dim missing from config")?;
@@ -209,13 +213,16 @@ impl ImageProjector {
         let model_vb = vb.pp("model");
         let projector_vb = model_vb.pp("projector");
         let layers_vb = projector_vb.pp("layers");
+        let weight_label = qualified_name(&layers_vb, "weight");
 
-        let weight = layers_vb
-            .get((cfg.n_embed, input_dim), "weight")
-            .with_context(|| "missing projector weight tensor")?
-            .contiguous()?;
+        let mut weight = Some(
+            layers_vb
+                .get((cfg.n_embed, input_dim), "weight")
+                .with_context(|| "missing projector weight tensor")?
+                .contiguous()?,
+        );
         // Optional bias
-        let bias = if layers_vb.contains_tensor("bias") {
+        let mut bias = if layers_vb.contains_tensor("bias") {
             Some(
                 layers_vb
                     .get(cfg.n_embed, "bias")
@@ -235,106 +242,74 @@ impl ImageProjector {
             .contiguous()?;
 
         // Try runtime quantization if enabled for projector
-        use candle_core::quantized::{GgmlDType, QMatMul, QTensor};
+        use candle_core::quantized::QMatMul;
         use tracing::trace;
         let quant = QuantizationState::global();
-        let config = quant.config();
         let mut qmatmul: Option<std::sync::Arc<QMatMul>> = None;
-        // GPU fast-fail: disallow runtime quantization on Metal/CUDA for projector as well.
-        if (weight.device().is_metal() || weight.device().is_cuda())
-            && config.kind.is_enabled()
-            && quant.enabled_for(LinearLayerGroup::Projector)
-        {
-            anyhow::bail!(
-                "GPU backend: runtime quantization is disabled on Metal/CUDA. Refusing to fallback.\n\
-                 Disable quantization (DEEPSEEK_OCR_QUANT=none) or run on CPU.\n\
-                 Context: module=projector, in_dim={}, backend={}",
-                input_dim,
-                crate::quantization::backend_label(&weight.device())
-            );
-        }
-        if quant.enabled_for(LinearLayerGroup::Projector) {
-            match config.kind {
-                QuantizationKind::Q8_0 => {
-                    const Q8_BLOCK: usize = 32;
-                    if input_dim % Q8_BLOCK != 0 {
+        let device = layers_vb.device();
+        if let Some(snapshot) = snapshot {
+            let mut plan = SnapshotLoadPlan::default();
+            plan.push(LinearSpec::new(weight_label.clone(), cfg.n_embed, input_dim));
+            let mut hits = plan.execute(Some(snapshot), device, None)?;
+            if let Some(hit) = hits
+                .as_mut()
+                .and_then(|map| map.remove(&weight_label))
+            {
+                match hit {
+                    SnapshotLinear::Quantized {
+                        qmatmul: qm,
+                        bias: snap_bias,
+                    } => {
+                        let path = if device.is_cuda() || device.is_metal() {
+                            "kernel_upcast"
+                        } else {
+                            "kernel"
+                        };
                         trace!(
                             module = "projector",
                             in_dim = input_dim,
-                            block = Q8_BLOCK,
-                            action = "fallback",
-                            reason = "unaligned",
+                            out_dim = cfg.n_embed,
+                            backend = backend_label(device),
+                            path,
+                            container = snapshot.container_label(),
+                            source = "snapshot",
+                            action = "quantized",
+                            "quant-linear"
+                        );
+                        quant
+                            .record_attempt(QuantModule::Projector, QuantizationOutcome::Quantized);
+                        if let Some(bias_tensor) = snap_bias {
+                            bias = Some(bias_tensor);
+                        }
+                        qmatmul = Some(qm);
+                        weight = None;
+                    }
+                    SnapshotLinear::Float {
+                        weight: snap_weight,
+                        bias: snap_bias,
+                    } => {
+                        trace!(
+                            module = "projector",
+                            in_dim = input_dim,
+                            out_dim = cfg.n_embed,
+                            backend = backend_label(device),
+                            path = "snapshot-float",
+                            container = snapshot.container_label(),
+                            source = "snapshot",
+                            action = "float",
                             "quant-linear"
                         );
                         quant.record_attempt(QuantModule::Projector, QuantizationOutcome::Fallback);
-                    } else {
-                        match QTensor::quantize(&weight, GgmlDType::Q8_0)
-                            .and_then(QMatMul::from_qtensor)
-                        {
-                            Ok(qm) => {
-                                quant.record_attempt(
-                                    QuantModule::Projector,
-                                    QuantizationOutcome::Quantized,
-                                );
-                                trace!(
-                                    module = "projector",
-                                    in_dim = input_dim,
-                                    out_dim = cfg.n_embed,
-                                    from = ?weight.dtype(),
-                                    to = "Q8_0",
-                                    backend = backend_label(&weight.device()),
-                                    action = "quantized",
-                                    "quant-linear"
-                                );
-                                qmatmul = Some(std::sync::Arc::new(qm));
-                            }
-                            Err(err) => {
-                                trace!(
-                                    module = "projector",
-                                    in_dim = input_dim,
-                                    error = %err,
-                                    action = "fallback",
-                                    reason = "quantize_error",
-                                    "quant-linear"
-                                );
-                                quant.record_attempt(
-                                    QuantModule::Projector,
-                                    QuantizationOutcome::Fallback,
-                                );
-                            }
+                        if let Some(bias_tensor) = snap_bias {
+                            bias = Some(bias_tensor);
                         }
+                        weight = Some(snap_weight);
                     }
                 }
-                QuantizationKind::Q4K => {
-                    trace!(
-                        module = "projector",
-                        in_dim = input_dim,
-                        action = "fallback",
-                        reason = "q4k_unimplemented",
-                        "quant-linear"
-                    );
-                    quant.record_attempt(QuantModule::Projector, QuantizationOutcome::Fallback);
-                }
-                QuantizationKind::None => {}
             }
-        } else {
-            trace!(
-                module = "projector",
-                in_dim = input_dim,
-                action = "disabled",
-                reason = "target not enabled",
-                targets = %config.targets,
-                "quant-linear"
-            );
-            quant.record_attempt(QuantModule::Projector, QuantizationOutcome::Fallback);
         }
 
-        let keep_fp = config.keep_full_precision_weights;
-        let weight = if qmatmul.is_some() && !keep_fp {
-            None
-        } else {
-            Some(weight)
-        };
+        let weight = weight;
 
         Ok(Self {
             input_dim,
@@ -344,6 +319,7 @@ impl ImageProjector {
             bias,
             image_newline,
             view_separator,
+            weight_label,
         })
     }
 
@@ -364,12 +340,7 @@ impl ImageProjector {
         let leading = dims[..dims.len() - 1].iter().product::<usize>();
         let flat = input.reshape((leading, self.input_dim))?.contiguous()?;
         let mut proj = if let Some(qm) = &self.qmatmul {
-            let out = qm.forward(&flat)?;
-            if out.dtype() == flat.dtype() {
-                out
-            } else {
-                out.to_dtype(flat.dtype())?
-            }
+            run_quantized_matmul(&self.weight_label, qm, &flat)?
         } else {
             let weight = self
                 .weight
@@ -379,6 +350,12 @@ impl ImageProjector {
             flat.matmul(&weight_t)?
         };
         if let Some(bias) = &self.bias {
+            let bias = if bias.dtype() == proj.dtype() {
+                bias.clone()
+            } else {
+                bias.to_dtype(proj.dtype())
+                    .context("failed to match projector bias dtype")?
+            };
             proj = proj.broadcast_add(&bias.reshape((1, self.hidden))?)?;
         }
         proj.reshape(
@@ -838,11 +815,35 @@ impl DeepseekOcrModel {
     pub fn load(
         config_path: Option<&Path>,
         weights_path: Option<&Path>,
+        snapshot_path: Option<&Path>,
         device: Device,
         dtype: DType,
     ) -> Result<Self> {
         let cfg = Arc::new(load_ocr_config(config_path)?);
         let language_cfg = Arc::new(cfg.resolved_language_config()?);
+        let snapshot = if let Some(path) = snapshot_path {
+            info!(
+                path = %path.display(),
+                "snapshot requested via model registry"
+            );
+            let snapshot = QuantizedSnapshot::load(path).with_context(|| {
+                format!("failed to load snapshot from {}", path.display())
+            })?;
+            // No conflict checks: snapshot dtype is the single source of truth.
+            let snap = Arc::new(snapshot);
+            let hdr = snap.header();
+            info!(
+                container = "dsq",
+                dtype = %hdr.default_qdtype,
+                tensors = hdr.tensor_count,
+                backend = %hdr.backend,
+                "quant snapshot overview"
+            );
+            Some(snap)
+        } else {
+            // No snapshot provided: run with float weights (runtime quantization path removed).
+            None
+        };
         let resolved_weights = weights_path
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_WEIGHTS_PATH));
@@ -850,8 +851,9 @@ impl DeepseekOcrModel {
             VarBuilder::from_mmaped_safetensors(&[resolved_weights.as_path()], dtype, &device)
         }
         .with_context(|| format!("failed to mmap weights at {}", resolved_weights.display()))?;
-        let language = DeepseekLanguageModel::load(language_cfg, &vb)
-            .context("failed to load language model")?;
+        let language =
+            DeepseekLanguageModel::load_with_snapshot(language_cfg, &vb, snapshot.as_deref())
+                .context("failed to load language model")?;
         let projector_cfg = Arc::new(
             cfg.resolved_projector_config()
                 .context("projector configuration missing")?,
@@ -862,7 +864,7 @@ impl DeepseekOcrModel {
             projector_cfg.n_embed,
             language.config().hidden_size
         );
-        let projector = ImageProjector::load(&vb, projector_cfg.as_ref())
+        let projector = ImageProjector::load(&vb, projector_cfg.as_ref(), snapshot.as_deref())
             .context("failed to load image projector")?;
         let sam = SamBackbone::new(cfg.as_ref(), &vb.pp("model").pp("sam_model"))
             .context("failed to load SAM backbone")?;

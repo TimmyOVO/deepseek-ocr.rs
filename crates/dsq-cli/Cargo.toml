@@ -1,0 +1,21 @@
+[package]
+name = "deepseek-ocr-dsq-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+deepseek-ocr-dsq = { workspace = true }
+deepseek-ocr-dsq-writer = { workspace = true }
+deepseek-ocr-dsq-models = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+half = "2.4"
+memmap2 = "0.9"
+safetensors = "0.4"
+sha2 = "0.10"
+indicatif = "0.17"
+rayon = { workspace = true }

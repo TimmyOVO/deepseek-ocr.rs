@@ -65,6 +65,10 @@ impl VirtualPath {
     pub fn model_weights(model_id: impl Into<String>) -> Self {
         Self::model_dir(model_id).join("model.safetensors")
     }
+
+    pub fn model_snapshot(model_id: impl Into<String>) -> Self {
+        Self::model_dir(model_id).join("snapshot.dsq")
+    }
 }
 
 /// Abstraction over storage backends used by the application.

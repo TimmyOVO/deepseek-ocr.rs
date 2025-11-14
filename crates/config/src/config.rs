@@ -14,9 +14,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::fs::{VirtualFileSystem, VirtualPath};
 
-const DEFAULT_MODEL_ID: &str = "deepseek-ocr";
-const PADDLE_MODEL_ID: &str = "paddleocr-vl";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -45,21 +42,42 @@ pub struct ModelRegistry {
 impl Default for ModelRegistry {
     fn default() -> Self {
         let mut entries = BTreeMap::new();
-        entries.insert(DEFAULT_MODEL_ID.to_string(), ModelEntry::default());
-        entries.insert(
-            PADDLE_MODEL_ID.to_string(),
-            ModelEntry {
-                kind: ModelKind::PaddleOcrVl,
-                config: None,
-                tokenizer: None,
-                weights: None,
-            },
-        );
+        ensure_default_model_entries(&mut entries);
         Self {
-            active: DEFAULT_MODEL_ID.to_string(),
+            active: "deepseek-ocr".to_string(),
             entries,
         }
     }
+}
+
+fn ensure_default_model_entries(entries: &mut BTreeMap<String, ModelEntry>) {
+    entries
+        .entry("deepseek-ocr".to_string())
+        .or_insert_with(ModelEntry::default);
+    entries
+        .entry("paddleocr-vl".to_string())
+        .or_insert_with(|| ModelEntry {
+            kind: ModelKind::PaddleOcrVl,
+            ..ModelEntry::default()
+        });
+    entries.entry("deepseek-ocr-q4k".to_string()).or_insert_with(|| {
+        quantized_entry(ModelKind::Deepseek, "Q4_K")
+    });
+    entries.entry("deepseek-ocr-q6k".to_string()).or_insert_with(|| {
+        quantized_entry(ModelKind::Deepseek, "Q6_K")
+    });
+    entries.entry("deepseek-ocr-q8k".to_string()).or_insert_with(|| {
+        quantized_entry(ModelKind::Deepseek, "Q8_0")
+    });
+    entries.entry("paddleocr-vl-q4k".to_string()).or_insert_with(|| {
+        quantized_entry(ModelKind::PaddleOcrVl, "Q4_K")
+    });
+    entries.entry("paddleocr-vl-q6k".to_string()).or_insert_with(|| {
+        quantized_entry(ModelKind::PaddleOcrVl, "Q6_K")
+    });
+    entries.entry("paddleocr-vl-q8k".to_string()).or_insert_with(|| {
+        quantized_entry(ModelKind::PaddleOcrVl, "Q8_0")
+    });
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +87,7 @@ pub struct ModelEntry {
     pub config: Option<PathBuf>,
     pub tokenizer: Option<PathBuf>,
     pub weights: Option<PathBuf>,
+    pub snapshot: Option<SnapshotEntry>,
 }
 
 impl Default for ModelEntry {
@@ -78,8 +97,15 @@ impl Default for ModelEntry {
             config: None,
             tokenizer: None,
             weights: None,
+            snapshot: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SnapshotEntry {
+    pub dtype: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,10 +185,18 @@ impl ResourceLocation {
 
 #[derive(Debug, Clone)]
 pub struct ModelResources {
+    pub id: String,
     pub config: ResourceLocation,
     pub tokenizer: ResourceLocation,
     pub weights: ResourceLocation,
     pub kind: ModelKind,
+    pub snapshot: Option<SnapshotResources>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotResources {
+    pub location: ResourceLocation,
+    pub dtype: String,
 }
 
 pub struct ConfigDescriptor {
@@ -193,20 +227,7 @@ impl AppConfig {
     }
 
     pub fn normalise(&mut self, fs: &impl VirtualFileSystem) -> Result<()> {
-        if self.models.entries.is_empty() {
-            self.models
-                .entries
-                .insert(DEFAULT_MODEL_ID.to_string(), ModelEntry::default());
-        }
-        if !self.models.entries.contains_key(PADDLE_MODEL_ID) {
-            self.models.entries.insert(
-                PADDLE_MODEL_ID.to_string(),
-                ModelEntry {
-                    kind: ModelKind::PaddleOcrVl,
-                    ..ModelEntry::default()
-                },
-            );
-        }
+        ensure_default_model_entries(&mut self.models.entries);
         if !self.models.entries.contains_key(&self.models.active) {
             self.models
                 .entries
@@ -318,6 +339,9 @@ impl ModelEntry {
         fs.ensure_parent(&VirtualPath::model_config(model_id.to_string()))?;
         fs.ensure_parent(&VirtualPath::model_tokenizer(model_id.to_string()))?;
         fs.ensure_parent(&VirtualPath::model_weights(model_id.to_string()))?;
+        if self.snapshot.is_some() {
+            fs.ensure_parent(&VirtualPath::model_snapshot(model_id.to_string()))?;
+        }
         Ok(())
     }
 
@@ -334,12 +358,37 @@ impl ModelEntry {
             Some(path) => ResourceLocation::Physical(path.clone()),
             None => ResourceLocation::Virtual(VirtualPath::model_weights(model_id.to_string())),
         };
+        let snapshot = self
+            .snapshot
+            .as_ref()
+            .map(|entry| entry.to_resources(model_id));
         ModelResources {
+            id: model_id.to_string(),
             config,
             tokenizer,
             weights,
             kind: self.kind,
+            snapshot,
         }
+    }
+}
+
+impl SnapshotEntry {
+    fn to_resources(&self, model_id: &str) -> SnapshotResources {
+        SnapshotResources {
+            location: ResourceLocation::Virtual(VirtualPath::model_snapshot(model_id.to_string())),
+            dtype: self.dtype.clone(),
+        }
+    }
+}
+
+fn quantized_entry(kind: ModelKind, dtype: &str) -> ModelEntry {
+    ModelEntry {
+        kind,
+        snapshot: Some(SnapshotEntry {
+            dtype: dtype.to_string(),
+        }),
+        ..ModelEntry::default()
     }
 }
 

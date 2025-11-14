@@ -1,12 +1,62 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use deepseek_ocr_config::{AppConfig, ConfigOverride, ConfigOverrides};
 use deepseek_ocr_core::runtime::{DeviceKind, Precision};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "DeepSeek-OCR CLI", long_about = None)]
-pub struct Args {
+pub struct Cli {
+    #[command(flatten)]
+    pub infer: InferArgs,
+
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CliCommand {
+    Weights(WeightsArgs),
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct WeightsArgs {
+    #[command(subcommand)]
+    pub command: WeightsCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WeightsCommand {
+    #[command(name = "snapshot")]
+    Snapshot(SnapshotArgs),
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct SnapshotArgs {
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    pub config: Option<PathBuf>,
+
+    #[arg(long = "in", value_name = "PATH", help_heading = "Snapshot")]
+    pub input: PathBuf,
+
+    #[arg(long = "out", value_name = "PATH", help_heading = "Snapshot")]
+    pub output: PathBuf,
+
+    #[arg(
+        long,
+        value_name = "DTYPE",
+        default_value = "Q8_0",
+        value_parser = ["Q8_0", "Q4_K", "Q6_K"],
+        help_heading = "Snapshot"
+    )]
+    pub dtype: String,
+
+    #[arg(long, value_name = "TARGETS", default_value = "text", value_parser = ["text", "text+projector"], help_heading = "Snapshot")]
+    pub targets: String,
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct InferArgs {
     /// Optional path to a configuration file (defaults to platform config dir).
     #[arg(long, value_name = "PATH", help_heading = "Application")]
     pub config: Option<PathBuf>,
@@ -112,8 +162,8 @@ pub struct Args {
     pub quiet: bool,
 }
 
-impl From<&Args> for ConfigOverrides {
-    fn from(args: &Args) -> Self {
+impl From<&InferArgs> for ConfigOverrides {
+    fn from(args: &InferArgs) -> Self {
         let mut overrides = ConfigOverrides::default();
         overrides.config_path = args.config.clone();
         overrides.model_id = args.model.clone();
@@ -141,7 +191,7 @@ impl From<&Args> for ConfigOverrides {
     }
 }
 
-impl ConfigOverride for &Args {
+impl ConfigOverride for &InferArgs {
     fn apply(self, config: &mut AppConfig) {
         config.apply_overrides(&ConfigOverrides::from(self));
     }

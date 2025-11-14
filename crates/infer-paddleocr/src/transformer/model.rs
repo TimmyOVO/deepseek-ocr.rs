@@ -12,7 +12,7 @@ use super::{
     block::{build_attention_bias, decoder_layer_forward},
     cache::{DynamicCache, PromptCacheGuard},
     rope::ErnieRotaryEmbedding,
-    weights::ErnieModelWeights,
+    weights::{ErnieModelWeights, LinearWeights},
 };
 
 pub struct DecoderOutput {
@@ -23,27 +23,42 @@ pub struct DecoderOutput {
 pub struct ErnieDecoder {
     cfg: Arc<PaddleOcrVlConfig>,
     weights: ErnieModelWeights,
-    lm_head: Tensor,
+    lm_head: LinearWeights,
     rotary: ErnieRotaryEmbedding,
 }
 
 impl ErnieDecoder {
-    pub fn load(cfg: Arc<PaddleOcrVlConfig>, vb: &candle_nn::VarBuilder) -> Result<Self> {
+    pub fn load(
+        cfg: Arc<PaddleOcrVlConfig>,
+        vb: &candle_nn::VarBuilder,
+        snapshot_hits: Option<&mut crate::snapshot::SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let model_vb = vb.pp("model");
-        let weights = ErnieModelWeights::load(&model_vb, cfg.as_ref())
-            .context("failed to load Ernie decoder weights")?;
-        let lm_head = vb
-            .pp("lm_head")
-            .get((cfg.vocab_size, cfg.hidden_size), "weight")
-            .context("missing lm_head.weight")?
-            .contiguous()?;
+        let mut snapshot_hits = snapshot_hits;
+        let weights = ErnieModelWeights::load(
+            &model_vb,
+            cfg.as_ref(),
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )
+        .context("failed to load Ernie decoder weights")?;
+        let lm_head = LinearWeights::load(
+            vb.pp("lm_head"),
+            cfg.vocab_size,
+            cfg.hidden_size,
+            false,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )
+        .context("failed to load lm_head weights")?;
         Self::from_parts(cfg, weights, lm_head)
     }
 
     pub(crate) fn from_parts(
         cfg: Arc<PaddleOcrVlConfig>,
         weights: ErnieModelWeights,
-        lm_head: Tensor,
+        lm_head: LinearWeights,
     ) -> Result<Self> {
         let rotary = ErnieRotaryEmbedding::new(Arc::clone(&cfg))?;
         Ok(Self {
@@ -70,7 +85,7 @@ impl ErnieDecoder {
         &self.weights.final_norm
     }
 
-    pub fn lm_head(&self) -> &Tensor {
+    pub fn lm_head(&self) -> &LinearWeights {
         &self.lm_head
     }
 
@@ -185,7 +200,7 @@ impl ErnieDecoder {
         .context("final rms norm failed")?;
         let (batch, seq_len, hidden_size) = normed.shape().dims3()?;
         let flat = normed.reshape((batch * seq_len, hidden_size))?;
-        let logits = flat.matmul(&self.lm_head.transpose(0, 1)?)?;
+        let logits = self.lm_head.matmul_2d(&flat)?;
         let logits = logits.reshape((batch, seq_len, self.cfg.vocab_size))?;
 
         Ok(DecoderOutput {
@@ -273,8 +288,12 @@ mod tests {
 
     fn linear(out_dim: usize, in_dim: usize, device: &Device) -> Result<LinearWeights> {
         Ok(LinearWeights {
-            weight: Tensor::zeros((out_dim, in_dim), DType::F32, device)?,
+            weight: Some(Tensor::zeros((out_dim, in_dim), DType::F32, device)?),
             bias: None,
+            qmatmul: None,
+            out_dim,
+            in_dim,
+            label: format!("test.linear.{out_dim}x{in_dim}"),
         })
     }
 
@@ -329,7 +348,14 @@ mod tests {
             layers,
             final_norm,
         };
-        let lm_head = Tensor::zeros((cfg.vocab_size, cfg.hidden_size), DType::F32, &device)?;
+        let lm_head = LinearWeights {
+            weight: Some(Tensor::zeros((cfg.vocab_size, cfg.hidden_size), DType::F32, device)?),
+            bias: None,
+            qmatmul: None,
+            out_dim: cfg.vocab_size,
+            in_dim: cfg.hidden_size,
+            label: "tests.lm_head.weight".to_string(),
+        };
         let decoder = ErnieDecoder::from_parts(Arc::clone(&cfg), weights, lm_head)?;
 
         let input_ids = Tensor::zeros((2, 4), DType::I64, &device)?;

@@ -76,6 +76,7 @@ fn load_ocr_model() -> Result<Arc<Mutex<DeepseekOcrModel>>> {
     let model = DeepseekOcrModel::load(
         Some(config_path.as_path()),
         Some(weights.as_path()),
+        None,
         device,
         DType::F32,
     )

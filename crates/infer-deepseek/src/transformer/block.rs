@@ -1,5 +1,6 @@
 use crate::{
     config::DeepseekV2Config,
+    quantization::run_quantized_matmul,
     transformer::{
         cache::{KvCacheChunk, KvCacheEntry},
         weights::{
@@ -9,7 +10,7 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, bail, ensure};
-use candle_core::{DType, Device, Module, Tensor, shape::D};
+use candle_core::{DType, Device, Tensor, shape::D};
 #[cfg(feature = "flash-attn")]
 use candle_flash_attn::flash_attn;
 use candle_nn::ops::{rms_norm, sigmoid, softmax};
@@ -537,12 +538,7 @@ fn apply_linear(input: &Tensor, weights: &LinearWeights) -> Result<Tensor> {
     let leading = dims[..dims.len() - 1].iter().product::<usize>();
     let input2d = input.reshape((leading, in_dim))?.contiguous()?;
     let proj = if let Some(qm) = &weights.qmatmul {
-        let out = qm.forward(&input2d)?;
-        if out.dtype() == input2d.dtype() {
-            out
-        } else {
-            out.to_dtype(input2d.dtype())?
-        }
+        run_quantized_matmul(&weights.label, qm, &input2d)?
     } else {
         let weight = weights
             .weight

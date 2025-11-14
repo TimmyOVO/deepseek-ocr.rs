@@ -1,13 +1,13 @@
 use anyhow::{Context, Result, ensure};
-use candle_core::{DType, Module, Tensor, shape::D};
-use candle_nn::{Linear, VarBuilder};
+use candle_core::{DType, Tensor, shape::D};
+use candle_nn::VarBuilder;
 
-use crate::config::PaddleOcrVisionConfig;
+use crate::{config::PaddleOcrVisionConfig, snapshot::SnapshotLinearMap, transformer::LinearWeights};
 
 pub struct SiglipProjector {
     pre_norm: ProjectorLayerNorm,
-    linear1: Linear,
-    linear2: Linear,
+    linear1: ProjectorLinear,
+    linear2: ProjectorLinear,
     merge_size: usize,
     vision_hidden: usize,
 }
@@ -24,6 +24,8 @@ impl SiglipProjector {
         vision_cfg: &PaddleOcrVisionConfig,
         output_hidden: usize,
         model_dtype: DType,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
     ) -> Result<Self> {
         let merge_size = vision_cfg.spatial_merge_size;
         let vision_hidden = vision_cfg.hidden_size;
@@ -36,17 +38,22 @@ impl SiglipProjector {
             compute_dtype,
         )?;
         let merged_hidden = vision_hidden * merge_size * merge_size;
-        let linear1 = load_linear(
+        let mut snapshot_hits = snapshot_hits;
+        let linear1 = ProjectorLinear::load(
             projector_vb.pp("linear_1"),
             merged_hidden,
             merged_hidden,
             compute_dtype,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
         )?;
-        let linear2 = load_linear(
+        let linear2 = ProjectorLinear::load(
             projector_vb.pp("linear_2"),
             output_hidden,
             merged_hidden,
             compute_dtype,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
         )?;
         Ok(Self {
             pre_norm,
@@ -147,23 +154,6 @@ fn resolve_projector_compute_dtype(dtype: DType) -> DType {
     }
 }
 
-fn load_linear(
-    vb: VarBuilder,
-    out_dim: usize,
-    in_dim: usize,
-    compute_dtype: DType,
-) -> Result<Linear> {
-    let weight = vb
-        .get((out_dim, in_dim), "weight")
-        .context("missing projector linear weight")?
-        .to_dtype(compute_dtype)?;
-    let bias = vb
-        .get(out_dim, "bias")
-        .context("missing projector linear bias")?
-        .to_dtype(compute_dtype)?;
-    Ok(Linear::new(weight, Some(bias)))
-}
-
 struct ProjectorLayerNorm {
     weight: Tensor,
     bias: Tensor,
@@ -209,5 +199,52 @@ impl ProjectorLayerNorm {
 
     fn compute_dtype(&self) -> DType {
         self.compute_dtype
+    }
+}
+
+struct ProjectorLinear {
+    weights: LinearWeights,
+    compute_dtype: DType,
+}
+
+impl ProjectorLinear {
+    fn load(
+        vb: VarBuilder,
+        out_dim: usize,
+        in_dim: usize,
+        compute_dtype: DType,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
+        let weights = LinearWeights::load(
+            vb,
+            out_dim,
+            in_dim,
+            true,
+            snapshot_hits,
+            snapshot_label,
+        )?;
+        Ok(Self {
+            weights,
+            compute_dtype,
+        })
+    }
+
+    fn forward(&self, input: &Tensor) -> Result<Tensor> {
+        let x = if input.dtype() == self.compute_dtype {
+            input.clone()
+        } else {
+            input.to_dtype(self.compute_dtype)?
+        };
+        let mut out = self.weights.matmul_2d(&x)?;
+        if let Some(bias) = &self.weights.bias {
+            let bias = if bias.dtype() == self.compute_dtype {
+                bias.clone()
+            } else {
+                bias.to_dtype(self.compute_dtype)?
+            };
+            out = out.broadcast_add(&bias.reshape((1, self.weights.out_dim))?)?;
+        }
+        Ok(out)
     }
 }

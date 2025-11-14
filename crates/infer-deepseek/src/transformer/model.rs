@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use candle_core::{DType, IndexOp, Module, Tensor, quantized::QMatMul};
+use candle_core::{DType, IndexOp, Tensor, quantized::QMatMul};
 use candle_nn::ops::rms_norm;
 use deepseek_ocr_core::tensor::gather_token_embeddings;
 
 use crate::{
     config::DeepseekV2Config,
+    quant_snapshot::QuantizedSnapshot,
+    quantization::run_quantized_matmul,
     transformer::{
         cache::{DynamicCache, PromptCacheGuard},
         decoder::TransformerDecoder,
@@ -38,12 +40,21 @@ pub struct DeepseekLanguageModel {
     lm_head_q: Option<Arc<QMatMul>>,
     lm_out_dim: usize,
     lm_in_dim: usize,
+    lm_head_label: String,
 }
 
 impl DeepseekLanguageModel {
     /// Load language-model weights from a [`VarBuilder`]-compatible source.
     pub fn load(cfg: Arc<DeepseekV2Config>, vb: &candle_nn::VarBuilder) -> Result<Self> {
-        let weights = DeepseekLanguageModelWeights::load(&cfg, vb)?;
+        Self::load_with_snapshot(cfg, vb, None)
+    }
+
+    pub fn load_with_snapshot(
+        cfg: Arc<DeepseekV2Config>,
+        vb: &candle_nn::VarBuilder,
+        snapshot: Option<&QuantizedSnapshot>,
+    ) -> Result<Self> {
+        let weights = DeepseekLanguageModelWeights::load(&cfg, vb, snapshot)?;
         Ok(Self::from_weights(cfg, weights))
     }
 
@@ -70,6 +81,7 @@ impl DeepseekLanguageModel {
             lm_head_q: weights.lm_head_q,
             lm_out_dim: weights.lm_out_dim,
             lm_in_dim: weights.lm_in_dim,
+            lm_head_label: weights.lm_head_label,
         }
     }
 
@@ -188,12 +200,7 @@ impl DeepseekLanguageModel {
         );
         let flat = normed.reshape((b * s, h))?.contiguous()?;
         let logits = if let Some(qm) = &self.lm_head_q {
-            let out = qm.forward(&flat)?;
-            if out.dtype() == flat.dtype() {
-                out
-            } else {
-                out.to_dtype(flat.dtype())?
-            }
+            run_quantized_matmul(&self.lm_head_label, qm, &flat)?
         } else {
             let w = self
                 .lm_head_weight

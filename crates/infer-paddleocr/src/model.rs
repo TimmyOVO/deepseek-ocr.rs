@@ -1,8 +1,4 @@
-use std::{
-    convert::TryFrom,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{convert::TryFrom, path::{Path, PathBuf}, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use candle_core::{DType, Device, Tensor};
@@ -12,6 +8,7 @@ use tokenizers::Tokenizer;
 
 use crate::{
     config::{LoadedPaddleConfig, PaddleOcrVlConfig, load_config},
+    snapshot::{self, AdapterScope, SnapshotLinearMap, SnapshotLoadPlan},
     transformer::ErnieDecoder,
     vision::{SiglipPreprocessConfig, SiglipProjector, SiglipVisionModel, preprocess_image},
 };
@@ -80,6 +77,7 @@ impl PaddleOcrModel {
             device,
             dtype,
             weights_path,
+            snapshot_path,
             ..
         } = args;
         let LoadedPaddleConfig { value, path } = load_config(args.config_path)?;
@@ -91,13 +89,33 @@ impl PaddleOcrModel {
             VarBuilder::from_mmaped_safetensors(&[resolved_weights.as_path()], *dtype, device)
         }
         .with_context(|| format!("failed to mmap weights at {}", resolved_weights.display()))?;
-        let vision = SiglipVisionModel::load(&vb, &config.vision_config, *dtype)
-            .context("failed to load SigLIP vision model")?;
-        let projector =
-            SiglipProjector::load(&vb, &config.vision_config, config.hidden_size, *dtype)
-                .context("failed to load projector module")?;
-        let decoder =
-            ErnieDecoder::load(Arc::clone(&config), &vb).context("failed to load Ernie decoder")?;
+        let (mut snapshot_hits, snapshot_label) =
+            load_snapshot_hits(config.as_ref(), device, *snapshot_path)
+        .context("failed to prepare snapshot hits")?;
+        let vision = SiglipVisionModel::load(
+            &vb,
+            &config.vision_config,
+            *dtype,
+            snapshot_hits.as_mut(),
+            snapshot_label,
+        )
+        .context("failed to load SigLIP vision model")?;
+        let projector = SiglipProjector::load(
+            &vb,
+            &config.vision_config,
+            config.hidden_size,
+            *dtype,
+            snapshot_hits.as_mut(),
+            snapshot_label,
+        )
+        .context("failed to load projector module")?;
+        let decoder = ErnieDecoder::load(
+            Arc::clone(&config),
+            &vb,
+            snapshot_hits.as_mut(),
+            snapshot_label,
+        )
+        .context("failed to load Ernie decoder")?;
         Ok(Self {
             config,
             config_path: path,
@@ -237,6 +255,30 @@ impl PaddleOcrModel {
             next_position_base,
         })
     }
+}
+
+fn load_snapshot_hits(
+    cfg: &PaddleOcrVlConfig,
+    device: &Device,
+    snapshot_path: Option<&Path>,
+) -> Result<(Option<SnapshotLinearMap>, Option<&'static str>)> {
+    let Some(path) = snapshot_path else {
+        return Ok((None, None));
+    };
+    let snapshot =
+        snapshot::QuantizedSnapshot::load(path).with_context(|| {
+            format!("failed to load snapshot from {}", path.display())
+        })?;
+    let specs = snapshot::paddle_snapshot_specs(cfg, AdapterScope::TextAndProjector)
+        .context("failed to derive Paddle snapshot specs")?;
+    if specs.is_empty() {
+        return Ok((None, Some(snapshot.container_label())));
+    }
+    let plan = SnapshotLoadPlan::new(specs);
+    let hits = plan
+        .execute(Some(&snapshot), device, None)?
+        .unwrap_or_default();
+    Ok((Some(hits), Some(snapshot.container_label())))
 }
 
 impl OcrEngine for PaddleOcrModel {
@@ -1003,6 +1045,7 @@ mod tests {
             kind: ModelKind::PaddleOcrVl,
             config_path: Some(config_path.as_path()),
             weights_path: Some(weights_path.as_path()),
+            snapshot_path: None,
             device: device.clone(),
             dtype: DType::F32,
         };

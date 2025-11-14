@@ -6,33 +6,10 @@ use std::{
     },
 };
 
-use candle_core::Device;
+use anyhow::Result;
+use candle_core::{DType, Device, Module, Tensor, quantized::QMatMul};
 use once_cell::sync::Lazy;
-use tracing::{info, warn};
-
-/// Supported runtime quantization algorithms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuantizationKind {
-    None,
-    Q8_0,
-    Q4K,
-}
-
-impl QuantizationKind {
-    pub fn is_enabled(self) -> bool {
-        !matches!(self, Self::None)
-    }
-}
-
-impl fmt::Display for QuantizationKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::None => f.write_str("none"),
-            Self::Q8_0 => f.write_str("Q8_0"),
-            Self::Q4K => f.write_str("Q4_K"),
-        }
-    }
-}
+use tracing::info;
 
 /// High-level components that may opt into quantization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,27 +37,8 @@ impl fmt::Display for QuantModule {
     }
 }
 
-/// Which modules should participate in quantization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuantizationTargets {
-    Text,
-    TextAndProjector,
-}
-
-impl fmt::Display for QuantizationTargets {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Text => f.write_str("text"),
-            Self::TextAndProjector => f.write_str("text+projector"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct QuantizationConfig {
-    pub kind: QuantizationKind,
-    pub targets: QuantizationTargets,
-    pub keep_full_precision_weights: bool,
     pub verbose_per_layer: bool,
 }
 
@@ -115,17 +73,9 @@ pub struct QuantizationState {
 
 impl QuantizationState {
     fn from_env() -> Self {
-        let kind = parse_kind_from_env();
-        let targets = parse_targets_from_env();
-        let keep_full_precision_weights = parse_keep_full_precision_from_env();
         let verbose_per_layer = parse_verbose_from_env();
         Self {
-            config: QuantizationConfig {
-                kind,
-                targets,
-                keep_full_precision_weights,
-                verbose_per_layer,
-            },
+            config: QuantizationConfig { verbose_per_layer },
             stats: Mutex::new(QuantizationStats::default()),
             summary_logged: AtomicBool::new(false),
         }
@@ -142,19 +92,6 @@ impl QuantizationState {
 
     pub fn verbose(&self) -> bool {
         self.config.verbose_per_layer
-    }
-
-    pub fn enabled_for(&self, group: LinearLayerGroup) -> bool {
-        if !self.config.kind.is_enabled() {
-            return false;
-        }
-        match group {
-            LinearLayerGroup::Text => true,
-            LinearLayerGroup::Projector => {
-                matches!(self.config.targets, QuantizationTargets::TextAndProjector)
-            }
-            LinearLayerGroup::Vision => false,
-        }
     }
 
     pub fn record_attempt(&self, module: QuantModule, outcome: QuantizationOutcome) {
@@ -190,9 +127,6 @@ impl QuantizationState {
             .clone();
         info!(
             backend = backend_label(device),
-            quant = %self.config.kind,
-            targets = %self.config.targets,
-            keep_fp = self.config.keep_full_precision_weights,
             verbose = self.config.verbose_per_layer,
             candidates = stats.candidates,
             quantized = stats.quantized,
@@ -206,51 +140,8 @@ impl QuantizationState {
             lm_cand = stats.lm_head.candidates,
             lm_quant = stats.lm_head.quantized,
             lm_fallback = stats.lm_head.fallback,
-            "language runtime quantization summary"
+            "quantization summary"
         );
-    }
-}
-
-fn parse_kind_from_env() -> QuantizationKind {
-    match env::var("DEEPSEEK_OCR_QUANT") {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "" | "none" => QuantizationKind::None,
-            "q8_0" | "q8" | "q8.0" => QuantizationKind::Q8_0,
-            "q4_k" | "q4k" => {
-                warn!("DEEPSEEK_OCR_QUANT=Q4_K not yet implemented, falling back to float weights");
-                QuantizationKind::Q4K
-            }
-            other => {
-                warn!(
-                    "unsupported DEEPSEEK_OCR_QUANT value `{other}`, expected none|Q8_0|Q4_K; disabling quantization"
-                );
-                QuantizationKind::None
-            }
-        },
-        Err(_) => QuantizationKind::None,
-    }
-}
-
-fn parse_targets_from_env() -> QuantizationTargets {
-    match env::var("DEEPSEEK_OCR_QUANT_TARGETS") {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "" | "text" => QuantizationTargets::Text,
-            "text+projector" | "text,projector" | "projector+text" => {
-                QuantizationTargets::TextAndProjector
-            }
-            other => {
-                warn!("unsupported DEEPSEEK_OCR_QUANT_TARGETS value `{other}`, defaulting to text");
-                QuantizationTargets::Text
-            }
-        },
-        Err(_) => QuantizationTargets::Text,
-    }
-}
-
-fn parse_keep_full_precision_from_env() -> bool {
-    match env::var("DEEPSEEK_OCR_QUANT_KEEP_FLOAT") {
-        Ok(value) => matches!(value.trim(), "" | "1" | "true" | "TRUE"),
-        Err(_) => false,
     }
 }
 
@@ -268,5 +159,28 @@ pub(crate) fn backend_label(device: &Device) -> &'static str {
         "Metal"
     } else {
         "CPU"
+    }
+}
+
+pub fn run_quantized_matmul(_label: &str, qm: &QMatMul, input: &Tensor) -> Result<Tensor> {
+    let dtype = input.dtype();
+    let device = input.device();
+    if device.is_cuda() || device.is_metal() {
+        let mut out = if dtype == DType::F32 {
+            qm.forward(input)?
+        } else {
+            let activations = input.to_dtype(DType::F32)?;
+            qm.forward(&activations)?
+        };
+        if out.dtype() != dtype {
+            out = out.to_dtype(dtype)?;
+        }
+        Ok(out)
+    } else {
+        let mut out = qm.forward(input)?;
+        if out.dtype() != dtype {
+            out = out.to_dtype(dtype)?;
+        }
+        Ok(out)
     }
 }

@@ -4,11 +4,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONFIG_PATHS: &[&str] = &["PaddleOCR-VL/config.json", "config.json"];
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaddleOcrVisionConfig {
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -31,7 +31,7 @@ pub struct PaddleOcrVisionConfig {
     pub tokens_per_second: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RopeScalingConfig {
     #[serde(default, rename = "rope_type")]
     pub rope_type: Option<String>,
@@ -41,7 +41,7 @@ pub struct RopeScalingConfig {
     pub mrope_section: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaddleOcrVlConfig {
     #[serde(default)]
     pub architectures: Vec<String>,

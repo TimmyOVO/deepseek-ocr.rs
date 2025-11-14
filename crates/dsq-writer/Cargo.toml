@@ -1,0 +1,11 @@
+[package]
+name = "deepseek-ocr-dsq-writer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deepseek-ocr-dsq = { workspace = true}
+candle-core = { workspace = true }
+half = "2.4"
+tempfile = "3.10"
+thiserror = "1.0"

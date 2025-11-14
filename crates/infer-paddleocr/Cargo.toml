@@ -18,6 +18,8 @@ memmap2 = "0.9"
 safetensors = "0.4"
 rand = { version = "0.8", features = ["std"] }
 candle-flash-attn = { version = "0.9", default-features = false, optional = true }
+deepseek-ocr-dsq-runtime = { path = "../dsq-runtime" }
+deepseek-ocr-dsq-models = { path = "../dsq-models" }
 
 [features]
 default = []

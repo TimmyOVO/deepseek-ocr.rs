@@ -4,7 +4,11 @@ use candle_nn::{Linear, VarBuilder, ops::softmax};
 use deepseek_ocr_core::tensor::gather_token_embeddings;
 
 use super::SiglipImagePatches;
-use crate::config::PaddleOcrVisionConfig;
+use crate::{
+    config::PaddleOcrVisionConfig,
+    snapshot::SnapshotLinearMap,
+    transformer::LinearWeights,
+};
 
 pub struct SiglipVisionModel {
     embeddings: SiglipEmbeddings,
@@ -14,11 +18,23 @@ pub struct SiglipVisionModel {
 }
 
 impl SiglipVisionModel {
-    pub fn load(vb: &VarBuilder, cfg: &PaddleOcrVisionConfig, model_dtype: DType) -> Result<Self> {
+    pub fn load(
+        vb: &VarBuilder,
+        cfg: &PaddleOcrVisionConfig,
+        model_dtype: DType,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let compute_dtype = resolve_compute_dtype(model_dtype);
         let vision_vb = vb.pp("visual").pp("vision_model");
         let embeddings = SiglipEmbeddings::load(&vision_vb.pp("embeddings"), cfg)?;
-        let encoder = SiglipEncoder::load(&vision_vb.pp("encoder"), cfg, compute_dtype)?;
+        let encoder = SiglipEncoder::load(
+            &vision_vb.pp("encoder"),
+            cfg,
+            compute_dtype,
+            snapshot_hits,
+            snapshot_label,
+        )?;
         let post_layernorm = PreciseLayerNorm::load(
             vision_vb.pp("post_layernorm"),
             cfg.hidden_size,
@@ -353,11 +369,24 @@ struct SiglipEncoder {
 }
 
 impl SiglipEncoder {
-    fn load(vb: &VarBuilder, cfg: &PaddleOcrVisionConfig, compute_dtype: DType) -> Result<Self> {
+    fn load(
+        vb: &VarBuilder,
+        cfg: &PaddleOcrVisionConfig,
+        compute_dtype: DType,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
+        let mut snapshot_hits = snapshot_hits;
         for idx in 0..cfg.num_hidden_layers {
             let layer_vb = vb.pp(format!("layers.{idx}"));
-            layers.push(SiglipEncoderLayer::load(&layer_vb, cfg, compute_dtype)?);
+            layers.push(SiglipEncoderLayer::load(
+                &layer_vb,
+                cfg,
+                compute_dtype,
+                snapshot_hits.as_deref_mut(),
+                snapshot_label,
+            )?);
         }
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
         let rotary = SiglipRotaryEmbedding::new(head_dim, compute_dtype);
@@ -506,21 +535,40 @@ struct SiglipEncoderLayer {
 }
 
 impl SiglipEncoderLayer {
-    fn load(vb: &VarBuilder, cfg: &PaddleOcrVisionConfig, compute_dtype: DType) -> Result<Self> {
+    fn load(
+        vb: &VarBuilder,
+        cfg: &PaddleOcrVisionConfig,
+        compute_dtype: DType,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let layer_norm1 = PreciseLayerNorm::load(
             vb.pp("layer_norm1"),
             cfg.hidden_size,
             cfg.layer_norm_eps as f64,
             compute_dtype,
         )?;
-        let attention = SiglipAttention::load(&vb.pp("self_attn"), cfg, compute_dtype)?;
+        let mut snapshot_hits = snapshot_hits;
+        let attention = SiglipAttention::load(
+            &vb.pp("self_attn"),
+            cfg,
+            compute_dtype,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
         let layer_norm2 = PreciseLayerNorm::load(
             vb.pp("layer_norm2"),
             cfg.hidden_size,
             cfg.layer_norm_eps as f64,
             compute_dtype,
         )?;
-        let mlp = SiglipMlp::load(&vb.pp("mlp"), cfg, compute_dtype)?;
+        let mlp = SiglipMlp::load(
+            &vb.pp("mlp"),
+            cfg,
+            compute_dtype,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
         Ok(Self {
             layer_norm1,
             layer_norm2,
@@ -540,40 +588,55 @@ impl SiglipEncoderLayer {
 }
 
 struct SiglipAttention {
-    q_proj: DTypedLinear,
-    k_proj: DTypedLinear,
-    v_proj: DTypedLinear,
-    out_proj: DTypedLinear,
+    q_proj: VisionLinear,
+    k_proj: VisionLinear,
+    v_proj: VisionLinear,
+    out_proj: VisionLinear,
     num_heads: usize,
     head_dim: usize,
     compute_dtype: DType,
 }
 
 impl SiglipAttention {
-    fn load(vb: &VarBuilder, cfg: &PaddleOcrVisionConfig, compute_dtype: DType) -> Result<Self> {
-        let q_proj = DTypedLinear::load(
+    fn load(
+        vb: &VarBuilder,
+        cfg: &PaddleOcrVisionConfig,
+        compute_dtype: DType,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
+        let mut snapshot_hits = snapshot_hits;
+        let q_proj = VisionLinear::load(
             vb.pp("q_proj"),
             cfg.hidden_size,
             cfg.hidden_size,
             compute_dtype,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
         )?;
-        let k_proj = DTypedLinear::load(
+        let k_proj = VisionLinear::load(
             vb.pp("k_proj"),
             cfg.hidden_size,
             cfg.hidden_size,
             compute_dtype,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
         )?;
-        let v_proj = DTypedLinear::load(
+        let v_proj = VisionLinear::load(
             vb.pp("v_proj"),
             cfg.hidden_size,
             cfg.hidden_size,
             compute_dtype,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
         )?;
-        let out_proj = DTypedLinear::load(
+        let out_proj = VisionLinear::load(
             vb.pp("out_proj"),
             cfg.hidden_size,
             cfg.hidden_size,
             compute_dtype,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
         )?;
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
         Ok(Self {
@@ -664,23 +727,34 @@ impl SiglipAttention {
 }
 
 struct SiglipMlp {
-    fc1: DTypedLinear,
-    fc2: DTypedLinear,
+    fc1: VisionLinear,
+    fc2: VisionLinear,
 }
 
 impl SiglipMlp {
-    fn load(vb: &VarBuilder, cfg: &PaddleOcrVisionConfig, compute_dtype: DType) -> Result<Self> {
-        let fc1 = DTypedLinear::load(
+    fn load(
+        vb: &VarBuilder,
+        cfg: &PaddleOcrVisionConfig,
+        compute_dtype: DType,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
+        let mut snapshot_hits = snapshot_hits;
+        let fc1 = VisionLinear::load(
             vb.pp("fc1"),
             cfg.intermediate_size,
             cfg.hidden_size,
             compute_dtype,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
         )?;
-        let fc2 = DTypedLinear::load(
+        let fc2 = VisionLinear::load(
             vb.pp("fc2"),
             cfg.hidden_size,
             cfg.intermediate_size,
             compute_dtype,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
         )?;
         Ok(Self { fc1, fc2 })
     }
@@ -788,43 +862,75 @@ pub(crate) struct LayerDebug {
     pub output: Tensor,
 }
 
-struct DTypedLinear {
-    linear: Linear,
+struct VisionLinear {
+    weights: LinearWeights,
     compute_dtype: DType,
 }
 
-impl DTypedLinear {
-    fn load(vb: VarBuilder, out_dim: usize, in_dim: usize, compute_dtype: DType) -> Result<Self> {
-        let weight = vb
-            .get((out_dim, in_dim), "weight")
-            .context("missing linear weight")?;
-        let bias = vb.get(out_dim, "bias").context("missing linear bias")?;
-        let weight = if weight.dtype() != compute_dtype {
-            weight.to_dtype(compute_dtype)?
-        } else {
-            weight
-        };
-        let bias = if bias.dtype() != compute_dtype {
-            bias.to_dtype(compute_dtype)?
-        } else {
-            bias
-        };
+impl VisionLinear {
+    fn load(
+        vb: VarBuilder,
+        out_dim: usize,
+        in_dim: usize,
+        compute_dtype: DType,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
+        let weights = LinearWeights::load(
+            vb,
+            out_dim,
+            in_dim,
+            true,
+            snapshot_hits,
+            snapshot_label,
+        )?;
         Ok(Self {
-            linear: Linear::new(weight, Some(bias)),
+            weights,
             compute_dtype,
         })
     }
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        if input.dtype() == self.compute_dtype {
-            let out = self.linear.forward(input)?;
-            Ok(out)
+        let dims = input
+            .shape()
+            .dims()
+            .to_vec();
+        ensure!(!dims.is_empty(), "vision linear expects rank >= 1");
+        let last = *dims.last().expect("non-empty dims");
+        ensure!(
+            last == self.weights.in_dim,
+            "vision linear expected last dim {} got {}",
+            self.weights.in_dim,
+            last
+        );
+        let outer: usize = if dims.len() == 1 {
+            1
         } else {
-            let cast = input.to_dtype(self.compute_dtype)?;
-            let projected = self.linear.forward(&cast)?;
-            let restored = projected.to_dtype(input.dtype())?;
-            Ok(restored)
+            dims[..dims.len() - 1].iter().product()
+        };
+        let cast = if input.dtype() == self.compute_dtype {
+            input.clone()
+        } else {
+            input.to_dtype(self.compute_dtype)?
+        };
+        let reshaped = cast.reshape((outer, self.weights.in_dim))?;
+        let mut out = self.weights.matmul_2d(&reshaped)?;
+        if let Some(bias) = &self.weights.bias {
+            let bias = if bias.dtype() == self.compute_dtype {
+                bias.clone()
+            } else {
+                bias.to_dtype(self.compute_dtype)?
+            };
+            out = out.broadcast_add(&bias.reshape((1, self.weights.out_dim))?)?;
         }
+        let mut new_dims = dims;
+        let last_idx = new_dims.len() - 1;
+        new_dims[last_idx] = self.weights.out_dim;
+        let mut restored = out.reshape(new_dims)?;
+        if restored.dtype() != input.dtype() {
+            restored = restored.to_dtype(input.dtype())?;
+        }
+        Ok(restored)
     }
 }
 

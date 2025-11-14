@@ -5,18 +5,18 @@ use super::LinearWeights;
 
 pub fn apply_linear(input: &Tensor, weights: &LinearWeights) -> Result<Tensor> {
     let (batch, seq_len, in_dim) = input.shape().dims3()?;
-    let (out_dim, weight_in) = weights.weight.shape().dims2()?;
     ensure!(
-        in_dim == weight_in,
+        in_dim == weights.in_dim,
         "linear weight expects input dim {} got {}",
-        weight_in,
+        weights.in_dim,
         in_dim
     );
     let flat = input.reshape((batch * seq_len, in_dim))?;
-    let mut out = flat.matmul(&weights.weight.transpose(0, 1)?)?;
+    let mut out = weights.matmul_2d(&flat)?;
     if let Some(bias) = &weights.bias {
-        out = out.broadcast_add(&bias.reshape((1, out_dim))?)?;
+        out = out.broadcast_add(&bias.reshape((1, weights.out_dim))?)?;
     }
+    let out_dim = weights.out_dim;
     Ok(out.reshape((batch, seq_len, out_dim))?)
 }
 

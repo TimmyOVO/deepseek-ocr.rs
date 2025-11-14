@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use deepseek_ocr_config::{AppConfig, LocalFileSystem};
 use deepseek_ocr_core::{
     ModelKind, ModelLoadArgs,
@@ -14,17 +14,22 @@ use deepseek_ocr_core::{
     runtime::{default_dtype_for_device, prepare_device_and_dtype},
     streaming::DeltaTracker,
 };
-use deepseek_ocr_infer_deepseek::load_model as load_deepseek_model;
+use deepseek_ocr_infer_deepseek::{
+    load_model as load_deepseek_model,
+    quant_snapshot::{SNAPSHOT_SPEC_PATH, qtensor_bytes_supported},
+};
 use deepseek_ocr_infer_paddleocr::load_model as load_paddle_model;
 use image::DynamicImage;
 use tokenizers::Tokenizer;
 use tracing::info;
 
 use crate::{
-    args::Args,
+    args::{InferArgs, SnapshotArgs, WeightsArgs, WeightsCommand},
     bench,
     prompt::load_prompt,
-    resources::{ensure_config_file, ensure_tokenizer_file, prepare_weights_path},
+    resources::{
+        ensure_config_file, ensure_tokenizer_file, prepare_snapshot_path, prepare_weights_path,
+    },
 };
 
 #[derive(Default)]
@@ -33,7 +38,7 @@ struct StreamProgress {
     delta: DeltaTracker,
 }
 
-pub fn run(args: Args) -> Result<()> {
+pub fn run_inference(args: InferArgs) -> Result<()> {
     let quiet = args.quiet;
     let bench_enabled = args.bench || args.bench_output.is_some();
     let bench_session = bench::maybe_start(bench_enabled, args.bench_output.clone())?;
@@ -52,9 +57,13 @@ pub fn run(args: Args) -> Result<()> {
         app_config.models.active
     );
 
-    let config_path = ensure_config_file(&fs, &resources.config, resources.kind)?;
-    let tokenizer_path = ensure_tokenizer_file(&fs, &resources.tokenizer, resources.kind)?;
-    let weights_path = prepare_weights_path(&fs, &resources.weights, resources.kind)?;
+    let config_path = ensure_config_file(&fs, &resources.id, &resources.config)?;
+    let tokenizer_path =
+        ensure_tokenizer_file(&fs, &resources.id, &resources.tokenizer)?;
+    let weights_path =
+        prepare_weights_path(&fs, &resources.id, &resources.weights)?;
+    let snapshot_path =
+        prepare_snapshot_path(&fs, &resources.id, resources.snapshot.as_ref())?;
 
     let (device, maybe_precision) =
         prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
@@ -73,6 +82,7 @@ pub fn run(args: Args) -> Result<()> {
         kind: resources.kind,
         config_path: Some(&config_path),
         weights_path: Some(&weights_path),
+        snapshot_path: snapshot_path.as_deref(),
         device: device.clone(),
         dtype,
     };
@@ -278,4 +288,35 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn run_weights(args: WeightsArgs) -> Result<()> {
+    match args.command {
+        WeightsCommand::Snapshot(cmd) => run_snapshot(cmd),
+    }
+}
+
+fn run_snapshot(cmd: SnapshotArgs) -> Result<()> {
+    let mut instructions = vec![
+        "cargo run -p deepseek-ocr-dsq-cli --release -- export".to_string(),
+        format!("--weights {}", cmd.input.display()),
+        format!("--output {}", cmd.output.display()),
+        format!("--dtype {}", cmd.dtype),
+        format!("--targets {}", cmd.targets),
+    ];
+    if let Some(config) = cmd.config.as_ref() {
+        instructions.push(format!("--config {}", config.display()));
+    }
+    let command = instructions.join(" ");
+    let prefix = if qtensor_bytes_supported() {
+        "Snapshot export inside the runtime is waiting on Candle QTensor byte APIs."
+    } else {
+        "Runtime snapshot export depends on upcoming Candle QTensor serialization support."
+    };
+    bail!(
+        "{prefix}\nUse `{command}` to build the .dsq container via the Rust exporter. Design reference: {spec}",
+        prefix = prefix,
+        command = command,
+        spec = SNAPSHOT_SPEC_PATH
+    );
 }

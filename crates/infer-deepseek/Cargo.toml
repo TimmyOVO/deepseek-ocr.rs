@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 deepseek-ocr-core = { path = "../core" }
+deepseek-ocr-dsq-runtime = { path = "../dsq-runtime" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 candle-core = { workspace = true }
@@ -39,7 +40,13 @@ mkl = [
     "candle-core/mkl",
     "candle-nn/mkl",
 ]
+qtensor-bytes = ["deepseek-ocr-dsq-runtime/qtensor-bytes"]
 
 [dev-dependencies]
 ndarray = "0.16"
 ndarray-npy = "0.9"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "snapshot_load"
+harness = false

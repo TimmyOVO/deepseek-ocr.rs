@@ -1,4 +1,5 @@
 pub mod config;
+pub mod snapshot;
 pub mod transformer;
 pub mod vision;
 pub mod weights;

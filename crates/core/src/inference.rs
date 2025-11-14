@@ -91,6 +91,7 @@ pub struct ModelLoadArgs<'a> {
     pub kind: ModelKind,
     pub config_path: Option<&'a std::path::Path>,
     pub weights_path: Option<&'a std::path::Path>,
+    pub snapshot_path: Option<&'a std::path::Path>,
     pub device: Device,
     pub dtype: candle_core::DType,
 }

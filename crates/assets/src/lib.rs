@@ -10,75 +10,158 @@ use reqwest::blocking::Client;
 
 use providers::providers_in_download_order;
 
+// Primary DeepSeek repo used for benchmarking provider connectivity.
 pub const DEFAULT_REPO_ID: &str = "deepseek-ai/DeepSeek-OCR";
-pub const DEFAULT_CONFIG_PATH: &str = "DeepSeek-OCR/config.json";
-pub const DEFAULT_CONFIG_FILENAME: &str = "config.json";
-pub const DEFAULT_TOKENIZER_PATH: &str = "DeepSeek-OCR/tokenizer.json";
-pub const DEFAULT_TOKENIZER_FILENAME: &str = "tokenizer.json";
-pub const DEFAULT_WEIGHTS_PATH: &str = deepseek_ocr_infer_deepseek::model::DEFAULT_WEIGHTS_PATH;
-pub const DEFAULT_WEIGHTS_FILENAME: &str = "model-00001-of-000001.safetensors";
-
-const PADDLE_REPO_ID: &str = "PaddlePaddle/PaddleOCR-VL";
-const PADDLE_CONFIG_FILENAME: &str = "config.json";
-const PADDLE_TOKENIZER_FILENAME: &str = "tokenizer.json";
-const PADDLE_WEIGHTS_FILENAME: &str = "model.safetensors";
 
 const HTTP_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0";
 
 static HTTP_CLIENT: OnceCell<Client> = OnceCell::new();
 
-pub fn ensure_config() -> Result<PathBuf> {
-    ensure_config_at(Path::new(DEFAULT_CONFIG_PATH))
+#[derive(Clone, Copy)]
+pub struct SnapshotAsset {
+    pub dtype: &'static str,
+    pub repo_id: &'static str,
+    pub filename: &'static str,
 }
 
-pub fn ensure_config_at(target: &Path) -> Result<PathBuf> {
-    ensure_model_config(ModelKind::Deepseek, target)
+#[derive(Clone, Copy)]
+pub struct ModelAsset {
+    pub id: &'static str,
+    pub kind: ModelKind,
+    pub repo_id: &'static str,
+    pub config: &'static str,
+    pub tokenizer: &'static str,
+    pub weights: &'static str,
 }
 
-pub fn ensure_tokenizer(path: &Path) -> Result<PathBuf> {
-    ensure_tokenizer_at(path)
+#[derive(Clone, Copy)]
+pub struct QuantizedModelAsset {
+    pub id: &'static str,
+    pub kind: ModelKind,
+    pub baseline_id: &'static str,
+    pub snapshot: SnapshotAsset,
 }
 
-pub fn ensure_tokenizer_at(path: &Path) -> Result<PathBuf> {
-    ensure_model_tokenizer(ModelKind::Deepseek, path)
+pub const MODEL_ASSETS: &[ModelAsset] = &[
+    ModelAsset {
+        id: "deepseek-ocr",
+        kind: ModelKind::Deepseek,
+        repo_id: DEFAULT_REPO_ID,
+        config: "config.json",
+        tokenizer: "tokenizer.json",
+        weights: "model-00001-of-000001.safetensors",
+    },
+    ModelAsset {
+        id: "paddleocr-vl",
+        kind: ModelKind::PaddleOcrVl,
+        repo_id: "PaddlePaddle/PaddleOCR-VL",
+        config: "config.json",
+        tokenizer: "tokenizer.json",
+        weights: "model.safetensors",
+    },
+];
+
+pub const QUANTIZED_MODEL_ASSETS: &[QuantizedModelAsset] = &[
+    QuantizedModelAsset {
+        id: "deepseek-ocr-q4k",
+        kind: ModelKind::Deepseek,
+        baseline_id: "deepseek-ocr",
+        snapshot: SnapshotAsset {
+            dtype: "Q4_K",
+            repo_id: "TimmyOVO/deepseek-ocr.rs",
+            filename: "DeepSeek-OCR.Q4_K.dsq",
+        },
+    },
+    QuantizedModelAsset {
+        id: "deepseek-ocr-q6k",
+        kind: ModelKind::Deepseek,
+        baseline_id: "deepseek-ocr",
+        snapshot: SnapshotAsset {
+            dtype: "Q6_K",
+            repo_id: "TimmyOVO/deepseek-ocr.rs",
+            filename: "DeepSeek-OCR.Q6_K.dsq",
+        },
+    },
+    QuantizedModelAsset {
+        id: "deepseek-ocr-q8k",
+        kind: ModelKind::Deepseek,
+        baseline_id: "deepseek-ocr",
+        snapshot: SnapshotAsset {
+            dtype: "Q8_0",
+            repo_id: "TimmyOVO/deepseek-ocr.rs",
+            filename: "DeepSeek-OCR.Q8_0.dsq",
+        },
+    },
+    QuantizedModelAsset {
+        id: "paddleocr-vl-q4k",
+        kind: ModelKind::PaddleOcrVl,
+        baseline_id: "paddleocr-vl",
+        snapshot: SnapshotAsset {
+            dtype: "Q4_K",
+            repo_id: "TimmyOVO/PaddleOCR-VL-Quantization",
+            filename: "PaddleOCR-VL.Q4_K.dsq",
+        },
+    },
+    QuantizedModelAsset {
+        id: "paddleocr-vl-q6k",
+        kind: ModelKind::PaddleOcrVl,
+        baseline_id: "paddleocr-vl",
+        snapshot: SnapshotAsset {
+            dtype: "Q6_K",
+            repo_id: "TimmyOVO/PaddleOCR-VL-Quantization",
+            filename: "PaddleOCR-VL.Q6_K.dsq",
+        },
+    },
+    QuantizedModelAsset {
+        id: "paddleocr-vl-q8k",
+        kind: ModelKind::PaddleOcrVl,
+        baseline_id: "paddleocr-vl",
+        snapshot: SnapshotAsset {
+            dtype: "Q8_0",
+            repo_id: "TimmyOVO/PaddleOCR-VL-Quantization",
+            filename: "PaddleOCR-VL.Q8_0.dsq",
+        },
+    },
+];
+
+pub fn baseline_model_id(model_id: &str) -> String {
+    if let Some(q) = quantized_asset_profile(model_id) {
+        q.baseline_id.to_string()
+    } else {
+        model_id.to_string()
+    }
 }
 
-pub fn resolve_weights(custom: Option<&Path>) -> Result<PathBuf> {
-    resolve_weights_with_default(custom, Path::new(DEFAULT_WEIGHTS_PATH))
+pub fn ensure_model_config_for(model_id: &str, target: &Path) -> Result<PathBuf> {
+    let profile = asset_profile(model_id)?;
+    ensure_remote_file(profile.repo_id, profile.config, target)
 }
 
-pub fn resolve_weights_with_default(custom: Option<&Path>, default_path: &Path) -> Result<PathBuf> {
-    resolve_weights_with_kind(custom, default_path, ModelKind::Deepseek)
+pub fn ensure_model_tokenizer_for(model_id: &str, target: &Path) -> Result<PathBuf> {
+    let profile = asset_profile(model_id)?;
+    ensure_remote_file(profile.repo_id, profile.tokenizer, target)
 }
 
-pub fn resolve_weights_with_kind(
-    custom: Option<&Path>,
-    default_path: &Path,
-    kind: ModelKind,
+pub fn ensure_model_weights_for(model_id: &str, target: &Path) -> Result<PathBuf> {
+    let profile = asset_profile(model_id)?;
+    ensure_remote_file(profile.repo_id, profile.weights, target)
+}
+
+pub fn ensure_model_snapshot_for(
+    model_id: &str,
+    dtype: &str,
+    target: &Path,
 ) -> Result<PathBuf> {
-    if let Some(path) = custom {
-        if path.exists() {
-            return Ok(path.to_path_buf());
-        }
-        return Err(anyhow!(
-            "weights not found at custom path {}",
-            path.display()
-        ));
+    let snapshot = snapshot_profile(model_id, dtype)?;
+    ensure_remote_file(snapshot.repo_id, snapshot.filename, target)
+}
+
+fn ensure_remote_file(repo_id: &str, remote_name: &str, target: &Path) -> Result<PathBuf> {
+    if target.exists() {
+        return Ok(target.to_path_buf());
     }
 
-    ensure_model_weights(kind, default_path)
-}
-
-pub fn ensure_model_config(kind: ModelKind, target: &Path) -> Result<PathBuf> {
-    ensure_asset(kind, target, AssetFile::Config)
-}
-
-pub fn ensure_model_tokenizer(kind: ModelKind, target: &Path) -> Result<PathBuf> {
-    ensure_asset(kind, target, AssetFile::Tokenizer)
-}
-
-pub fn ensure_model_weights(kind: ModelKind, target: &Path) -> Result<PathBuf> {
-    ensure_asset(kind, target, AssetFile::Weights)
+    download_asset(repo_id, remote_name, target)
 }
 
 fn download_asset(repo_id: &str, remote_name: &str, target: &Path) -> Result<PathBuf> {
@@ -122,52 +205,6 @@ pub(crate) fn copy_to_target(cached: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum AssetFile {
-    Config,
-    Tokenizer,
-    Weights,
-}
-
-struct ModelAssetSpec {
-    repo_id: &'static str,
-    config: &'static str,
-    tokenizer: &'static str,
-    weights: &'static str,
-}
-
-fn asset_spec(kind: ModelKind) -> ModelAssetSpec {
-    match kind {
-        ModelKind::Deepseek => ModelAssetSpec {
-            repo_id: DEFAULT_REPO_ID,
-            config: DEFAULT_CONFIG_FILENAME,
-            tokenizer: DEFAULT_TOKENIZER_FILENAME,
-            weights: DEFAULT_WEIGHTS_FILENAME,
-        },
-        ModelKind::PaddleOcrVl => ModelAssetSpec {
-            repo_id: PADDLE_REPO_ID,
-            config: PADDLE_CONFIG_FILENAME,
-            tokenizer: PADDLE_TOKENIZER_FILENAME,
-            weights: PADDLE_WEIGHTS_FILENAME,
-        },
-    }
-}
-
-fn ensure_asset(kind: ModelKind, target: &Path, file: AssetFile) -> Result<PathBuf> {
-    if target.exists() {
-        return Ok(target.to_path_buf());
-    }
-
-    let spec = asset_spec(kind);
-    let remote = match file {
-        AssetFile::Config => spec.config,
-        AssetFile::Tokenizer => spec.tokenizer,
-        AssetFile::Weights => spec.weights,
-    };
-
-    download_asset(spec.repo_id, remote, target)
-}
-
 pub(crate) fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -184,4 +221,37 @@ pub(crate) fn http_client() -> &'static Client {
             .build()
             .expect("failed to build HTTP client")
     })
+}
+
+fn asset_profile(model_id: &str) -> Result<&'static ModelAsset> {
+    let baseline = baseline_model_id(model_id);
+    MODEL_ASSETS
+        .iter()
+        .find(|asset| asset.id == baseline)
+        .ok_or_else(|| anyhow!("unknown model id `{model_id}` (baseline `{baseline}`)"))
+}
+
+fn quantized_asset_profile(model_id: &str) -> Option<&'static QuantizedModelAsset> {
+    QUANTIZED_MODEL_ASSETS
+        .iter()
+        .find(|asset| asset.id == model_id)
+}
+
+fn snapshot_profile(model_id: &str, dtype: &str) -> Result<&'static SnapshotAsset> {
+    let asset = quantized_asset_profile(model_id).ok_or_else(|| {
+        anyhow!(
+            "model `{}` has no quantized snapshot configured",
+            model_id
+        )
+    })?;
+    let snapshot = &asset.snapshot;
+    if snapshot.dtype.eq_ignore_ascii_case(dtype) {
+        Ok(snapshot)
+    } else {
+        Err(anyhow!(
+            "snapshot dtype `{}` not configured for model `{}`",
+            dtype,
+            model_id
+        ))
+    }
 }

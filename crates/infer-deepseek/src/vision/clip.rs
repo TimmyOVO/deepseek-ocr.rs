@@ -6,7 +6,7 @@ use candle_nn::{
 };
 
 use crate::config::{DeepseekOcrConfig, VisionBackboneConfig};
-use crate::transformer::weights::LinearWeights;
+use crate::transformer::weights::{LinearWeights, qualified_name};
 
 /// Hyper-parameters describing the CLIP-L vision transformer used by DeepSeek-OCR.
 #[derive(Debug, Clone)]
@@ -441,6 +441,7 @@ fn load_linear(
     in_dim: usize,
     bias: bool,
 ) -> Result<LinearWeights> {
+    let label = qualified_name(vb, "weight");
     let weight = vb
         .get((out_dim, in_dim), "weight")
         .with_context(|| "missing linear weight")?
@@ -460,6 +461,7 @@ fn load_linear(
         qmatmul: None,
         out_dim,
         in_dim,
+        label,
     })
 }
 

@@ -5,16 +5,15 @@ use std::{
 
 use crate::{
     config::DeepseekV2Config,
+    quant_snapshot::{
+        LinearSpec, QuantizedSnapshot, SnapshotLinear, SnapshotLinearMap, SnapshotLoadPlan,
+    },
     quantization::{
-        LinearLayerGroup, QuantModule, QuantizationKind, QuantizationOutcome, QuantizationState,
-        backend_label,
+        LinearLayerGroup, QuantModule, QuantizationOutcome, QuantizationState, backend_label,
     },
 };
 use anyhow::{Context, Result, ensure};
-use candle_core::{
-    Tensor,
-    quantized::{GgmlDType, QMatMul, QTensor},
-};
+use candle_core::{Tensor, quantized::QMatMul};
 use candle_nn::VarBuilder;
 use tracing::trace;
 
@@ -26,6 +25,7 @@ pub struct LinearWeights {
     pub qmatmul: Option<Arc<QMatMul>>,
     pub out_dim: usize,
     pub in_dim: usize,
+    pub label: String,
 }
 
 impl fmt::Debug for LinearWeights {
@@ -36,51 +36,104 @@ impl fmt::Debug for LinearWeights {
             .field("qmatmul", &self.qmatmul.is_some())
             .field("out_dim", &self.out_dim)
             .field("in_dim", &self.in_dim)
+            .field("label", &self.label)
             .finish()
     }
 }
 
 impl LinearWeights {
+    fn snapshot_spec(vb: &VarBuilder, out_dim: usize, in_dim: usize) -> LinearSpec {
+        LinearSpec::new(qualified_name(vb, "weight"), out_dim, in_dim)
+    }
+
     fn load(
         vb: &VarBuilder,
         out_dim: usize,
         in_dim: usize,
         bias: bool,
         group: LinearLayerGroup,
+        module: QuantModule,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
     ) -> Result<Self> {
-        let weight = vb
-            .get((out_dim, in_dim), "weight")
-            .with_context(|| format!("missing linear weight `{}`", qualified_name(vb, "weight")))?;
-        let weight = weight.contiguous()?;
-        let bias =
-            if bias && vb.contains_tensor("bias") {
-                Some(vb.get(out_dim, "bias").with_context(|| {
-                    format!("missing linear bias `{}`", qualified_name(vb, "bias"))
-                })?)
-            } else {
-                None
-            };
-        let qmatmul = maybe_quantize_linear(
-            &weight,
-            in_dim,
-            group,
-            &qualified_name(vb, "weight"),
-            QuantModule::TextLinear,
-        )?;
-        let keep_fp = QuantizationState::global()
-            .config()
-            .keep_full_precision_weights;
-        let weight = if qmatmul.is_some() && !keep_fp {
-            None
-        } else {
-            Some(weight)
-        };
+        let label = qualified_name(vb, "weight");
+        let mut weight = Some(
+            vb.get((out_dim, in_dim), "weight")
+                .with_context(|| format!("missing linear weight `{label}`"))?
+                .contiguous()?,
+        );
+        let mut bias_tensor: Option<Tensor> = None;
+        let device = vb.device();
+        let quant = QuantizationState::global();
+        let mut qmatmul = None;
+        // If snapshot hits were preloaded, prefer them regardless of env quant targets/kind.
+        if let Some(hits) = snapshot_hits {
+            if let Some(hit) = hits.remove(&label) {
+                let container = snapshot_label.unwrap_or("snapshot");
+                match hit {
+                    SnapshotLinear::Quantized { qmatmul: qm, bias } => {
+                        let path = if device.is_cuda() || device.is_metal() {
+                            "kernel_upcast"
+                        } else {
+                            "kernel"
+                        };
+                        trace!(
+                            tensor = label,
+                            ?group,
+                            in_dim,
+                            out_dim = out_dim,
+                            backend = backend_label(device),
+                            path,
+                            container,
+                            source = "snapshot",
+                            action = "quantized",
+                            "quant-linear"
+                        );
+                        quant.record_attempt(module, QuantizationOutcome::Quantized);
+                        bias_tensor = bias;
+                        qmatmul = Some(qm);
+                        weight = None;
+                    }
+                    SnapshotLinear::Float {
+                        weight: snapshot_weight,
+                        bias,
+                    } => {
+                        trace!(
+                            tensor = label,
+                            ?group,
+                            in_dim,
+                            out_dim = out_dim,
+                            backend = backend_label(device),
+                            path = "snapshot-float",
+                            container,
+                            source = "snapshot",
+                            action = "float",
+                            "quant-linear"
+                        );
+                        quant.record_attempt(module, QuantizationOutcome::Fallback);
+                        bias_tensor = bias;
+                        weight = Some(snapshot_weight);
+                    }
+                }
+            }
+        }
+        // No runtime quantization fallback: use snapshot when available, otherwise float weights.
+        if bias && bias_tensor.is_none() && vb.contains_tensor("bias") {
+            bias_tensor = Some(
+                vb.get(out_dim, "bias")
+                    .with_context(|| {
+                        format!("missing linear bias `{}`", qualified_name(vb, "bias"))
+                    })?
+                    .contiguous()?,
+            );
+        }
         Ok(Self {
             weight,
-            bias,
+            bias: bias_tensor,
             qmatmul,
             out_dim,
             in_dim,
+            label,
         })
     }
 }
@@ -108,7 +161,11 @@ pub struct AttentionWeights {
 }
 
 impl AttentionWeights {
-    fn load(cfg: &DeepseekV2Config, vb: &VarBuilder) -> Result<Self> {
+    fn load(
+        cfg: &DeepseekV2Config,
+        vb: &VarBuilder,
+        snapshot: Option<&QuantizedSnapshot>,
+    ) -> Result<Self> {
         let hidden_size = cfg.hidden_size;
         let num_heads = cfg.num_attention_heads;
         ensure!(
@@ -120,34 +177,73 @@ impl AttentionWeights {
         let kv_head_dim = head_dim;
         let v_head_dim = non_zero_or(cfg.v_head_dim, head_dim);
         let attn_vb = vb.pp("self_attn");
+        let q_vb = attn_vb.pp("q_proj");
+        let k_vb = attn_vb.pp("k_proj");
+        let v_vb = attn_vb.pp("v_proj");
+        let o_vb = attn_vb.pp("o_proj");
+        let mut plan = SnapshotLoadPlan::default();
+        plan.push(LinearWeights::snapshot_spec(
+            &q_vb,
+            num_heads * head_dim,
+            hidden_size,
+        ));
+        plan.push(LinearWeights::snapshot_spec(
+            &k_vb,
+            num_kv_heads * kv_head_dim,
+            hidden_size,
+        ));
+        plan.push(LinearWeights::snapshot_spec(
+            &v_vb,
+            num_kv_heads * v_head_dim,
+            hidden_size,
+        ));
+        plan.push(LinearWeights::snapshot_spec(
+            &o_vb,
+            hidden_size,
+            num_heads * v_head_dim,
+        ));
+        let mut snapshot_hits = plan.execute(snapshot, vb.device(), None)?;
+        let snapshot_label = snapshot.map(|s| s.container_label());
 
         let q_proj = LinearWeights::load(
-            &attn_vb.pp("q_proj"),
+            &q_vb,
             num_heads * head_dim,
             hidden_size,
             true,
             LinearLayerGroup::Text,
+            QuantModule::TextLinear,
+            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_label,
         )?;
         let k_proj = LinearWeights::load(
-            &attn_vb.pp("k_proj"),
+            &k_vb,
             num_kv_heads * kv_head_dim,
             hidden_size,
             true,
             LinearLayerGroup::Text,
+            QuantModule::TextLinear,
+            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_label,
         )?;
         let v_proj = LinearWeights::load(
-            &attn_vb.pp("v_proj"),
+            &v_vb,
             num_kv_heads * v_head_dim,
             hidden_size,
             true,
             LinearLayerGroup::Text,
+            QuantModule::TextLinear,
+            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_label,
         )?;
         let o_proj = LinearWeights::load(
-            &attn_vb.pp("o_proj"),
+            &o_vb,
             hidden_size,
             num_heads * v_head_dim,
             true,
             LinearLayerGroup::Text,
+            QuantModule::TextLinear,
+            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_label,
         )?;
         Ok(Self {
             q_proj,
@@ -166,27 +262,63 @@ pub struct DenseMlpWeights {
 }
 
 impl DenseMlpWeights {
-    fn load(vb: &VarBuilder, hidden_size: usize, intermediate_size: usize) -> Result<Self> {
+    fn load(
+        vb: &VarBuilder,
+        hidden_size: usize,
+        intermediate_size: usize,
+        snapshot: Option<&QuantizedSnapshot>,
+    ) -> Result<Self> {
+        let gate_vb = vb.pp("gate_proj");
+        let up_vb = vb.pp("up_proj");
+        let down_vb = vb.pp("down_proj");
+        let mut plan = SnapshotLoadPlan::default();
+        plan.push(LinearWeights::snapshot_spec(
+            &gate_vb,
+            intermediate_size,
+            hidden_size,
+        ));
+        plan.push(LinearWeights::snapshot_spec(
+            &up_vb,
+            intermediate_size,
+            hidden_size,
+        ));
+        plan.push(LinearWeights::snapshot_spec(
+            &down_vb,
+            hidden_size,
+            intermediate_size,
+        ));
+        let mut snapshot_hits = plan.execute(snapshot, vb.device(), None)?;
+        let snapshot_label = snapshot.map(|s| s.container_label());
+
         let gate_proj = LinearWeights::load(
-            &vb.pp("gate_proj"),
+            &gate_vb,
             intermediate_size,
             hidden_size,
             true,
             LinearLayerGroup::Text,
+            QuantModule::TextLinear,
+            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_label,
         )?;
         let up_proj = LinearWeights::load(
-            &vb.pp("up_proj"),
+            &up_vb,
             intermediate_size,
             hidden_size,
             true,
             LinearLayerGroup::Text,
+            QuantModule::TextLinear,
+            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_label,
         )?;
         let down_proj = LinearWeights::load(
-            &vb.pp("down_proj"),
+            &down_vb,
             hidden_size,
             intermediate_size,
             true,
             LinearLayerGroup::Text,
+            QuantModule::TextLinear,
+            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_label,
         )?;
         Ok(Self {
             gate_proj,
@@ -205,7 +337,12 @@ pub struct MoeWeights {
 }
 
 impl MoeWeights {
-    fn load(cfg: &DeepseekV2Config, layer_idx: usize, vb: &VarBuilder) -> Result<Self> {
+    fn load(
+        cfg: &DeepseekV2Config,
+        layer_idx: usize,
+        vb: &VarBuilder,
+        snapshot: Option<&QuantizedSnapshot>,
+    ) -> Result<Self> {
         let hidden_size = cfg.hidden_size;
         let moe_intermediate_size = cfg
             .moe_intermediate_size
@@ -234,10 +371,11 @@ impl MoeWeights {
         let mut experts = Vec::with_capacity(num_routed);
         for expert_idx in 0..num_routed {
             let expert_vb = vb.pp(format!("experts.{expert_idx}"));
-            let expert = DenseMlpWeights::load(&expert_vb, hidden_size, moe_intermediate_size)
-                .with_context(|| {
-                    format!("failed to load MoE expert {expert_idx} (layer {layer_idx})")
-                })?;
+            let expert =
+                DenseMlpWeights::load(&expert_vb, hidden_size, moe_intermediate_size, snapshot)
+                    .with_context(|| {
+                        format!("failed to load MoE expert {expert_idx} (layer {layer_idx})")
+                    })?;
             experts.push(expert);
         }
 
@@ -245,9 +383,9 @@ impl MoeWeights {
             let vb = vb.pp("shared_experts");
             let intermediate = moe_intermediate_size * count;
             Some(
-                DenseMlpWeights::load(&vb, hidden_size, intermediate).with_context(|| {
-                    format!("failed to load shared_experts for layer {layer_idx}")
-                })?,
+                DenseMlpWeights::load(&vb, hidden_size, intermediate, snapshot).with_context(
+                    || format!("failed to load shared_experts for layer {layer_idx}"),
+                )?,
             )
         } else {
             None
@@ -269,13 +407,19 @@ pub enum MlpWeights {
 }
 
 impl MlpWeights {
-    fn load(cfg: &DeepseekV2Config, layer_idx: usize, vb: &VarBuilder) -> Result<Self> {
+    fn load(
+        cfg: &DeepseekV2Config,
+        layer_idx: usize,
+        vb: &VarBuilder,
+        snapshot: Option<&QuantizedSnapshot>,
+    ) -> Result<Self> {
         let hidden_size = cfg.hidden_size;
         let intermediate_size = cfg.intermediate_size;
         if should_use_moe(cfg, layer_idx) {
-            MoeWeights::load(cfg, layer_idx, vb).map(MlpWeights::Moe)
+            MoeWeights::load(cfg, layer_idx, vb, snapshot).map(MlpWeights::Moe)
         } else {
-            DenseMlpWeights::load(vb, hidden_size, intermediate_size).map(MlpWeights::Dense)
+            DenseMlpWeights::load(vb, hidden_size, intermediate_size, snapshot)
+                .map(MlpWeights::Dense)
         }
     }
 }
@@ -289,9 +433,14 @@ pub struct TransformerBlockWeights {
 }
 
 impl TransformerBlockWeights {
-    pub fn load(cfg: &DeepseekV2Config, layer_idx: usize, vb: &VarBuilder) -> Result<Self> {
-        let attention = AttentionWeights::load(cfg, vb)?;
-        let mlp = MlpWeights::load(cfg, layer_idx, &vb.pp("mlp"))?;
+    pub fn load(
+        cfg: &DeepseekV2Config,
+        layer_idx: usize,
+        vb: &VarBuilder,
+        snapshot: Option<&QuantizedSnapshot>,
+    ) -> Result<Self> {
+        let attention = AttentionWeights::load(cfg, vb, snapshot)?;
+        let mlp = MlpWeights::load(cfg, layer_idx, &vb.pp("mlp"), snapshot)?;
         let input_layernorm = RmsNormWeights::load(&vb.pp("input_layernorm"), cfg.hidden_size)?;
         let post_attention_layernorm =
             RmsNormWeights::load(&vb.pp("post_attention_layernorm"), cfg.hidden_size)?;
@@ -310,11 +459,15 @@ pub struct TransformerWeights {
 }
 
 impl TransformerWeights {
-    pub fn load(cfg: &DeepseekV2Config, vb: &VarBuilder) -> Result<Self> {
+    pub fn load(
+        cfg: &DeepseekV2Config,
+        vb: &VarBuilder,
+        snapshot: Option<&QuantizedSnapshot>,
+    ) -> Result<Self> {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for layer_idx in 0..cfg.num_hidden_layers {
             let layer_vb = vb.pp(format!("layers.{layer_idx}"));
-            let layer = TransformerBlockWeights::load(cfg, layer_idx, &layer_vb)
+            let layer = TransformerBlockWeights::load(cfg, layer_idx, &layer_vb, snapshot)
                 .with_context(|| format!("failed to load transformer layer `{layer_idx}`"))?;
             layers.push(layer);
         }
@@ -331,10 +484,15 @@ pub struct DeepseekLanguageModelWeights {
     pub lm_head_q: Option<Arc<QMatMul>>,
     pub lm_out_dim: usize,
     pub lm_in_dim: usize,
+    pub lm_head_label: String,
 }
 
 impl DeepseekLanguageModelWeights {
-    pub fn load(cfg: &DeepseekV2Config, vb: &VarBuilder) -> Result<Self> {
+    pub fn load(
+        cfg: &DeepseekV2Config,
+        vb: &VarBuilder,
+        snapshot: Option<&QuantizedSnapshot>,
+    ) -> Result<Self> {
         let model_vb = vb.pp("model");
         let token_embedding = model_vb
             .pp("embed_tokens")
@@ -346,7 +504,7 @@ impl DeepseekLanguageModelWeights {
                 )
             })?;
         let token_embedding = token_embedding.contiguous()?;
-        let transformer = TransformerWeights::load(cfg, &model_vb)?;
+        let transformer = TransformerWeights::load(cfg, &model_vb, snapshot)?;
         let final_layernorm = RmsNormWeights::load(&model_vb.pp("norm"), cfg.hidden_size)
             .with_context(|| {
                 format!(
@@ -355,15 +513,13 @@ impl DeepseekLanguageModelWeights {
                 )
             })?;
         let lm_head_vb = vb.pp("lm_head");
-        let lm_head = lm_head_vb
-            .get((cfg.vocab_size, cfg.hidden_size), "weight")
-            .with_context(|| {
-                format!(
-                    "missing lm_head weight `{}`",
-                    qualified_name(&lm_head_vb, "weight")
-                )
-            })?
-            .contiguous()?;
+        let lm_head_label = qualified_name(&lm_head_vb, "weight");
+        let mut lm_head_weight = Some(
+            lm_head_vb
+                .get((cfg.vocab_size, cfg.hidden_size), "weight")
+                .with_context(|| format!("missing lm_head weight `{}`", lm_head_label))?
+                .contiguous()?,
+        );
 
         if cfg.tie_word_embeddings {
             ensure!(
@@ -374,22 +530,63 @@ impl DeepseekLanguageModelWeights {
             );
         }
 
-        // Try runtime quantization for lm_head under the Text target.
-        let lm_q = maybe_quantize_linear(
-            &lm_head,
-            cfg.hidden_size,
-            LinearLayerGroup::Text,
-            &qualified_name(&lm_head_vb, "weight"),
-            QuantModule::LmHead,
-        )?;
-        let keep_fp = QuantizationState::global()
-            .config()
-            .keep_full_precision_weights;
-        let lm_head_weight = if lm_q.is_some() && !keep_fp {
-            None
-        } else {
-            Some(lm_head)
-        };
+        // Try offline snapshot first, falling back to runtime quantization.
+        let quant = QuantizationState::global();
+        let mut lm_q = None;
+        if let Some(snapshot) = snapshot {
+            let mut plan = SnapshotLoadPlan::default();
+            plan.push(LinearSpec::new(
+                lm_head_label.clone(),
+                cfg.vocab_size,
+                cfg.hidden_size,
+            ));
+            let mut hits = plan.execute(Some(snapshot), vb.device(), None)?;
+            if let Some(hit) = hits
+                .as_mut()
+                .and_then(|map| map.remove(&lm_head_label))
+            {
+                match hit {
+                    SnapshotLinear::Quantized { qmatmul, bias: _ } => {
+                        let path = if vb.device().is_cuda() || vb.device().is_metal() {
+                            "kernel_upcast"
+                        } else {
+                            "kernel"
+                        };
+                        trace!(
+                            tensor = lm_head_label,
+                            module = "lm_head",
+                            in_dim = cfg.hidden_size,
+                            out_dim = cfg.vocab_size,
+                            backend = backend_label(vb.device()),
+                            path,
+                            container = snapshot.container_label(),
+                            source = "snapshot",
+                            action = "quantized",
+                            "quant-linear"
+                        );
+                        quant.record_attempt(QuantModule::LmHead, QuantizationOutcome::Quantized);
+                        lm_q = Some(qmatmul);
+                        lm_head_weight = None;
+                    }
+                    SnapshotLinear::Float { weight, bias: _ } => {
+                        trace!(
+                            tensor = lm_head_label,
+                            module = "lm_head",
+                            in_dim = cfg.hidden_size,
+                            out_dim = cfg.vocab_size,
+                            backend = backend_label(vb.device()),
+                            path = "snapshot-float",
+                            container = snapshot.container_label(),
+                            source = "snapshot",
+                            action = "float",
+                            "quant-linear"
+                        );
+                        quant.record_attempt(QuantModule::LmHead, QuantizationOutcome::Fallback);
+                        lm_head_weight = Some(weight);
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             token_embedding,
@@ -399,6 +596,7 @@ impl DeepseekLanguageModelWeights {
             lm_head_q: lm_q,
             lm_out_dim: cfg.vocab_size,
             lm_in_dim: cfg.hidden_size,
+            lm_head_label,
         })
     }
 }
@@ -422,7 +620,7 @@ fn non_zero_or(value: Option<usize>, fallback: usize) -> usize {
     }
 }
 
-fn qualified_name(vb: &VarBuilder, tensor: &str) -> String {
+pub(crate) fn qualified_name(vb: &VarBuilder, tensor: &str) -> String {
     let prefix = vb.prefix();
     if prefix.is_empty() {
         tensor.to_string()
@@ -433,101 +631,4 @@ fn qualified_name(vb: &VarBuilder, tensor: &str) -> String {
     }
 }
 
-const Q8_BLOCK_SIZE: usize = 32;
-
-fn maybe_quantize_linear(
-    weight: &Tensor,
-    in_dim: usize,
-    group: LinearLayerGroup,
-    tensor_name: &str,
-    module: QuantModule,
-) -> Result<Option<Arc<QMatMul>>> {
-    let quant = QuantizationState::global();
-    let config = quant.config();
-    // GPU fast-fail: if quant is requested for this group on Metal/CUDA, error out (awaiting upstream kernel fixes).
-    if (weight.device().is_metal() || weight.device().is_cuda())
-        && config.kind.is_enabled()
-        && quant.enabled_for(group)
-    {
-        anyhow::bail!(
-            "GPU backend: runtime quantization is disabled on Metal/CUDA. Refusing to fallback.\n\
-             Disable quantization (DEEPSEEK_OCR_QUANT=none) or run on CPU.\n\
-             Context: tensor={}, group={:?}, backend={}",
-            tensor_name,
-            group,
-            crate::quantization::backend_label(&weight.device())
-        );
-    }
-    if !quant.enabled_for(group) {
-        trace!(
-            tensor = tensor_name,
-            ?group,
-            action = "disabled",
-            reason = "target not enabled",
-            targets = %config.targets,
-            "quant-linear"
-        );
-        quant.record_attempt(module, QuantizationOutcome::Fallback);
-        return Ok(None);
-    }
-    match config.kind {
-        QuantizationKind::Q8_0 => {
-            if in_dim % Q8_BLOCK_SIZE != 0 {
-                trace!(
-                    tensor = tensor_name,
-                    ?group,
-                    in_dim,
-                    block = Q8_BLOCK_SIZE,
-                    action = "fallback",
-                    reason = "unaligned",
-                    "quant-linear"
-                );
-                quant.record_attempt(module, QuantizationOutcome::Fallback);
-                return Ok(None);
-            }
-            match QTensor::quantize(weight, GgmlDType::Q8_0).and_then(QMatMul::from_qtensor) {
-                Ok(qm) => {
-                    quant.record_attempt(module, QuantizationOutcome::Quantized);
-                    trace!(
-                        tensor = tensor_name,
-                        ?group,
-                        in_dim,
-                        out_dim = weight.shape().dims()[0],
-                        from = ?weight.dtype(),
-                        to = "Q8_0",
-                        backend = backend_label(&weight.device()),
-                        action = "quantized",
-                        "quant-linear"
-                    );
-                    Ok(Some(Arc::new(qm)))
-                }
-                Err(err) => {
-                    trace!(
-                        tensor = tensor_name,
-                        ?group,
-                        in_dim,
-                        error = %err,
-                        action = "fallback",
-                        reason = "quantize_error",
-                        "quant-linear"
-                    );
-                    quant.record_attempt(module, QuantizationOutcome::Fallback);
-                    Ok(None)
-                }
-            }
-        }
-        QuantizationKind::Q4K => {
-            trace!(
-                tensor = tensor_name,
-                ?group,
-                in_dim,
-                action = "fallback",
-                reason = "q4k_unimplemented",
-                "quant-linear"
-            );
-            quant.record_attempt(module, QuantizationOutcome::Fallback);
-            Ok(None)
-        }
-        QuantizationKind::None => Ok(None),
-    }
-}
+// Runtime quantization path removed: no `maybe_quantize_linear` fallback.

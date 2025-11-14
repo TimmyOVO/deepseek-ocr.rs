@@ -15,7 +15,9 @@ use deepseek_ocr_infer_paddleocr::load_model as load_paddle_model;
 
 use crate::{
     error::ApiError,
-    resources::{ensure_config_file, ensure_tokenizer_file, prepare_weights_path},
+    resources::{
+        ensure_config_file, ensure_tokenizer_file, prepare_snapshot_path, prepare_weights_path,
+    },
 };
 
 pub type SharedModel = Arc<Mutex<Box<dyn OcrEngine>>>;
@@ -178,14 +180,19 @@ impl ModelManager {
             .config
             .model_resources(&self.fs, model_id)
             .with_context(|| format!("model `{model_id}` not found in configuration"))?;
-        let config_path = ensure_config_file(&self.fs, &resources.config, resources.kind)?;
-        let tokenizer_path = ensure_tokenizer_file(&self.fs, &resources.tokenizer, resources.kind)?;
-        let weights_path = prepare_weights_path(&self.fs, &resources.weights, resources.kind)?;
+        let config_path = ensure_config_file(&self.fs, &resources.id, &resources.config)?;
+        let tokenizer_path =
+            ensure_tokenizer_file(&self.fs, &resources.id, &resources.tokenizer)?;
+        let weights_path =
+            prepare_weights_path(&self.fs, &resources.id, &resources.weights)?;
+        let snapshot_path =
+            prepare_snapshot_path(&self.fs, &resources.id, resources.snapshot.as_ref())?;
 
         let load_args = ModelLoadArgs {
             kind: resources.kind,
             config_path: Some(&config_path),
             weights_path: Some(&weights_path),
+            snapshot_path: snapshot_path.as_deref(),
             device: self.device.clone(),
             dtype: self.dtype,
         };

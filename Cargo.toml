@@ -5,6 +5,11 @@ members = [
     "crates/cli",
     "crates/server",
     "crates/config",
+    "crates/dsq",
+    "crates/dsq-runtime",
+    "crates/dsq-writer",
+    "crates/dsq-cli",
+    "crates/dsq-models",
     "crates/infer-deepseek",
     "crates/infer-paddleocr",
 ]
@@ -17,6 +22,10 @@ serde_json = "1.0"
 deepseek-ocr-core = { path = "./crates/core" }
 deepseek-ocr-assets = { path = "./crates/assets" }
 deepseek-ocr-config = { path = "./crates/config" }
+deepseek-ocr-dsq = { path = "./crates/dsq" }
+deepseek-ocr-dsq-runtime = { path = "./crates/dsq-runtime" }
+deepseek-ocr-dsq-writer = { path = "./crates/dsq-writer" }
+deepseek-ocr-dsq-models = { path = "./crates/dsq-models" }
 tokenizers = { version = "0.22", default-features = true }
 candle-core = { version = "0.9", default-features = false }
 candle-nn = { version = "0.9", default-features = false }
@@ -26,6 +35,7 @@ tracing = "0.1"
 # Currently tracing-subscriber 0.3.20 breaks color output
 # See https://github.com/tokio-rs/tracing/issues/3378
 tracing-subscriber = { version = "=0.3.19", features = ["env-filter", "fmt", "ansi"] }
+rayon = "1.10"
 
 # [profile.release]
 # opt-level = 3
