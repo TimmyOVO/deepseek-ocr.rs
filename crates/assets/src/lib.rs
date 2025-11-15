@@ -147,11 +147,7 @@ pub fn ensure_model_weights_for(model_id: &str, target: &Path) -> Result<PathBuf
     ensure_remote_file(profile.repo_id, profile.weights, target)
 }
 
-pub fn ensure_model_snapshot_for(
-    model_id: &str,
-    dtype: &str,
-    target: &Path,
-) -> Result<PathBuf> {
+pub fn ensure_model_snapshot_for(model_id: &str, dtype: &str, target: &Path) -> Result<PathBuf> {
     let snapshot = snapshot_profile(model_id, dtype)?;
     ensure_remote_file(snapshot.repo_id, snapshot.filename, target)
 }
@@ -238,12 +234,8 @@ fn quantized_asset_profile(model_id: &str) -> Option<&'static QuantizedModelAsse
 }
 
 fn snapshot_profile(model_id: &str, dtype: &str) -> Result<&'static SnapshotAsset> {
-    let asset = quantized_asset_profile(model_id).ok_or_else(|| {
-        anyhow!(
-            "model `{}` has no quantized snapshot configured",
-            model_id
-        )
-    })?;
+    let asset = quantized_asset_profile(model_id)
+        .ok_or_else(|| anyhow!("model `{}` has no quantized snapshot configured", model_id))?;
     let snapshot = &asset.snapshot;
     if snapshot.dtype.eq_ignore_ascii_case(dtype) {
         Ok(snapshot)

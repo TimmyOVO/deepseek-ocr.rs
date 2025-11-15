@@ -5,9 +5,7 @@ use deepseek_ocr_core::tensor::gather_token_embeddings;
 
 use super::SiglipImagePatches;
 use crate::{
-    config::PaddleOcrVisionConfig,
-    snapshot::SnapshotLinearMap,
-    transformer::LinearWeights,
+    config::PaddleOcrVisionConfig, snapshot::SnapshotLinearMap, transformer::LinearWeights,
 };
 
 pub struct SiglipVisionModel {
@@ -876,14 +874,8 @@ impl VisionLinear {
         snapshot_hits: Option<&mut SnapshotLinearMap>,
         snapshot_label: Option<&'static str>,
     ) -> Result<Self> {
-        let weights = LinearWeights::load(
-            vb,
-            out_dim,
-            in_dim,
-            true,
-            snapshot_hits,
-            snapshot_label,
-        )?;
+        let weights =
+            LinearWeights::load(vb, out_dim, in_dim, true, snapshot_hits, snapshot_label)?;
         Ok(Self {
             weights,
             compute_dtype,
@@ -891,10 +883,7 @@ impl VisionLinear {
     }
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let dims = input
-            .shape()
-            .dims()
-            .to_vec();
+        let dims = input.shape().dims().to_vec();
         ensure!(!dims.is_empty(), "vision linear expects rank >= 1");
         let last = *dims.last().expect("non-empty dims");
         ensure!(

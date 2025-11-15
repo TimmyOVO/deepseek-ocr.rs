@@ -60,24 +60,24 @@ fn ensure_default_model_entries(entries: &mut BTreeMap<String, ModelEntry>) {
             kind: ModelKind::PaddleOcrVl,
             ..ModelEntry::default()
         });
-    entries.entry("deepseek-ocr-q4k".to_string()).or_insert_with(|| {
-        quantized_entry(ModelKind::Deepseek, "Q4_K")
-    });
-    entries.entry("deepseek-ocr-q6k".to_string()).or_insert_with(|| {
-        quantized_entry(ModelKind::Deepseek, "Q6_K")
-    });
-    entries.entry("deepseek-ocr-q8k".to_string()).or_insert_with(|| {
-        quantized_entry(ModelKind::Deepseek, "Q8_0")
-    });
-    entries.entry("paddleocr-vl-q4k".to_string()).or_insert_with(|| {
-        quantized_entry(ModelKind::PaddleOcrVl, "Q4_K")
-    });
-    entries.entry("paddleocr-vl-q6k".to_string()).or_insert_with(|| {
-        quantized_entry(ModelKind::PaddleOcrVl, "Q6_K")
-    });
-    entries.entry("paddleocr-vl-q8k".to_string()).or_insert_with(|| {
-        quantized_entry(ModelKind::PaddleOcrVl, "Q8_0")
-    });
+    entries
+        .entry("deepseek-ocr-q4k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q4_K"));
+    entries
+        .entry("deepseek-ocr-q6k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q6_K"));
+    entries
+        .entry("deepseek-ocr-q8k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q8_0"));
+    entries
+        .entry("paddleocr-vl-q4k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::PaddleOcrVl, "Q4_K"));
+    entries
+        .entry("paddleocr-vl-q6k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::PaddleOcrVl, "Q6_K"));
+    entries
+        .entry("paddleocr-vl-q8k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::PaddleOcrVl, "Q8_0"));
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

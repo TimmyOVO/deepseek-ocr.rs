@@ -126,7 +126,9 @@ mod tests {
                 "input_dim": 4
             }
         });
-        let adapter = AdapterRegistry::global().infer_adapter(&cfg).expect("infer adapter");
+        let adapter = AdapterRegistry::global()
+            .infer_adapter(&cfg)
+            .expect("infer adapter");
         assert_eq!(adapter.id(), "deepseek-ocr");
         let specs = adapter
             .discover(&cfg, AdapterScope::TextAndProjector)
@@ -161,6 +163,8 @@ mod tests {
         let specs = adapter
             .discover(&cfg, AdapterScope::TextAndProjector)
             .expect("discover specs");
-        assert!(specs.iter().any(|s| s.name.contains("visual.vision_model.encoder.layers.0.self_attn.q_proj")));
+        assert!(specs.iter().any(|s| s
+            .name
+            .contains("visual.vision_model.encoder.layers.0.self_attn.q_proj")));
     }
 }

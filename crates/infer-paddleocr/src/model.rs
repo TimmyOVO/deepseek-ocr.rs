@@ -1,4 +1,8 @@
-use std::{convert::TryFrom, path::{Path, PathBuf}, sync::Arc};
+use std::{
+    convert::TryFrom,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use candle_core::{DType, Device, Tensor};
@@ -91,7 +95,7 @@ impl PaddleOcrModel {
         .with_context(|| format!("failed to mmap weights at {}", resolved_weights.display()))?;
         let (mut snapshot_hits, snapshot_label) =
             load_snapshot_hits(config.as_ref(), device, *snapshot_path)
-        .context("failed to prepare snapshot hits")?;
+                .context("failed to prepare snapshot hits")?;
         let vision = SiglipVisionModel::load(
             &vb,
             &config.vision_config,
@@ -265,10 +269,8 @@ fn load_snapshot_hits(
     let Some(path) = snapshot_path else {
         return Ok((None, None));
     };
-    let snapshot =
-        snapshot::QuantizedSnapshot::load(path).with_context(|| {
-            format!("failed to load snapshot from {}", path.display())
-        })?;
+    let snapshot = snapshot::QuantizedSnapshot::load(path)
+        .with_context(|| format!("failed to load snapshot from {}", path.display()))?;
     let specs = snapshot::paddle_snapshot_specs(cfg, AdapterScope::TextAndProjector)
         .context("failed to derive Paddle snapshot specs")?;
     if specs.is_empty() {

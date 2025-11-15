@@ -349,7 +349,11 @@ mod tests {
             final_norm,
         };
         let lm_head = LinearWeights {
-            weight: Some(Tensor::zeros((cfg.vocab_size, cfg.hidden_size), DType::F32, device)?),
+            weight: Some(Tensor::zeros(
+                (cfg.vocab_size, cfg.hidden_size),
+                DType::F32,
+                device,
+            )?),
             bias: None,
             qmatmul: None,
             out_dim: cfg.vocab_size,

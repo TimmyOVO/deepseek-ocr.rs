@@ -1,6 +1,5 @@
 use rocket::{
-    Request,
-    Response,
+    Request, Response,
     fairing::{Fairing, Info, Kind},
     http::{Header, Method, Status},
 };
@@ -18,7 +17,10 @@ impl Fairing for Cors {
 
     async fn on_response<'r>(&self, req: &'r Request<'_>, res: &mut Response<'r>) {
         res.set_header(Header::new("Access-Control-Allow-Origin", "*"));
-        res.set_header(Header::new("Access-Control-Allow-Methods", "GET, POST, OPTIONS"));
+        res.set_header(Header::new(
+            "Access-Control-Allow-Methods",
+            "GET, POST, OPTIONS",
+        ));
         let allow_headers = req
             .headers()
             .get_one("Access-Control-Request-Headers")

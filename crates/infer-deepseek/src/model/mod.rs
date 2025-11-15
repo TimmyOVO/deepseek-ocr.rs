@@ -1,4 +1,8 @@
-use std::{convert::TryFrom, path::{Path, PathBuf}, sync::Arc};
+use std::{
+    convert::TryFrom,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use candle_core::{DType, Device, Tensor, shape::D};
@@ -249,12 +253,13 @@ impl ImageProjector {
         let device = layers_vb.device();
         if let Some(snapshot) = snapshot {
             let mut plan = SnapshotLoadPlan::default();
-            plan.push(LinearSpec::new(weight_label.clone(), cfg.n_embed, input_dim));
+            plan.push(LinearSpec::new(
+                weight_label.clone(),
+                cfg.n_embed,
+                input_dim,
+            ));
             let mut hits = plan.execute(Some(snapshot), device, None)?;
-            if let Some(hit) = hits
-                .as_mut()
-                .and_then(|map| map.remove(&weight_label))
-            {
+            if let Some(hit) = hits.as_mut().and_then(|map| map.remove(&weight_label)) {
                 match hit {
                     SnapshotLinear::Quantized {
                         qmatmul: qm,
@@ -826,9 +831,8 @@ impl DeepseekOcrModel {
                 path = %path.display(),
                 "snapshot requested via model registry"
             );
-            let snapshot = QuantizedSnapshot::load(path).with_context(|| {
-                format!("failed to load snapshot from {}", path.display())
-            })?;
+            let snapshot = QuantizedSnapshot::load(path)
+                .with_context(|| format!("failed to load snapshot from {}", path.display()))?;
             // No conflict checks: snapshot dtype is the single source of truth.
             let snap = Arc::new(snapshot);
             let hdr = snap.header();

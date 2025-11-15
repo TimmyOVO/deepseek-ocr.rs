@@ -7,10 +7,10 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use candle_core::{
+    quantized::{ggml_file::qtensor_from_ggml, GgmlDType, QMatMul},
     Device, Tensor,
-    quantized::{GgmlDType, QMatMul, ggml_file::qtensor_from_ggml},
 };
 use deepseek_ocr_dsq::{DsqBiasDType, DsqHeader, DsqReader, DsqRecord, DsqTensorDType};
 use half::{bf16, f16};
@@ -192,11 +192,7 @@ impl SnapshotRuntimeConfig {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v > 0)
-            .or_else(|| {
-                std::thread::available_parallelism()
-                    .ok()
-                    .map(|v| v.get())
-            })
+            .or_else(|| std::thread::available_parallelism().ok().map(|v| v.get()))
             .unwrap_or(1);
         let min_tensor_elements = env::var("DEEPSEEK_SNAPSHOT_MIN_TENSOR_ELEMENTS")
             .ok()
@@ -668,11 +664,13 @@ fn is_dsq_file(path: &Path) -> Result<bool> {
 }
 
 fn env_bool(var: &str) -> Option<bool> {
-    env::var(var).ok().and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    })
+    env::var(var)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
 }
 
 fn should_parallelize(plan: &SnapshotLoadPlan, cfg: &ParallelConfig) -> bool {

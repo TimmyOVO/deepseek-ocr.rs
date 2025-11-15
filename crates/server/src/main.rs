@@ -5,13 +5,13 @@ extern crate rocket;
 
 mod app;
 mod args;
+mod cors;
 mod error;
 mod generation;
 mod logging;
 mod models;
 mod resources;
 mod routes;
-mod cors;
 mod state;
 mod stream;
 

@@ -3,7 +3,9 @@ use deepseek_ocr_dsq::DsqTensorDType;
 use serde_json::{Map, Value};
 
 use crate::{
-    adapters::helpers::{get_optional_nonzero, get_optional_usize, get_required_usize, root_object},
+    adapters::helpers::{
+        get_optional_nonzero, get_optional_usize, get_required_usize, root_object,
+    },
     AdapterScope, LinearSpec, ModelAdapter, QuantContext,
 };
 
@@ -180,13 +182,12 @@ fn vision_encoder_specs(cfg: &Map<String, Value>) -> Result<Vec<LinearSpec>> {
         });
     }
 
-    specs
-        .push(LinearSpec {
-            name: "visual.vision_model.head.attention.in_proj_weight".to_string(),
-            out_dim: hidden_size * 3,
-            in_dim: hidden_size,
-            bias: Some("visual.vision_model.head.attention.in_proj_bias".to_string()),
-        });
+    specs.push(LinearSpec {
+        name: "visual.vision_model.head.attention.in_proj_weight".to_string(),
+        out_dim: hidden_size * 3,
+        in_dim: hidden_size,
+        bias: Some("visual.vision_model.head.attention.in_proj_bias".to_string()),
+    });
     specs.push(LinearSpec {
         name: "visual.vision_model.head.attention.out_proj.weight".to_string(),
         out_dim: hidden_size,

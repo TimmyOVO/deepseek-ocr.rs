@@ -6,8 +6,8 @@ use serde_json::to_value;
 
 use crate::config::PaddleOcrVlConfig;
 
-pub use deepseek_ocr_dsq_runtime::*;
 pub use deepseek_ocr_dsq_models::AdapterScope;
+pub use deepseek_ocr_dsq_runtime::*;
 
 /// Construct runtime `LinearSpec`s for the PaddleOCR-VL adapter scope.
 pub fn paddle_snapshot_specs(

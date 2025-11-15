@@ -181,10 +181,8 @@ impl ModelManager {
             .model_resources(&self.fs, model_id)
             .with_context(|| format!("model `{model_id}` not found in configuration"))?;
         let config_path = ensure_config_file(&self.fs, &resources.id, &resources.config)?;
-        let tokenizer_path =
-            ensure_tokenizer_file(&self.fs, &resources.id, &resources.tokenizer)?;
-        let weights_path =
-            prepare_weights_path(&self.fs, &resources.id, &resources.weights)?;
+        let tokenizer_path = ensure_tokenizer_file(&self.fs, &resources.id, &resources.tokenizer)?;
+        let weights_path = prepare_weights_path(&self.fs, &resources.id, &resources.weights)?;
         let snapshot_path =
             prepare_snapshot_path(&self.fs, &resources.id, resources.snapshot.as_ref())?;
 

@@ -2,7 +2,9 @@ use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Tensor, shape::D};
 use candle_nn::VarBuilder;
 
-use crate::{config::PaddleOcrVisionConfig, snapshot::SnapshotLinearMap, transformer::LinearWeights};
+use crate::{
+    config::PaddleOcrVisionConfig, snapshot::SnapshotLinearMap, transformer::LinearWeights,
+};
 
 pub struct SiglipProjector {
     pre_norm: ProjectorLayerNorm,
@@ -216,14 +218,8 @@ impl ProjectorLinear {
         snapshot_hits: Option<&mut SnapshotLinearMap>,
         snapshot_label: Option<&'static str>,
     ) -> Result<Self> {
-        let weights = LinearWeights::load(
-            vb,
-            out_dim,
-            in_dim,
-            true,
-            snapshot_hits,
-            snapshot_label,
-        )?;
+        let weights =
+            LinearWeights::load(vb, out_dim, in_dim, true, snapshot_hits, snapshot_label)?;
         Ok(Self {
             weights,
             compute_dtype,

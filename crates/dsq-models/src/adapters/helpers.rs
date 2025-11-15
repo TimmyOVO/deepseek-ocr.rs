@@ -21,10 +21,10 @@ pub(crate) fn get_optional_nonzero(map: &Map<String, Value>, key: &str) -> Optio
 
 pub(crate) fn value_to_usize(value: &Value) -> Option<usize> {
     match value {
-        Value::Number(num) => num
-            .as_u64()
-            .map(|v| v as usize)
-            .or_else(|| num.as_i64().and_then(|v| if v >= 0 { Some(v as usize) } else { None })),
+        Value::Number(num) => num.as_u64().map(|v| v as usize).or_else(|| {
+            num.as_i64()
+                .and_then(|v| if v >= 0 { Some(v as usize) } else { None })
+        }),
         Value::String(s) => s.parse::<usize>().ok(),
         _ => None,
     }

@@ -541,10 +541,7 @@ impl DeepseekLanguageModelWeights {
                 cfg.hidden_size,
             ));
             let mut hits = plan.execute(Some(snapshot), vb.device(), None)?;
-            if let Some(hit) = hits
-                .as_mut()
-                .and_then(|map| map.remove(&lm_head_label))
-            {
+            if let Some(hit) = hits.as_mut().and_then(|map| map.remove(&lm_head_label)) {
                 match hit {
                     SnapshotLinear::Quantized { qmatmul, bias: _ } => {
                         let path = if vb.device().is_cuda() || vb.device().is_metal() {

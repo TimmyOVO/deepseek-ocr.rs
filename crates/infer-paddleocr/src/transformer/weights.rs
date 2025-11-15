@@ -40,7 +40,10 @@ impl LinearWeights {
             .and_then(|hits| hits.remove(&label))
         {
             match hit {
-                SnapshotLinear::Quantized { qmatmul: qm, bias: snap_bias } => {
+                SnapshotLinear::Quantized {
+                    qmatmul: qm,
+                    bias: snap_bias,
+                } => {
                     trace!(
                         tensor = label,
                         backend = backend_label(device),
@@ -274,14 +277,9 @@ impl ErnieDecoderLayerWeights {
         snapshot_label: Option<&'static str>,
     ) -> Result<Self> {
         let mut snapshot_hits = snapshot_hits;
-        let attention = ErnieAttentionWeights::load(
-            vb,
-            cfg,
-            snapshot_hits.as_deref_mut(),
-            snapshot_label,
-        )?;
-        let mlp =
-            ErnieMlpWeights::load(vb, cfg, snapshot_hits.as_deref_mut(), snapshot_label)?;
+        let attention =
+            ErnieAttentionWeights::load(vb, cfg, snapshot_hits.as_deref_mut(), snapshot_label)?;
+        let mlp = ErnieMlpWeights::load(vb, cfg, snapshot_hits.as_deref_mut(), snapshot_label)?;
         let input_layernorm = vb
             .pp("input_layernorm")
             .get(cfg.hidden_size, "weight")

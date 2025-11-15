@@ -58,12 +58,9 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
     );
 
     let config_path = ensure_config_file(&fs, &resources.id, &resources.config)?;
-    let tokenizer_path =
-        ensure_tokenizer_file(&fs, &resources.id, &resources.tokenizer)?;
-    let weights_path =
-        prepare_weights_path(&fs, &resources.id, &resources.weights)?;
-    let snapshot_path =
-        prepare_snapshot_path(&fs, &resources.id, resources.snapshot.as_ref())?;
+    let tokenizer_path = ensure_tokenizer_file(&fs, &resources.id, &resources.tokenizer)?;
+    let weights_path = prepare_weights_path(&fs, &resources.id, &resources.weights)?;
+    let snapshot_path = prepare_snapshot_path(&fs, &resources.id, resources.snapshot.as_ref())?;
 
     let (device, maybe_precision) =
         prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
