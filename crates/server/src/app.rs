@@ -72,6 +72,7 @@ pub async fn run(args: Args) -> Result<()> {
     );
 
     rocket::custom(figment)
+        .attach(crate::cors::Cors)
         .manage(state)
         .mount("/v1", routes::v1_routes())
         .launch()

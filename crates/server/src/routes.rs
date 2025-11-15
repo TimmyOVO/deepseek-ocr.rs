@@ -45,6 +45,11 @@ pub fn list_models(state: &State<AppState>) -> Json<ModelsResponse> {
     })
 }
 
+#[options("/models")]
+pub fn options_models() -> rocket::http::Status {
+    rocket::http::Status::Ok
+}
+
 #[post("/responses", format = "json", data = "<req>")]
 pub async fn responses_endpoint(
     state: &State<AppState>,
@@ -223,6 +228,7 @@ pub async fn chat_completions_endpoint(
 pub fn v1_routes() -> Vec<Route> {
     routes![
         health,
+        options_models,
         list_models,
         responses_endpoint,
         chat_completions_endpoint
