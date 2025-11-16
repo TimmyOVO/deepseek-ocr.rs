@@ -11,7 +11,7 @@ deepseek-ocr-core = { path = "../core" }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
 image = { workspace = true }
-fast_image_resize = "5.3.0"
+fast_image_resize = { workspace = true }
 tracing = { workspace = true }
 tokenizers = { workspace = true }
 memmap2 = "0.9"

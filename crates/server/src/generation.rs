@@ -166,7 +166,7 @@ pub fn convert_messages(
 ) -> Result<(String, Vec<DynamicImage>), ApiError> {
     match kind {
         ModelKind::Deepseek => convert_deepseek_messages(messages),
-        ModelKind::PaddleOcrVl => convert_paddle_messages(messages),
+        ModelKind::PaddleOcrVl | ModelKind::DotsOcr => convert_paddle_messages(messages),
     }
 }
 

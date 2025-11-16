@@ -12,6 +12,7 @@ candle-core = { workspace = true }
 deepseek-ocr-core = { workspace = true }
 deepseek-ocr-infer-deepseek = { path = "../infer-deepseek" }
 deepseek-ocr-infer-paddleocr = { path = "../infer-paddleocr" }
+deepseek-ocr-infer-dots = { path = "../infer-dots" }
 deepseek-ocr-assets = { workspace = true }
 deepseek-ocr-config = { workspace = true }
 tracing = { workspace = true }
@@ -26,30 +27,36 @@ memlog = [
     "deepseek-ocr-core/memlog",
     "deepseek-ocr-infer-deepseek/memlog",
     "deepseek-ocr-infer-paddleocr/memlog",
+    "deepseek-ocr-infer-dots/memlog",
 ]
 flash-attn = [
     "deepseek-ocr-core/flash-attn",
     "deepseek-ocr-infer-deepseek/flash-attn",
     "deepseek-ocr-infer-paddleocr/flash-attn",
+    "deepseek-ocr-infer-dots/flash-attn",
 ]
 metal = [
     "deepseek-ocr-core/metal",
     "deepseek-ocr-infer-deepseek/metal",
     "deepseek-ocr-infer-paddleocr/metal",
+    "deepseek-ocr-infer-dots/metal",
 ]
 accelerate = [
     "deepseek-ocr-core/accelerate",
     "deepseek-ocr-infer-deepseek/accelerate",
     "deepseek-ocr-infer-paddleocr/accelerate",
+    "deepseek-ocr-infer-dots/accelerate",
 ]
 cuda = [
     "deepseek-ocr-core/cuda",
     "deepseek-ocr-infer-deepseek/cuda",
     "deepseek-ocr-infer-paddleocr/cuda",
+    "deepseek-ocr-infer-dots/cuda",
 ]
 mkl = [
     "deepseek-ocr-core/mkl",
     "deepseek-ocr-infer-deepseek/mkl",
     "deepseek-ocr-infer-paddleocr/mkl",
+    "deepseek-ocr-infer-dots/mkl",
 ]
 bench-metrics = ["deepseek-ocr-core/bench-metrics"]

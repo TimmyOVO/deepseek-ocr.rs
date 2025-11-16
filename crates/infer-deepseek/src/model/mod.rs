@@ -56,6 +56,9 @@ pub fn load_model(args: ModelLoadArgs<'_>) -> Result<Box<dyn OcrEngine>> {
         ModelKind::PaddleOcrVl => Err(anyhow!(
             "ModelKind::PaddleOcrVl cannot be loaded by the Deepseek engine"
         )),
+        ModelKind::DotsOcr => Err(anyhow!(
+            "ModelKind::DotsOcr cannot be loaded by the Deepseek engine"
+        )),
     }
 }
 

@@ -1,0 +1,36 @@
+[package]
+name = "deepseek-ocr-infer-dots"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+deepseek-ocr-core = { path = "../core" }
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+image = { workspace = true }
+tokenizers = { workspace = true }
+fast_image_resize = { workspace = true }
+
+[features]
+default = []
+memlog = ["deepseek-ocr-core/memlog"]
+flash-attn = []
+metal = [
+    "candle-core/metal",
+    "candle-nn/metal",
+]
+accelerate = [
+    "candle-core/accelerate",
+    "candle-nn/accelerate",
+]
+cuda = [
+    "candle-core/cuda",
+    "candle-nn/cuda",
+]
+mkl = [
+    "candle-core/mkl",
+    "candle-nn/mkl",
+]

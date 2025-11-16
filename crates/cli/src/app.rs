@@ -18,6 +18,7 @@ use deepseek_ocr_infer_deepseek::{
     load_model as load_deepseek_model,
     quant_snapshot::{SNAPSHOT_SPEC_PATH, qtensor_bytes_supported},
 };
+use deepseek_ocr_infer_dots::load_model as load_dots_model;
 use deepseek_ocr_infer_paddleocr::load_model as load_paddle_model;
 use image::DynamicImage;
 use tokenizers::Tokenizer;
@@ -86,6 +87,7 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
     let model = match resources.kind {
         ModelKind::Deepseek => load_deepseek_model(load_args)?,
         ModelKind::PaddleOcrVl => load_paddle_model(load_args)?,
+        ModelKind::DotsOcr => load_dots_model(load_args)?,
     };
     let load_elapsed = load_start.elapsed();
     info!(

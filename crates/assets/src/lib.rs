@@ -1,12 +1,17 @@
 mod progress;
 mod providers;
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fs,
+    path::{Path, PathBuf},
+};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use deepseek_ocr_core::ModelKind;
 use once_cell::sync::OnceCell;
 use reqwest::blocking::Client;
+use serde::Deserialize;
 
 use providers::providers_in_download_order;
 
@@ -58,6 +63,14 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         config: "config.json",
         tokenizer: "tokenizer.json",
         weights: "model.safetensors",
+    },
+    ModelAsset {
+        id: "dots-ocr",
+        kind: ModelKind::DotsOcr,
+        repo_id: "rednote-hilab/dots.ocr",
+        config: "config.json",
+        tokenizer: "tokenizer.json",
+        weights: "model.safetensors.index.json",
     },
 ];
 
@@ -144,7 +157,11 @@ pub fn ensure_model_tokenizer_for(model_id: &str, target: &Path) -> Result<PathB
 
 pub fn ensure_model_weights_for(model_id: &str, target: &Path) -> Result<PathBuf> {
     let profile = asset_profile(model_id)?;
-    ensure_remote_file(profile.repo_id, profile.weights, target)
+    let path = ensure_remote_file(profile.repo_id, profile.weights, target)?;
+    if profile.weights.ends_with(".index.json") {
+        ensure_index_shards(profile.repo_id, &path)?;
+    }
+    Ok(path)
 }
 
 pub fn ensure_model_snapshot_for(model_id: &str, dtype: &str, target: &Path) -> Result<PathBuf> {
@@ -176,6 +193,44 @@ fn download_asset(repo_id: &str, remote_name: &str, target: &Path) -> Result<Pat
             remote_name
         )
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct WeightIndex {
+    weight_map: HashMap<String, String>,
+}
+
+fn ensure_index_shards(repo_id: &str, index_path: &Path) -> Result<()> {
+    let bytes = fs::read(index_path).with_context(|| {
+        format!(
+            "failed to read downloaded index at {}",
+            index_path.display()
+        )
+    })?;
+    let index: WeightIndex = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "failed to parse safetensors index at {}",
+            index_path.display()
+        )
+    })?;
+    ensure!(
+        !index.weight_map.is_empty(),
+        "index {} lists no shards",
+        index_path.display()
+    );
+    let parent = index_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut shards: BTreeSet<String> = BTreeSet::new();
+    for value in index.weight_map.values() {
+        shards.insert(value.clone());
+    }
+    for shard in &shards {
+        let local = parent.join(shard);
+        ensure_remote_file(repo_id, shard, &local)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn copy_to_target(cached: &Path, target: &Path) -> Result<()> {

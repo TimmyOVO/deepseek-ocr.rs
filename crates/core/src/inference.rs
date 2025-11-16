@@ -84,6 +84,7 @@ pub struct DecodeOutcome {
 pub enum ModelKind {
     Deepseek,
     PaddleOcrVl,
+    DotsOcr,
 }
 
 #[derive(Debug)]

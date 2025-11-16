@@ -61,6 +61,12 @@ fn ensure_default_model_entries(entries: &mut BTreeMap<String, ModelEntry>) {
             ..ModelEntry::default()
         });
     entries
+        .entry("dots-ocr".to_string())
+        .or_insert_with(|| ModelEntry {
+            kind: ModelKind::DotsOcr,
+            ..ModelEntry::default()
+        });
+    entries
         .entry("deepseek-ocr-q4k".to_string())
         .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q4_K"));
     entries

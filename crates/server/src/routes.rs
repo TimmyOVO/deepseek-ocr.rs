@@ -36,6 +36,7 @@ pub fn list_models(state: &State<AppState>) -> Json<ModelsResponse> {
             owned_by: match entry.kind {
                 ModelKind::Deepseek => "deepseek-ocr".into(),
                 ModelKind::PaddleOcrVl => "paddleocr-vl".into(),
+                ModelKind::DotsOcr => "dots-ocr".into(),
             },
         })
         .collect();

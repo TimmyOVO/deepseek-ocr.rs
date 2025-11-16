@@ -11,6 +11,7 @@ members = [
     "crates/dsq-cli",
     "crates/dsq-models",
     "crates/infer-deepseek",
+    "crates/infer-dots",
     "crates/infer-paddleocr",
 ]
 resolver = "2"
@@ -36,6 +37,7 @@ tracing = "0.1"
 # See https://github.com/tokio-rs/tracing/issues/3378
 tracing-subscriber = { version = "=0.3.19", features = ["env-filter", "fmt", "ansi"] }
 rayon = "1.10"
+fast_image_resize = "5.3"
 
 # [profile.release]
 # opt-level = 3
