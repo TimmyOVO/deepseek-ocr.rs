@@ -8,6 +8,7 @@ use candle_core::{DType, Device};
 use tokenizers::Tokenizer;
 use tracing::info;
 
+use deepseek_ocr_assets as assets;
 use deepseek_ocr_config::{AppConfig, LocalFileSystem};
 use deepseek_ocr_core::{DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings};
 use deepseek_ocr_infer_deepseek::load_model as load_deepseek_model;
@@ -186,6 +187,9 @@ impl ModelManager {
         let weights_path = prepare_weights_path(&self.fs, &resources.id, &resources.weights)?;
         let snapshot_path =
             prepare_snapshot_path(&self.fs, &resources.id, resources.snapshot.as_ref())?;
+
+        // Ensure any model-specific preprocessor config is present (e.g. dots.ocr).
+        let _ = assets::ensure_model_preprocessor_for(&resources.id, &config_path)?;
 
         let load_args = ModelLoadArgs {
             kind: resources.kind,

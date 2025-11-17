@@ -54,7 +54,24 @@ impl DotsOcrModel {
         }
 
         let config = Arc::new(load_dots_config(args.config_path)?);
-        let preprocess = DotsPreprocessConfig::load(None)?;
+        // Prefer a `preprocessor_config.json` that lives alongside the resolved
+        // `config.json` in the model cache (downloaded from the dots.ocr repo).
+        // This mirrors how DeepSeek/Paddle load their configs and avoids relying
+        // on a repo-relative path when running from installed binaries.
+        let preprocess = if let Some(cfg_path) = args.config_path {
+            if let Some(dir) = cfg_path.parent() {
+                let candidate = dir.join("preprocessor_config.json");
+                match DotsPreprocessConfig::load(Some(&candidate)) {
+                    Ok(cfg) => cfg,
+                    // Fallback to the repo-local default for development builds.
+                    Err(_) => DotsPreprocessConfig::load(None)?,
+                }
+            } else {
+                DotsPreprocessConfig::load(None)?
+            }
+        } else {
+            DotsPreprocessConfig::load(None)?
+        };
         let weights_path = args
             .weights_path
             .map(Path::to_path_buf)

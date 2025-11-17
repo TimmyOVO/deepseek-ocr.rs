@@ -43,6 +43,20 @@ impl DotsPreprocessConfig {
         Ok(raw.into())
     }
 
+    /// Helper for applying an upper bound on the effective pixel budget. This is analogous to
+    /// the `with_max_image_size` helper in the PaddleOCR-VL SigLIP pipeline: we keep the
+    /// original config as the default and only tighten `max_pixels` when a smaller target
+    /// resolution is requested via CLI/Server (`VisionSettings.image_size`).
+    pub fn with_max_image_size(mut self, image_size: u32) -> Self {
+        if image_size > 0 {
+            let max_pixels = (image_size as usize).saturating_mul(image_size as usize);
+            // Never shrink below the original min_pixels constraint; otherwise, we risk
+            // producing degenerate grids that violate the patch/merge invariants.
+            self.max_pixels = self.max_pixels.min(max_pixels.max(self.min_pixels));
+        }
+        self
+    }
+
     pub fn factor(&self) -> u32 {
         (self.patch_size * self.merge_size) as u32
     }

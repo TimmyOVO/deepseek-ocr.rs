@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use deepseek_ocr_assets as assets;
 use deepseek_ocr_config::{AppConfig, LocalFileSystem};
 use deepseek_ocr_core::{
     ModelKind, ModelLoadArgs,
@@ -62,6 +63,10 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
     let tokenizer_path = ensure_tokenizer_file(&fs, &resources.id, &resources.tokenizer)?;
     let weights_path = prepare_weights_path(&fs, &resources.id, &resources.weights)?;
     let snapshot_path = prepare_snapshot_path(&fs, &resources.id, resources.snapshot.as_ref())?;
+
+    // Ensure any model-specific preprocessor config is present next to `config.json`
+    // in the cache directory (e.g. dots.ocr `preprocessor_config.json`).
+    let _ = assets::ensure_model_preprocessor_for(&resources.id, &config_path)?;
 
     let (device, maybe_precision) =
         prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;

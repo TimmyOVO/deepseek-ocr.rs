@@ -37,6 +37,9 @@ pub struct ModelAsset {
     pub config: &'static str,
     pub tokenizer: &'static str,
     pub weights: &'static str,
+    /// Optional auxiliary preprocessor config shipped alongside the main model
+    /// assets (for example, DotsOCR's `preprocessor_config.json`).
+    pub preprocessor: Option<&'static str>,
 }
 
 #[derive(Clone, Copy)]
@@ -55,6 +58,7 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         config: "config.json",
         tokenizer: "tokenizer.json",
         weights: "model-00001-of-000001.safetensors",
+        preprocessor: None,
     },
     ModelAsset {
         id: "paddleocr-vl",
@@ -63,6 +67,7 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         config: "config.json",
         tokenizer: "tokenizer.json",
         weights: "model.safetensors",
+        preprocessor: None,
     },
     ModelAsset {
         id: "dots-ocr",
@@ -71,6 +76,7 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         config: "config.json",
         tokenizer: "tokenizer.json",
         weights: "model.safetensors.index.json",
+        preprocessor: Some("preprocessor_config.json"),
     },
 ];
 
@@ -167,6 +173,28 @@ pub fn ensure_model_weights_for(model_id: &str, target: &Path) -> Result<PathBuf
 pub fn ensure_model_snapshot_for(model_id: &str, dtype: &str, target: &Path) -> Result<PathBuf> {
     let snapshot = snapshot_profile(model_id, dtype)?;
     ensure_remote_file(snapshot.repo_id, snapshot.filename, target)
+}
+
+/// Ensure any model-specific preprocessor config (for example, DotsOCR's
+/// `preprocessor_config.json`) is present next to the resolved `config.json`
+/// in the cache directory.
+///
+/// Returns `Ok(None)` when the model does not declare a preprocessor asset.
+pub fn ensure_model_preprocessor_for(
+    model_id: &str,
+    config_path: &Path,
+) -> Result<Option<PathBuf>> {
+    let baseline = baseline_model_id(model_id);
+    let profile = asset_profile(&baseline)?;
+    let Some(name) = profile.preprocessor else {
+        return Ok(None);
+    };
+    let dir = config_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let target = dir.join(name);
+    ensure_remote_file(profile.repo_id, name, &target).map(Some)
 }
 
 fn ensure_remote_file(repo_id: &str, remote_name: &str, target: &Path) -> Result<PathBuf> {
