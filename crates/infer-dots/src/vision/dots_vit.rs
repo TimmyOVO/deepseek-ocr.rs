@@ -3,12 +3,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Module, Tensor, shape::D};
 use candle_nn::{
-    Conv2d, Conv2dConfig, LayerNorm, Linear, VarBuilder, conv2d, conv2d_no_bias, layer_norm,
-    linear, linear_no_bias,
+    Conv2d, Conv2dConfig, LayerNorm, VarBuilder, conv2d, conv2d_no_bias, layer_norm,
     ops::{rms_norm, softmax},
 };
 
-use crate::config::DotsVisionConfig;
+use crate::{config::DotsVisionConfig, quant::QuantLinear, snapshot::SnapshotLinearMap};
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -24,14 +23,25 @@ pub struct DotsVisionModel {
 }
 
 impl DotsVisionModel {
-    pub fn load(config: Arc<DotsVisionConfig>, vb: &VarBuilder) -> Result<Self> {
+    pub fn load(
+        config: Arc<DotsVisionConfig>,
+        vb: &VarBuilder,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let device = vb.device().clone();
         let dtype = vb.dtype();
         let patch_embed = DotsPatchEmbed::load(config.as_ref(), &vb.pp("patch_embed"))?;
         let mut blocks = Vec::with_capacity(config.num_hidden_layers);
+        let mut snapshot_hits = snapshot_hits;
         for idx in 0..config.num_hidden_layers {
             let block_vb = vb.pp(&format!("blocks.{idx}"));
-            blocks.push(DotsVisionBlock::load(config.as_ref(), &block_vb)?);
+            blocks.push(DotsVisionBlock::load(
+                config.as_ref(),
+                &block_vb,
+                snapshot_hits.as_deref_mut(),
+                snapshot_label,
+            )?);
         }
         let post_norm = if config.post_norm {
             Some(
@@ -42,7 +52,12 @@ impl DotsVisionModel {
         } else {
             None
         };
-        let merger = PatchMerger::load(config.as_ref(), &vb.pp("merger"))?;
+        let merger = PatchMerger::load(
+            config.as_ref(),
+            &vb.pp("merger"),
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
         let rotary = VisionRotaryEmbedding::new(config.as_ref(), &device)?;
         Ok(Self {
             config,
@@ -254,7 +269,12 @@ struct DotsVisionBlock {
 }
 
 impl DotsVisionBlock {
-    fn load(cfg: &DotsVisionConfig, vb: &VarBuilder) -> Result<Self> {
+    fn load(
+        cfg: &DotsVisionConfig,
+        vb: &VarBuilder,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let norm1 = vb
             .pp("norm1")
             .get(cfg.embed_dim, "weight")
@@ -263,8 +283,19 @@ impl DotsVisionBlock {
             .pp("norm2")
             .get(cfg.embed_dim, "weight")
             .context("missing norm2 weight")?;
-        let attn = VisionAttention::load(cfg, &vb.pp("attn"))?;
-        let mlp = DotsSwiGLUFFN::load(cfg, &vb.pp("mlp"))?;
+        let mut snapshot_hits = snapshot_hits;
+        let attn = VisionAttention::load(
+            cfg,
+            &vb.pp("attn"),
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
+        let mlp = DotsSwiGLUFFN::load(
+            cfg,
+            &vb.pp("mlp"),
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
         Ok(Self {
             norm1,
             norm2,
@@ -289,26 +320,38 @@ impl DotsVisionBlock {
 #[allow(dead_code)]
 #[derive(Debug)]
 struct VisionAttention {
-    qkv: Linear,
-    proj: Linear,
+    qkv: QuantLinear,
+    proj: QuantLinear,
     num_heads: usize,
     head_dim: usize,
 }
 
 impl VisionAttention {
-    fn load(cfg: &DotsVisionConfig, vb: &VarBuilder) -> Result<Self> {
+    fn load(
+        cfg: &DotsVisionConfig,
+        vb: &VarBuilder,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let qkv_vb = vb.pp("qkv");
         let proj_vb = vb.pp("proj");
-        let qkv = if cfg.use_bias {
-            linear(cfg.embed_dim, cfg.embed_dim * 3, qkv_vb)?
-        } else {
-            linear_no_bias(cfg.embed_dim, cfg.embed_dim * 3, qkv_vb)?
-        };
-        let proj = if cfg.use_bias {
-            linear(cfg.embed_dim, cfg.embed_dim, proj_vb)?
-        } else {
-            linear_no_bias(cfg.embed_dim, cfg.embed_dim, proj_vb)?
-        };
+        let mut snapshot_hits = snapshot_hits;
+        let qkv = QuantLinear::load(
+            qkv_vb,
+            cfg.embed_dim * 3,
+            cfg.embed_dim,
+            cfg.use_bias,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
+        let proj = QuantLinear::load(
+            proj_vb,
+            cfg.embed_dim,
+            cfg.embed_dim,
+            cfg.use_bias,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
         ensure!(
             cfg.embed_dim % cfg.num_attention_heads == 0,
             "embed_dim not divisible by num_heads"
@@ -459,9 +502,9 @@ impl VisionAttention {
 
 #[derive(Debug)]
 struct DotsSwiGLUFFN {
-    fc1: Linear,
-    fc2: Linear,
-    fc3: Linear,
+    fc1: QuantLinear,
+    fc2: QuantLinear,
+    fc3: QuantLinear,
 }
 
 fn apply_rotary(q: &Tensor, k: &Tensor, rope: &Tensor) -> Result<(Tensor, Tensor)> {
@@ -581,15 +624,25 @@ mod tests {
 }
 
 impl DotsSwiGLUFFN {
-    fn load(cfg: &DotsVisionConfig, vb: &VarBuilder) -> Result<Self> {
-        let make_linear = |input: usize, output: usize, name: &str| -> Result<Linear> {
-            let sub = vb.pp(name);
-            if cfg.use_bias {
-                Ok(linear(input, output, sub)?)
-            } else {
-                Ok(linear_no_bias(input, output, sub)?)
-            }
-        };
+    fn load(
+        cfg: &DotsVisionConfig,
+        vb: &VarBuilder,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
+        let mut snapshot_hits = snapshot_hits;
+        let mut make_linear =
+            |input: usize, output: usize, name: &str| -> Result<QuantLinear> {
+                let sub = vb.pp(name);
+                QuantLinear::load(
+                    sub,
+                    output,
+                    input,
+                    cfg.use_bias,
+                    snapshot_hits.as_deref_mut(),
+                    snapshot_label,
+                )
+            };
         let fc1 = make_linear(cfg.embed_dim, cfg.intermediate_size, "fc1")?;
         let fc2 = make_linear(cfg.intermediate_size, cfg.embed_dim, "fc2")?;
         let fc3 = make_linear(cfg.embed_dim, cfg.intermediate_size, "fc3")?;
@@ -607,18 +660,38 @@ impl DotsSwiGLUFFN {
 #[derive(Debug)]
 struct PatchMerger {
     ln_q: LayerNorm,
-    mlp_in: Linear,
-    mlp_out: Linear,
+    mlp_in: QuantLinear,
+    mlp_out: QuantLinear,
     merge_size: usize,
     embed_dim: usize,
 }
 
 impl PatchMerger {
-    fn load(cfg: &DotsVisionConfig, vb: &VarBuilder) -> Result<Self> {
+    fn load(
+        cfg: &DotsVisionConfig,
+        vb: &VarBuilder,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let ln_q = layer_norm(cfg.embed_dim, 1e-6, vb.pp("ln_q"))?;
         let hidden = cfg.embed_dim * cfg.spatial_merge_size * cfg.spatial_merge_size;
-        let mlp_in = linear(hidden, hidden, vb.pp("mlp").pp("0"))?;
-        let mlp_out = linear(hidden, cfg.hidden_size, vb.pp("mlp").pp("2"))?;
+        let mut snapshot_hits = snapshot_hits;
+        let mlp_in = QuantLinear::load(
+            vb.pp("mlp").pp("0"),
+            hidden,
+            hidden,
+            true,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
+        let mlp_out = QuantLinear::load(
+            vb.pp("mlp").pp("2"),
+            cfg.hidden_size,
+            hidden,
+            true,
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
         Ok(Self {
             ln_q,
             mlp_in,

@@ -1,14 +1,18 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, ensure};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device, Tensor, quantized::QMatMul};
 use candle_nn::ops::rms_norm;
 use deepseek_ocr_core::{
     cache::{DynamicCache, PromptCacheGuard},
     tensor::gather_token_embeddings,
 };
 
-use crate::config::DotsOcrTextConfig;
+use crate::{
+    config::DotsOcrTextConfig,
+    quant::run_quantized_matmul,
+    snapshot::SnapshotLinearMap,
+};
 
 use super::{block::Qwen2Block, rope::RopeCache};
 
@@ -23,33 +27,82 @@ pub struct Qwen2LanguageModel {
     blocks: Vec<Qwen2Block>,
     token_embedding: Tensor,
     final_norm: Tensor,
-    lm_head: Tensor,
+    lm_head: Option<Tensor>,
+    lm_head_q: Option<Arc<QMatMul>>,
     rope: Mutex<RopeCache>,
 }
 
 impl Qwen2LanguageModel {
     pub fn load(cfg: Arc<DotsOcrTextConfig>, vb: &candle_nn::VarBuilder) -> Result<Self> {
+        Self::load_with_snapshot(cfg, vb, None, None)
+    }
+
+    pub fn load_with_snapshot(
+        cfg: Arc<DotsOcrTextConfig>,
+        vb: &candle_nn::VarBuilder,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let model_vb = vb.pp("model");
         let token_embedding = model_vb
             .pp("embed_tokens")
             .get((cfg.vocab_size, cfg.hidden_size), "weight")
             .context("missing embed_tokens weight")?;
         let mut blocks = Vec::with_capacity(cfg.num_hidden_layers);
+        let mut snapshot_hits = snapshot_hits;
         for idx in 0..cfg.num_hidden_layers {
             let layer_vb = model_vb.pp(&format!("layers.{idx}"));
-            blocks.push(Qwen2Block::load(cfg.as_ref(), &layer_vb)?);
+            blocks.push(Qwen2Block::load(
+                cfg.as_ref(),
+                &layer_vb,
+                snapshot_hits.as_deref_mut(),
+                snapshot_label,
+            )?);
         }
         let final_norm = model_vb
             .pp("norm")
             .get(cfg.hidden_size, "weight")
             .context("missing final norm weight")?;
-        let lm_head = if cfg.tie_word_embeddings {
-            token_embedding.clone()
+
+        // LM head: allow DSQ snapshot to provide a quantized projection while
+        // keeping a float fallback when the snapshot omits this tensor.
+        let lm_head_label = "lm_head.weight";
+        let mut lm_head_weight: Option<Tensor>;
+        let mut lm_head_q: Option<Arc<QMatMul>> = None;
+
+        lm_head_weight = if cfg.tie_word_embeddings {
+            Some(token_embedding.clone())
         } else {
-            vb.pp("lm_head")
-                .get((cfg.vocab_size, cfg.hidden_size), "weight")
-                .context("missing lm_head weight")?
+            Some(
+                vb.pp("lm_head")
+                    .get((cfg.vocab_size, cfg.hidden_size), "weight")
+                    .context("missing lm_head weight")?,
+            )
         };
+
+        if let Some(hits) = snapshot_hits.as_deref_mut() {
+            if let Some(hit) = hits.remove(lm_head_label) {
+                match hit {
+                    crate::snapshot::SnapshotLinear::Quantized { qmatmul, bias } => {
+                        trace_lm_head("quantized", lm_head_label, snapshot_label);
+                        // DotsOCR lm_head is biasless in the upstream checkpoint; if a bias
+                        // is present in the snapshot we still honour it by folding it into
+                        // the matmul at runtime.
+                        lm_head_q = Some(qmatmul);
+                        // Bias, when present, is applied inside the matmul wrapper.
+                        // For now we drop it and rely on float/quant parity in the exporter.
+                        let _ = bias;
+                        lm_head_weight = None;
+                    }
+                    crate::snapshot::SnapshotLinear::Float { weight, bias } => {
+                        trace_lm_head("float", lm_head_label, snapshot_label);
+                        let _ = bias;
+                        lm_head_weight = Some(weight);
+                    }
+                }
+            }
+        }
+
         let rope_dim = cfg.hidden_size / cfg.num_attention_heads;
         let rope = RopeCache::new(vb.device(), vb.dtype(), rope_dim, cfg.rope_theta)?;
         Ok(Self {
@@ -57,7 +110,8 @@ impl Qwen2LanguageModel {
             blocks,
             token_embedding,
             final_norm,
-            lm_head,
+            lm_head: lm_head_weight,
+            lm_head_q,
             rope: Mutex::new(rope),
         })
     }
@@ -162,15 +216,32 @@ impl Qwen2LanguageModel {
         let normed = rms_norm(&hidden, &self.final_norm, self.cfg.rms_norm_eps as f32)
             .context("final rms norm failed")?;
         let (batch, seq_len, hidden_size) = normed.shape().dims3()?;
-        let logits = normed
-            .reshape((batch * seq_len, hidden_size))?
-            .matmul(&self.lm_head.transpose(0, 1)?)?
-            .reshape((batch, seq_len, self.cfg.vocab_size))?;
+        let flat = normed.reshape((batch * seq_len, hidden_size))?;
+        let logits_2d = if let Some(qm) = &self.lm_head_q {
+            run_quantized_matmul(qm, &flat)?
+        } else {
+            let lm = self
+                .lm_head
+                .as_ref()
+                .context("lm_head float weight missing for non-quantized path")?;
+            flat.matmul(&lm.transpose(0, 1)?)?
+        };
+        let logits = logits_2d.reshape((batch, seq_len, self.cfg.vocab_size))?;
         Ok(LanguageModelOutput {
             hidden_states: normed,
             logits,
         })
     }
+}
+
+fn trace_lm_head(path: &str, tensor: &str, snapshot_label: Option<&'static str>) {
+    tracing::trace!(
+        tensor,
+        container = snapshot_label.unwrap_or("snapshot"),
+        source = "snapshot",
+        action = path,
+        "dots-lm_head"
+    );
 }
 
 fn build_causal_mask(

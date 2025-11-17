@@ -21,6 +21,7 @@ use deepseek_ocr_core::{
 
 use crate::{
     config::{DotsOcrConfig, load_dots_config},
+    snapshot::{self, AdapterScope, SnapshotLinearMap, SnapshotLoadPlan},
     tokenizer::DotsImageTokens,
     transformer::Qwen2LanguageModel,
     vision::{
@@ -42,6 +43,33 @@ pub struct DotsOcrModel {
     weights_path: PathBuf,
     vision: DotsVisionModel,
     decoder: Qwen2LanguageModel,
+}
+
+fn load_snapshot_hits(
+    cfg: &DotsOcrConfig,
+    device: &Device,
+    snapshot_path: Option<&Path>,
+) -> Result<(Option<SnapshotLinearMap>, Option<&'static str>)> {
+    let Some(path) = snapshot_path else {
+        return Ok((None, None));
+    };
+    let snapshot = snapshot::QuantizedSnapshot::load(path)
+        .with_context(|| format!("failed to load snapshot from {}", path.display()))?;
+    let specs =
+        snapshot::dots_snapshot_specs(cfg, AdapterScope::TextAndProjector).with_context(|| {
+            format!(
+                "failed to derive DotsOCR snapshot specs from config (model_type={})",
+                cfg.model_type
+            )
+        })?;
+    if specs.is_empty() {
+        return Ok((None, Some(snapshot.container_label())));
+    }
+    let plan = SnapshotLoadPlan::new(specs);
+    let hits = plan
+        .execute(Some(&snapshot), device, None)?
+        .unwrap_or_default();
+    Ok((Some(hits), Some(snapshot.container_label())))
 }
 
 impl DotsOcrModel {
@@ -87,12 +115,25 @@ impl DotsOcrModel {
                     )
                 })?
         };
+        let (mut snapshot_hits, snapshot_label) =
+            load_snapshot_hits(config.as_ref(), &args.device, args.snapshot_path)
+                .context("failed to prepare DotsOCR snapshot hits")?;
         let vision_cfg = Arc::new(config.vision.clone());
         let decoder_cfg = Arc::new(config.text.clone());
-        let vision = DotsVisionModel::load(Arc::clone(&vision_cfg), &vb.pp("vision_tower"))
-            .context("failed to load Dots vision tower")?;
-        let decoder = Qwen2LanguageModel::load(Arc::clone(&decoder_cfg), &vb)
-            .context("failed to load Dots text decoder")?;
+        let vision = DotsVisionModel::load(
+            Arc::clone(&vision_cfg),
+            &vb.pp("vision_tower"),
+            snapshot_hits.as_mut(),
+            snapshot_label,
+        )
+        .context("failed to load Dots vision tower")?;
+        let decoder = Qwen2LanguageModel::load_with_snapshot(
+            Arc::clone(&decoder_cfg),
+            &vb,
+            snapshot_hits.as_mut(),
+            snapshot_label,
+        )
+        .context("failed to load Dots text decoder")?;
 
         Ok(Self {
             device: args.device,

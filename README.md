@@ -56,7 +56,7 @@ The original DeepSeek-OCR ships as a Python + Transformers stack—powerful, but
 
 ## Model Matrix 📦
 
-The workspace exposes three base model IDs plus DSQ-quantized variants for DeepSeek‑OCR and PaddleOCR‑VL:
+The workspace exposes three base model IDs plus DSQ-quantized variants for DeepSeek‑OCR, PaddleOCR‑VL, and DotsOCR:
 
 | Model ID | Base Model | Precision | Suggested Use Case |
 | --- | --- | --- | --- |
@@ -69,6 +69,9 @@ The workspace exposes three base model IDs plus DSQ-quantized variants for DeepS
 | `paddleocr-vl-q6k` | `paddleocr-vl` | `Q6_K` | Common engineering setups; blends accuracy and footprint. |
 | `paddleocr-vl-q8k` | `paddleocr-vl` | `Q8_0` | Accuracy‑leaning deployments that still want a smaller footprint than FP16. |
 | `dots-ocr` | `dots-ocr` | FP16 / BF16 (via `--dtype`) | DotsVision + Qwen2 VLM for high‑precision layout, reading order, grounding, and multilingual docs; expect high memory (30–50GB on large pages). |
+| `dots-ocr-q4k` | `dots-ocr` | `Q4_K` | Sidecar DSQ snapshot over the DotsOCR baseline; reduces weight memory/compute while keeping the heavy vision token profile unchanged. |
+| `dots-ocr-q6k` | `dots-ocr` | `Q6_K` | Recommended balance of size and quality when you already accept DotsOCR’s memory footprint but want cheaper weights. |
+| `dots-ocr-q8k` | `dots-ocr` | `Q8_0` | Accuracy‑leaning DotsOCR deployment that stays close to FP16/BF16 quality with modest memory savings. |
 
 
 ## Quick Start 🏁

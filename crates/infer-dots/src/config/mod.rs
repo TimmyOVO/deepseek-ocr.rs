@@ -4,9 +4,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DotsVisionConfig {
     pub embed_dim: usize,
     pub hidden_size: usize,
@@ -26,7 +26,7 @@ pub struct DotsVisionConfig {
     pub post_norm: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DotsOcrTextConfig {
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -48,7 +48,7 @@ pub struct DotsOcrTextConfig {
     pub vocab_size: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DotsOcrConfig {
     pub model_type: String,
     pub image_token_id: u32,
@@ -57,7 +57,7 @@ pub struct DotsOcrConfig {
     pub vision: DotsVisionConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RawDotsOcrConfig {
     model_type: String,
     attention_bias: Option<bool>,

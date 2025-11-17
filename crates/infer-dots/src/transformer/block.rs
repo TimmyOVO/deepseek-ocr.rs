@@ -1,12 +1,16 @@
 use anyhow::{Context, Result, ensure};
-use candle_core::{DType, Module, Tensor, shape::D};
+use candle_core::{DType, Tensor, shape::D};
 use candle_nn::{
-    Linear, VarBuilder, linear, linear_no_bias,
+    VarBuilder,
     ops::{rms_norm, softmax},
 };
 use deepseek_ocr_core::cache::{KvCacheChunk, KvCacheEntry};
 
-use crate::config::DotsOcrTextConfig;
+use crate::{
+    config::DotsOcrTextConfig,
+    quant::QuantLinear,
+    snapshot::SnapshotLinearMap,
+};
 
 #[derive(Debug)]
 pub struct Qwen2Block {
@@ -18,7 +22,12 @@ pub struct Qwen2Block {
 }
 
 impl Qwen2Block {
-    pub fn load(cfg: &DotsOcrTextConfig, vb: &VarBuilder) -> Result<Self> {
+    pub fn load(
+        cfg: &DotsOcrTextConfig,
+        vb: &VarBuilder,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let norm1 = vb
             .pp("input_layernorm")
             .get(cfg.hidden_size, "weight")
@@ -27,8 +36,19 @@ impl Qwen2Block {
             .pp("post_attention_layernorm")
             .get(cfg.hidden_size, "weight")
             .context("missing post_attention_layernorm weight")?;
-        let attn = Qwen2Attention::load(cfg, &vb.pp("self_attn"))?;
-        let mlp = Qwen2Mlp::load(cfg, &vb.pp("mlp"))?;
+        let mut snapshot_hits = snapshot_hits;
+        let attn = Qwen2Attention::load(
+            cfg,
+            &vb.pp("self_attn"),
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
+        let mlp = Qwen2Mlp::load(
+            cfg,
+            &vb.pp("mlp"),
+            snapshot_hits.as_deref_mut(),
+            snapshot_label,
+        )?;
         Ok(Self {
             norm1,
             norm2,
@@ -62,10 +82,10 @@ impl Qwen2Block {
 
 #[derive(Debug)]
 struct Qwen2Attention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    q_proj: QuantLinear,
+    k_proj: QuantLinear,
+    v_proj: QuantLinear,
+    o_proj: QuantLinear,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -73,18 +93,27 @@ struct Qwen2Attention {
 }
 
 impl Qwen2Attention {
-    fn load(cfg: &DotsOcrTextConfig, vb: &VarBuilder) -> Result<Self> {
+    fn load(
+        cfg: &DotsOcrTextConfig,
+        vb: &VarBuilder,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
         let bias = cfg.attention_bias;
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
         let kv_dim = cfg.num_key_value_heads.max(1) * head_dim;
-        let make_linear = |name: &str, out: usize| -> Result<Linear> {
+        let mut snapshot_hits = snapshot_hits;
+        let mut make_linear = |name: &str, out: usize| -> Result<QuantLinear> {
             let sub = vb.pp(name);
             let has_bias = bias && sub.contains_tensor("bias");
-            if has_bias {
-                Ok(linear(cfg.hidden_size, out, sub)?)
-            } else {
-                Ok(linear_no_bias(cfg.hidden_size, out, sub)?)
-            }
+            QuantLinear::load(
+                sub,
+                out,
+                cfg.hidden_size,
+                has_bias,
+                snapshot_hits.as_deref_mut(),
+                snapshot_label,
+            )
         };
         let q_proj = make_linear("q_proj", cfg.hidden_size)?;
         let k_proj = make_linear("k_proj", kv_dim)?;
@@ -205,20 +234,32 @@ impl Qwen2Attention {
 
 #[derive(Debug)]
 struct Qwen2Mlp {
-    gate: Linear,
-    up: Linear,
-    down: Linear,
+    gate: QuantLinear,
+    up: QuantLinear,
+    down: QuantLinear,
 }
 
 impl Qwen2Mlp {
-    fn load(cfg: &DotsOcrTextConfig, vb: &VarBuilder) -> Result<Self> {
-        let make_linear = |name: &str, input: usize, output: usize| -> Result<Linear> {
+    fn load(
+        cfg: &DotsOcrTextConfig,
+        vb: &VarBuilder,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_label: Option<&'static str>,
+    ) -> Result<Self> {
+        let mut snapshot_hits = snapshot_hits;
+        let mut make_linear = |name: &str, input: usize, output: usize| -> Result<QuantLinear> {
             let sub = vb.pp(name);
-            if sub.contains_tensor("bias") {
-                Ok(linear(input, output, sub)?)
-            } else {
-                Ok(linear_no_bias(input, output, sub)?)
-            }
+            // Qwen2 MLPs use biases when present in the checkpoint; we rely on
+            // VarBuilder to decide whether a bias tensor exists.
+            let has_bias = sub.contains_tensor("bias");
+            QuantLinear::load(
+                sub,
+                output,
+                input,
+                has_bias,
+                snapshot_hits.as_deref_mut(),
+                snapshot_label,
+            )
         };
         let gate = make_linear("gate_proj", cfg.hidden_size, cfg.intermediate_size)?;
         let up = make_linear("up_proj", cfg.hidden_size, cfg.intermediate_size)?;

@@ -834,11 +834,14 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "deepseek-ocr-core",
+ "deepseek-ocr-dsq-models",
+ "deepseek-ocr-dsq-runtime",
  "fast_image_resize",
  "image",
  "serde",
  "serde_json",
  "tokenizers",
+ "tracing",
 ]
 
 [[package]]

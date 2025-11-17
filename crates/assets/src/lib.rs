@@ -141,6 +141,36 @@ pub const QUANTIZED_MODEL_ASSETS: &[QuantizedModelAsset] = &[
             filename: "PaddleOCR-VL.Q8_0.dsq",
         },
     },
+    QuantizedModelAsset {
+        id: "dots-ocr-q4k",
+        kind: ModelKind::DotsOcr,
+        baseline_id: "dots-ocr",
+        snapshot: SnapshotAsset {
+            dtype: "Q4_K",
+            repo_id: "TimmyOVO/dots.ocr-Quantization",
+            filename: "dots.ocr.Q4_K.dsq",
+        },
+    },
+    QuantizedModelAsset {
+        id: "dots-ocr-q6k",
+        kind: ModelKind::DotsOcr,
+        baseline_id: "dots-ocr",
+        snapshot: SnapshotAsset {
+            dtype: "Q6_K",
+            repo_id: "TimmyOVO/dots.ocr-Quantization",
+            filename: "dots.ocr.Q6_K.dsq",
+        },
+    },
+    QuantizedModelAsset {
+        id: "dots-ocr-q8k",
+        kind: ModelKind::DotsOcr,
+        baseline_id: "dots-ocr",
+        snapshot: SnapshotAsset {
+            dtype: "Q8_0",
+            repo_id: "TimmyOVO/dots.ocr-Quantization",
+            filename: "dots.ocr.Q8_0.dsq",
+        },
+    },
 ];
 
 pub fn baseline_model_id(model_id: &str) -> String {

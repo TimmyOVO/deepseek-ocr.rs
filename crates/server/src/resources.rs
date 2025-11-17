@@ -75,6 +75,16 @@ pub fn prepare_snapshot_path(
     model_id: &str,
     snapshot: Option<&SnapshotResources>,
 ) -> Result<Option<PathBuf>> {
+    // Debug-only escape hatch mirroring the CLI behaviour: when this variable
+    // is set, the server will always use the provided snapshot path instead of
+    // resolving it via the asset registry. This is useful for validating
+    // freshly exported `.dsq` files without touching the global cache.
+    if let Ok(path_str) = std::env::var("DEEPSEEK_OCR_SNAPSHOT_OVERRIDE") {
+        if !path_str.trim().is_empty() {
+            return Ok(Some(PathBuf::from(path_str)));
+        }
+    }
+
     let Some(entry) = snapshot else {
         return Ok(None);
     };

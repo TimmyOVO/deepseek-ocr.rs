@@ -8,6 +8,9 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 deepseek-ocr-core = { path = "../core" }
+deepseek-ocr-dsq-runtime = { path = "../dsq-runtime" }
+deepseek-ocr-dsq-models = { path = "../dsq-models" }
+tracing = { workspace = true }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
 image = { workspace = true }

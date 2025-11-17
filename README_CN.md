@@ -69,8 +69,11 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 | `paddleocr-vl-q6k` | `paddleocr-vl` | `Q6_K` | 通用推荐，适合绝大多数工程部署。 |
 | `paddleocr-vl-q8k` | `paddleocr-vl` | `Q8_0` | 更偏向准确率、仍比 FP16 更节省显存。 |
 | `dots-ocr` | `dots-ocr` | FP16 / BF16（运行时 `--dtype` 决定） | DotsVision + Qwen2 统一 VLM，用于复杂版面、多语种、阅读顺序与 grounding 场景；高分辨率时内存占用可达 30–50GB。 |
+| `dots-ocr-q4k` | `dots-ocr` | `Q4_K` | 在已接受 DotsOCR 内存 profile 的前提下，通过 DSQ snapshot 对权重做强压缩；适合极端显存/内存预算。 |
+| `dots-ocr-q6k` | `dots-ocr` | `Q6_K` | 推荐的折中量化档位：在大幅节省权重占用的同时尽量贴近 FP16/BF16 质量。 |
+| `dots-ocr-q8k` | `dots-ocr` | `Q8_0` | 偏向精度的量化版本，在全精度基础上做温和压缩。 |
 
-量化模型的元数据来源于 `crates/assets/src/lib.rs:40-120` 中的 `QUANTIZED_MODEL_ASSETS`，并由 `crates/dsq-models/src/adapters` 下的适配器导出。DotsOCR 当前仅提供单一 `dots-ocr` ID，不区分精度 ID，请通过 `--dtype f16` / `--dtype bf16` 控制数值类型。
+量化模型的元数据来源于 `crates/assets/src/lib.rs:40-120` 中的 `QUANTIZED_MODEL_ASSETS`，并由 `crates/dsq-models/src/adapters` 下的适配器导出。DotsOCR 现在提供 `dots-ocr-q4k` / `dots-ocr-q6k` / `dots-ocr-q8k` 三个 DSQ 变体，这些 `.dsq` 文件都是基于原始 safetensors 的“补丁”，推理时仍然需要同时存在 baseline 权重与 snapshot。
 
 ## 快速上手 🏁
 

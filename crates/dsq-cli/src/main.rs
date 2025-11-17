@@ -17,11 +17,10 @@ use deepseek_ocr_dsq_writer::{
 };
 use half::{bf16, f16};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use memmap2::MmapOptions;
 use rayon::ThreadPoolBuilder;
 use rayon::{prelude::*, ThreadPool};
 use safetensors::{tensor::TensorView, Dtype as SafeDType, SafeTensorError, SafeTensors};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
@@ -341,12 +340,8 @@ fn run_export(args: ExportArgs) -> Result<()> {
         include_projector = scope.includes_projector(),
         "starting DSQ export"
     );
-    let weights_file = File::open(&args.weights)
-        .with_context(|| format!("failed to open weights {}", args.weights.display()))?;
-    let mmap = unsafe { MmapOptions::new().map(&weights_file) }
-        .with_context(|| format!("failed to mmap {}", args.weights.display()))?;
-    let tensors = SafeTensors::deserialize(&mmap)
-        .with_context(|| format!("failed to parse safetensors {}", args.weights.display()))?;
+    let source = TensorSource::from_path(&args.weights)
+        .with_context(|| format!("failed to prepare tensor source from {}", args.weights.display()))?;
     let metadata = SnapshotMetadata {
         candle_version: args.candle_version.clone(),
         model_id: model_id.clone(),
@@ -375,7 +370,7 @@ fn run_export(args: ExportArgs) -> Result<()> {
     };
     let stats = export_tensors(
         &mut writer,
-        &tensors,
+        &source,
         &specs,
         primary_dtype,
         args.allow_skip,
@@ -540,7 +535,7 @@ impl FloatPayload {
 
 fn process_chunk(
     chunk: &[&LinearSpec],
-    tensors: &SafeTensors<'_>,
+    source: &TensorSource,
     primary: DsqTensorDType,
     allow_skip: bool,
     progress: Option<&ProgressBar>,
@@ -549,25 +544,20 @@ fn process_chunk(
 ) -> Result<Vec<QuantTaskResult>> {
     chunk
         .par_iter()
-        .map(|spec| quantize_spec(spec, tensors, primary, allow_skip, progress, adapter, ctx))
+        .map(|spec| quantize_spec(spec, source, primary, allow_skip, progress, adapter, ctx))
         .collect()
 }
 
 fn quantize_spec(
     spec: &LinearSpec,
-    tensors: &SafeTensors<'_>,
+    source: &TensorSource,
     primary: DsqTensorDType,
     _allow_skip: bool,
     progress: Option<&ProgressBar>,
     adapter: &dyn ModelAdapter,
     ctx: &QuantContext,
 ) -> Result<QuantTaskResult> {
-    let tensor = tensors.tensor(&spec.name).map_err(|err| match err {
-        SafeTensorError::TensorNotFound(_) => {
-            anyhow::anyhow!("tensor `{}` not found in checkpoint", spec.name)
-        }
-        other => other.into(),
-    })?;
+    let tensor = source.tensor(&spec.name)?;
     validate_weight_shape(tensor.shape(), spec.out_dim, spec.in_dim)?;
     let weights = tensor_to_f32(&tensor)?;
     let expected_len = spec
@@ -583,14 +573,13 @@ fn quantize_spec(
         );
     }
     let bias = match spec.bias.as_deref() {
-        Some(name) => match tensors.tensor(name) {
-            Ok(view) => {
+        Some(name) => match source.tensor_optional(name)? {
+            Some(view) => {
                 validate_bias_shape(view.shape(), spec.out_dim)?;
                 let values = tensor_to_f32(&view)?;
                 Some(values)
             }
-            Err(SafeTensorError::TensorNotFound(_)) => None,
-            Err(err) => return Err(err.into()),
+            None => None,
         },
         None => None,
     };
@@ -601,13 +590,26 @@ fn quantize_spec(
         Ok(selection) => {
             if let Some(prev) = selection.fallback_from {
                 let reason = selection.reason.as_deref().unwrap_or("alignment mismatch");
-                warn!(
-                    tensor = %spec.name,
-                    requested = %prev,
-                    selected = %selection.dtype,
-                    reason = %reason,
-                    "auto fallback applied"
-                );
+                if let Some(pb) = progress {
+                    // Avoid interleaving progress bar rendering with warning logs.
+                    pb.suspend(|| {
+                        warn!(
+                            tensor = %spec.name,
+                            requested = %prev,
+                            selected = %selection.dtype,
+                            reason = %reason,
+                            "auto fallback applied"
+                        );
+                    });
+                } else {
+                    warn!(
+                        tensor = %spec.name,
+                        requested = %prev,
+                        selected = %selection.dtype,
+                        reason = %reason,
+                        "auto fallback applied"
+                    );
+                }
             }
             let qbytes = match selection.dtype {
                 DsqTensorDType::Q8_0 => quantize_q8_0(&weights, spec.out_dim, spec.in_dim)?,
@@ -630,13 +632,25 @@ fn quantize_spec(
         }
         Err(err) => {
             let float_dtype = select_float_dtype(tensor.dtype());
-            warn!(
-                tensor = %spec.name,
-                requested = %requested_dtype,
-                selected = %float_dtype,
-                reason = %err.message,
-                "falling back to float tensor"
-            );
+            if let Some(pb) = progress {
+                pb.suspend(|| {
+                    warn!(
+                        tensor = %spec.name,
+                        requested = %requested_dtype,
+                        selected = %float_dtype,
+                        reason = %err.message,
+                        "falling back to float tensor"
+                    );
+                });
+            } else {
+                warn!(
+                    tensor = %spec.name,
+                    requested = %requested_dtype,
+                    selected = %float_dtype,
+                    reason = %err.message,
+                    "falling back to float tensor"
+                );
+            }
             let payload = build_float_payload(
                 &tensor,
                 float_dtype,
@@ -668,7 +682,7 @@ fn load_config_value(path: &Path) -> Result<Value> {
 
 fn export_tensors(
     writer: &mut DsqWriter,
-    tensors: &SafeTensors<'_>,
+    source: &TensorSource,
     specs: &[LinearSpec],
     primary: DsqTensorDType,
     allow_skip: bool,
@@ -683,10 +697,10 @@ fn export_tensors(
     for chunk in spec_refs.chunks(chunk_size.max(1)) {
         let results = if let Some(pool) = pool {
             pool.install(|| {
-                process_chunk(chunk, tensors, primary, allow_skip, progress, adapter, ctx)
+                process_chunk(chunk, source, primary, allow_skip, progress, adapter, ctx)
             })
         } else {
-            process_chunk(chunk, tensors, primary, allow_skip, progress, adapter, ctx)
+            process_chunk(chunk, source, primary, allow_skip, progress, adapter, ctx)
         }?;
         for result in results {
             match result {
@@ -763,6 +777,175 @@ fn export_tensors(
         }
     }
     Ok(stats)
+}
+
+/// Lightweight abstraction over safetensors sources (single file or
+/// safetensors index + shards).
+struct TensorSource {
+    /// Single safetensors container (simple case).
+    single: Option<SafeTensors<'static>>,
+    /// Sharded safetensors containers keyed by tensor name.
+    sharded: Option<ShardedTensors>,
+}
+
+struct ShardedTensors {
+    /// Map from tensor name to shard file name (as stored in the index).
+    index: BTreeMap<String, String>,
+    /// Parsed safetensors containers for each shard file name.
+    shards: BTreeMap<String, SafeTensors<'static>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WeightIndex {
+    weight_map: BTreeMap<String, String>,
+}
+
+impl TensorSource {
+    fn from_path(path: &Path) -> Result<Self> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if ext == "json" {
+            let bytes = std::fs::read(path).with_context(|| {
+                format!("failed to read safetensors index from {}", path.display())
+            })?;
+            let index: WeightIndex = serde_json::from_slice(&bytes).with_context(|| {
+                format!("failed to parse safetensors index at {}", path.display())
+            })?;
+            if index.weight_map.is_empty() {
+                bail!(
+                    "safetensors index {} lists no tensors",
+                    path.display()
+                );
+            }
+            let root = path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            // Load each unique shard once and keep it alive for the duration
+            // of the export. This mirrors the single-file behaviour but works
+            // with HF-style sharded checkpoints.
+            let mut shard_containers: BTreeMap<String, SafeTensors<'static>> = BTreeMap::new();
+            let mut unique_shards = BTreeMap::<String, ()>::new();
+            for shard in index.weight_map.values() {
+                unique_shards.entry(shard.clone()).or_insert(());
+            }
+            for shard in unique_shards.keys() {
+                let shard_path = root.join(shard);
+                let data = std::fs::read(&shard_path).with_context(|| {
+                    format!("failed to read safetensors shard {}", shard_path.display())
+                })?;
+                let boxed = data.into_boxed_slice();
+                let static_bytes: &'static [u8] = Box::leak(boxed);
+                let tensors = SafeTensors::deserialize(static_bytes).with_context(|| {
+                    format!(
+                        "failed to parse safetensors shard {}",
+                        shard_path.display()
+                    )
+                })?;
+                shard_containers.insert(shard.clone(), tensors);
+            }
+            Ok(Self {
+                single: None,
+                sharded: Some(ShardedTensors {
+                    index: index.weight_map,
+                    shards: shard_containers,
+                }),
+            })
+        } else {
+            let data = std::fs::read(path)
+                .with_context(|| format!("failed to read weights {}", path.display()))?;
+            let boxed = data.into_boxed_slice();
+            let static_bytes: &'static [u8] = Box::leak(boxed);
+            let tensors = SafeTensors::deserialize(static_bytes).with_context(|| {
+                format!("failed to parse safetensors {}", path.display())
+            })?;
+            Ok(Self {
+                single: Some(tensors),
+                sharded: None,
+            })
+        }
+    }
+
+    fn tensor(&self, name: &str) -> Result<TensorView<'_>> {
+        if let Some(tensors) = &self.single {
+            return tensors.tensor(name).map_err(|err| match err {
+                SafeTensorError::TensorNotFound(_) => {
+                    anyhow::anyhow!("tensor `{}` not found in checkpoint", name)
+                }
+                other => other.into(),
+            });
+        }
+        let sharded = self
+            .sharded
+            .as_ref()
+            .context("tensor source missing sharded mapping")?;
+        let shard = sharded.index.get(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "tensor `{}` not listed in safetensors index; cannot export",
+                name
+            )
+        })?;
+        let tensors = sharded
+            .shards
+            .get(shard)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "shard `{}` for tensor `{}` missing from loaded containers",
+                    shard,
+                    name
+                )
+            })?;
+        tensors.tensor(name).map_err(|err| match err {
+            SafeTensorError::TensorNotFound(_) => {
+                anyhow::anyhow!(
+                    "tensor `{}` not found in shard {}; index may be inconsistent",
+                    name,
+                    shard
+                )
+            }
+            other => other.into(),
+        })
+    }
+
+    /// Attempt to fetch a tensor but treat missing tensors as `Ok(None)`.
+    ///
+    /// This is primarily used for optional bias vectors where some checkpoints
+    /// omit the bias entirely.
+    fn tensor_optional(&self, name: &str) -> Result<Option<TensorView<'_>>> {
+        if let Some(single) = &self.single {
+            return match single.tensor(name) {
+                Ok(view) => Ok(Some(view)),
+                Err(SafeTensorError::TensorNotFound(_)) => Ok(None),
+                Err(err) => Err(err.into()),
+            };
+        }
+        let sharded = self
+            .sharded
+            .as_ref()
+            .context("tensor source missing sharded mapping")?;
+        let shard_name = match sharded.index.get(name) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let tensors = sharded
+            .shards
+            .get(shard_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "shard `{}` for tensor `{}` missing from loaded containers",
+                    shard_name,
+                    name
+                )
+            })?;
+        match tensors.tensor(name) {
+            Ok(view) => Ok(Some(view)),
+            Err(SafeTensorError::TensorNotFound(_)) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
 }
 
 struct SelectionResult {

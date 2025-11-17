@@ -75,6 +75,16 @@ pub fn prepare_snapshot_path(
     model_id: &str,
     snapshot: Option<&SnapshotResources>,
 ) -> Result<Option<PathBuf>> {
+    // Debug-only escape hatch: when set, this environment variable forces a
+    // specific snapshot path regardless of the configured model entry. This
+    // is primarily intended for local testing of freshly exported `.dsq`
+    // artifacts.
+    if let Ok(path_str) = std::env::var("DEEPSEEK_OCR_SNAPSHOT_OVERRIDE") {
+        if !path_str.trim().is_empty() {
+            return Ok(Some(PathBuf::from(path_str)));
+        }
+    }
+
     let Some(entry) = snapshot else {
         return Ok(None);
     };

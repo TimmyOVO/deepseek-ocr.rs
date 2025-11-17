@@ -84,6 +84,15 @@ fn ensure_default_model_entries(entries: &mut BTreeMap<String, ModelEntry>) {
     entries
         .entry("paddleocr-vl-q8k".to_string())
         .or_insert_with(|| quantized_entry(ModelKind::PaddleOcrVl, "Q8_0"));
+    entries
+        .entry("dots-ocr-q4k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::DotsOcr, "Q4_K"));
+    entries
+        .entry("dots-ocr-q6k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::DotsOcr, "Q6_K"));
+    entries
+        .entry("dots-ocr-q8k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::DotsOcr, "Q8_0"));
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
