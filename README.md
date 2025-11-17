@@ -10,15 +10,17 @@ Rust implementation of the DeepSeek-OCR inference stack with a fast CLI and an O
 
 | Model | Memory footprint* | Best on | When to pick it |
 | --- | --- | --- | --- |
-| **DeepSeek‑OCR** | **≈6.3 GB** FP16 weights, **≈13 GB** RAM/VRAM with cache & activations (512-token budget) | Apple Silicon + Metal (FP16), high-VRAM NVIDIA GPUs, 32 GB+ RAM desktops | Highest accuracy, SAM+CLIP global/local context, MoE DeepSeek‑V2 decoder (3 B params, ~570 M active per token). Use when latency is secondary to quality. |
-| **PaddleOCR‑VL** | **≈4.7 GB** FP16 weights, **≈9 GB** RAM/VRAM with cache & activations | 16 GB laptops, CPU-only boxes, mid-range GPUs | Dense 0.9 B Ernie decoder with SigLIP vision tower. Faster startup, lower memory, great for batch jobs or lightweight deployments. |
+| **DeepSeek‑OCR** | **≈6.3GB** FP16 weights, **≈13GB** RAM/VRAM with cache & activations (512-token budget) | Apple Silicon + Metal (FP16), high-VRAM NVIDIA GPUs, 32GB+ RAM desktops | Highest accuracy, SAM+CLIP global/local context, MoE DeepSeek‑V2 decoder (3B params, ~570M active per token). Use when latency is secondary to quality. |
+| **PaddleOCR‑VL** | **≈4.7GB** FP16 weights, **≈9GB** RAM/VRAM with cache & activations | 16GB laptops, CPU-only boxes, mid-range GPUs | Dense 0.9B Ernie decoder with SigLIP vision tower. Faster startup, lower memory, great for batch jobs or lightweight deployments. |
+| **DotsOCR** | **≈9GB** FP16 weights, but expect **30–50GB** RAM/VRAM for high-res docs due to huge vision tokens | Apple Silicon + Metal BF16, ≥24GB CUDA cards, or 64GB RAM CPU workstations | Unified VLM (DotsVision + Qwen2) that nails layout, reading order, grounding, and multilingual math if you can tolerate the latency and memory bill. |
 
 \*Measured from the default FP16 safetensors. Runtime footprint varies with sequence length.
 
 Guidance:
 
-- **Need maximum fidelity, multi-region reasoning, or already have 16–24 GB VRAM?** Use **DeepSeek‑OCR**. The hybrid SAM+CLIP tower plus DeepSeek‑V2 MoE decoder handles complex layouts best, but expect higher memory/latency.
-- **Deploying to CPU-only nodes, 16 GB laptops, or latency-sensitive services?** Choose **PaddleOCR‑VL**. Its dense Ernie decoder (18 layers, hidden 1024) activates fewer parameters per token and keeps memory under 10 GB while staying close in quality on most docs.
+- **Need maximum fidelity, multi-region reasoning, or already have 16–24GB VRAM?** Use **DeepSeek‑OCR**. The hybrid SAM+CLIP tower plus DeepSeek‑V2 MoE decoder handles complex layouts best, but expect higher memory/latency.
+- **Deploying to CPU-only nodes, 16GB laptops, or latency-sensitive services?** Choose **PaddleOCR‑VL**. Its dense Ernie decoder (18 layers, hidden 1024) activates fewer parameters per token and keeps memory under 10GB while staying close in quality on most docs.
+- **Chasing reading-order accuracy, layout grounding, or multi-page multilingual PDFs on roomy hardware?** Pick **DotsOCR** with BF16 on Metal/CUDA. Prefill runs around 40–50 tok/s on M-series GPUs but can fall to ~12 tok/s on CPU because of the heavy vision tower.
 
 ## Why Rust? 💡
 
@@ -51,6 +53,23 @@ The original DeepSeek-OCR ships as a Python + Transformers stack—powerful, but
 - **CUDA (alpha)** – experimental support via `--features cuda` + `--device cuda --dtype f16`; expect rough edges while we finish kernel coverage.
 - **Intel MKL (preview)** – faster BLAS on x86 via `--features mkl` (install Intel oneMKL beforehand).
 - **OpenAI client compatibility** – drop-in replacement for popular SDKs; the server automatically collapses chat history to the latest user turn for OCR-friendly prompts.
+
+## Model Matrix 📦
+
+The workspace exposes three base model IDs plus DSQ-quantized variants for DeepSeek‑OCR and PaddleOCR‑VL:
+
+| Model ID | Base Model | Precision | Suggested Use Case |
+| --- | --- | --- | --- |
+| `deepseek-ocr` | `deepseek-ocr` | FP16 (select via `--dtype`) | Full-fidelity DeepSeek‑OCR stack with SAM+CLIP + MoE decoder; use when you prioritise quality on capable Metal/CUDA/CPU hosts. |
+| `deepseek-ocr-q4k` | `deepseek-ocr` | `Q4_K` | Tight VRAM, local deployments, and batch jobs that still want DeepSeek’s SAM+CLIP pipeline. |
+| `deepseek-ocr-q6k` | `deepseek-ocr` | `Q6_K` | Day‑to‑day balance of quality and size on mid‑range GPUs. |
+| `deepseek-ocr-q8k` | `deepseek-ocr` | `Q8_0` | Stay close to full‑precision quality with manageable memory savings. |
+| `paddleocr-vl` | `paddleocr-vl` | FP16 (select via `--dtype`) | Default choice for lighter hardware; 0.9B Ernie + SigLIP tower with strong doc/table OCR and low latency. |
+| `paddleocr-vl-q4k` | `paddleocr-vl` | `Q4_K` | Heavily compressed doc/table deployments with aggressive memory budgets. |
+| `paddleocr-vl-q6k` | `paddleocr-vl` | `Q6_K` | Common engineering setups; blends accuracy and footprint. |
+| `paddleocr-vl-q8k` | `paddleocr-vl` | `Q8_0` | Accuracy‑leaning deployments that still want a smaller footprint than FP16. |
+| `dots-ocr` | `dots-ocr` | FP16 / BF16 (via `--dtype`) | DotsVision + Qwen2 VLM for high‑precision layout, reading order, grounding, and multilingual docs; expect high memory (30–50GB on large pages). |
+
 
 ## Quick Start 🏁
 
@@ -176,10 +195,11 @@ Key flags:
 
 ### Switching Models
 
-The autogenerated `config.toml` now contains two model entries:
+The autogenerated `config.toml` now lists three entries:
 
 - `deepseek-ocr` (default) – the original DeepSeek vision-language stack.
 - `paddleocr-vl` – the PaddleOCR-VL 0.9B SigLIP + Ernie release.
+- `dots-ocr` – the Candle port of dots.ocr with DotsVision + Qwen2 (use BF16 on Metal/CUDA if possible; see the release matrix for memory notes).
 
 Pick which one to load via `--model`:
 
@@ -187,7 +207,7 @@ Pick which one to load via `--model`:
 deepseek-ocr-cli --model paddleocr-vl --prompt "<image> Summarise"
 ```
 
-The CLI (and server) will download the matching config/tokenizer/weights from the appropriate repository (`deepseek-ai/DeepSeek-OCR` or `PaddlePaddle/PaddleOCR-VL`) into your cache on first use. You can still override paths with `--model-config`, `--tokenizer`, or `--weights` if you maintain local fine-tunes.
+The CLI (and server) will download the matching config/tokenizer/weights from the appropriate repository (`deepseek-ai/DeepSeek-OCR`, `PaddlePaddle/PaddleOCR-VL`, or `dots-ocr`) into your cache on first use. You can still override paths with `--model-config`, `--tokenizer`, or `--weights` if you maintain local fine-tunes.
 
 ## HTTP Server ☁️
 

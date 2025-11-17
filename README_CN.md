@@ -10,15 +10,17 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 
 | 模型 | 内存占用* | 最佳硬件 | 适用场景 |
 | --- | --- | --- | --- |
-| **DeepSeek‑OCR** | **≈6.3 GB** FP16 权重，含激活/缓存约 **13 GB**（512 token） | Apple Silicon + Metal、24 GB VRAM NVIDIA、32 GB+ RAM 桌面 | 追求最高准确率、多视角文档、对延迟不敏感。SAM+CLIP 视觉 + DeepSeek‑V2 MoE（3 B 参数，单 token 激活 ≈570 M）。 |
-| **PaddleOCR‑VL** | **≈4.7 GB** FP16 权重，含激活/缓存约 **9 GB** | 16 GB 笔电、CPU-only 节点、中端 GPU | 更快冷启动，dense Ernie decoder（0.9 B）+ SigLIP 视觉，适合批量作业与轻量部署。 |
+| **DeepSeek‑OCR** | **≈6.3GB** FP16 权重，含激活/缓存约 **13GB**（512 token） | Apple Silicon + Metal、24GB VRAM NVIDIA、32GB+ RAM 桌面 | 追求最高准确率、多视角文档、对延迟不敏感。SAM+CLIP 视觉 + DeepSeek‑V2 MoE（3B 参数，单 token 激活 ≈570M）。 |
+| **PaddleOCR‑VL** | **≈4.7GB** FP16 权重，含激活/缓存约 **9GB** | 16GB 笔电、CPU-only 节点、中端 GPU | 更快冷启动，dense Ernie decoder（0.9B）+ SigLIP 视觉，适合批量作业与轻量部署。 |
+| **DotsOCR** | **≈9GB** FP16 权重，但高分辨率图像通常需要 **30–50GB** RAM/VRAM（视觉 token 数极大） | Apple Silicon + Metal BF16、≥24GB CUDA、或 64GB RAM CPU 工作站 | DotsVision + Qwen2 统一 VLM，在版面、阅读顺序、grounding、多语种公式等任务表现最好，代价是显著的内存和延迟。 |
 
 \*默认 FP16 safetensors 容量；实际资源与序列长度、是否启用 KV Cache 相关。
 
 选择建议：
 
-- **有 16–24 GB 以上 VRAM / RAM、追求极致质量？** 选 **DeepSeek‑OCR**，SAM+CLIP 全局+局部视野、DeepSeek‑V2 MoE 解码能在复杂版式中保持更高还原度，但代价是更大的显存和更高延迟。
-- **硬件预算有限或需要低延迟 / 高吞吐？** 选 **PaddleOCR‑VL**，SigLIP + dense Ernie（18 层、hidden 1024）在 10 GB 以内即可运行，CPU 模式也更易部署。
+- **有 16–24GB 以上 VRAM / RAM、追求极致质量？** 选 **DeepSeek‑OCR**，SAM+CLIP 全局+局部视野、DeepSeek‑V2 MoE 解码能在复杂版式中保持更高还原度，但代价是更大的显存和更高延迟。
+- **硬件预算有限或需要低延迟 / 高吞吐？** 选 **PaddleOCR‑VL**，SigLIP + dense Ernie（18 层、hidden 1024）在 10GB 以内即可运行，CPU 模式也更易部署。
+- **手头有充裕显存/内存，重视阅读顺序、grounding、复杂多语种 PDF？** 选 **DotsOCR**，在 Metal/CUDA 上配合 `--dtype bf16`（或 CUDA 下 `--dtype f16`）能获得更稳定的推理速度，但需接受 40 tok/s 左右预填充与数+ GB RSS 的成本。
 
 ## 为什么选择 Rust？💡
 
@@ -51,6 +53,24 @@ Rust 实现的 DeepSeek-OCR 推理栈，提供快速 CLI 与 OpenAI 兼容的 HT
 - **NVIDIA GPU（α 测试）**：构建时附加 `--features cuda` 并以 `--device cuda --dtype f16` 运行，可在 Linux/Windows 上尝鲜 CUDA 加速。
 - **Intel MKL（预览）**：安装 Intel oneMKL 后，构建时附加 `--features mkl` 以提升 x86 CPU 上的矩阵运算速度。
 - **OpenAI 客户端即插即用**：Server 端自动折叠多轮对话，只保留最新 user 指令，避免 OCR 模型被多轮上下文干扰。
+
+## 模型矩阵 📦
+
+本仓库当前暴露 3 个基础模型 ID，以及 DeepSeek‑OCR / PaddleOCR‑VL 的 DSQ 量化变体：
+
+| Model ID | Base Model | Precision | 建议使用场景 |
+| --- | --- | --- | --- |
+| `deepseek-ocr` | `deepseek-ocr` | FP16（通过 `--dtype` 选择实际精度） | 完整 DeepSeek‑OCR 管线（SAM+CLIP + MoE 解码），在 Metal/CUDA/大内存 CPU 上追求最高质量时使用。 |
+| `deepseek-ocr-q4k` | `deepseek-ocr` | `Q4_K` | 显存非常紧张、本地离线批处理等场景，在牺牲一定精度的前提下压缩模型体积。 |
+| `deepseek-ocr-q6k` | `deepseek-ocr` | `Q6_K` | 常规工程环境下的折中选择，在质量与体积之间取得平衡。 |
+| `deepseek-ocr-q8k` | `deepseek-ocr` | `Q8_0` | 希望尽量接近全精度质量，同时仍获得一定压缩收益。 |
+| `paddleocr-vl` | `paddleocr-vl` | FP16（通过 `--dtype` 选择实际精度） | 默认推荐的轻量后端：0.9B Ernie + SigLIP，在 CPU/16GB 笔电等硬件上也能流畅运行。 |
+| `paddleocr-vl-q4k` | `paddleocr-vl` | `Q4_K` | 面向大规模、强压缩的文档/表格场景，对精度要求相对较低。 |
+| `paddleocr-vl-q6k` | `paddleocr-vl` | `Q6_K` | 通用推荐，适合绝大多数工程部署。 |
+| `paddleocr-vl-q8k` | `paddleocr-vl` | `Q8_0` | 更偏向准确率、仍比 FP16 更节省显存。 |
+| `dots-ocr` | `dots-ocr` | FP16 / BF16（运行时 `--dtype` 决定） | DotsVision + Qwen2 统一 VLM，用于复杂版面、多语种、阅读顺序与 grounding 场景；高分辨率时内存占用可达 30–50GB。 |
+
+量化模型的元数据来源于 `crates/assets/src/lib.rs:40-120` 中的 `QUANTIZED_MODEL_ASSETS`，并由 `crates/dsq-models/src/adapters` 下的适配器导出。DotsOCR 当前仅提供单一 `dots-ocr` ID，不区分精度 ID，请通过 `--dtype f16` / `--dtype bf16` 控制数值类型。
 
 ## 快速上手 🏁
 
@@ -96,7 +116,7 @@ CLI 与 Server 共享同一份配置。首次启动会在系统配置目录生�
 | Windows | `%APPDATA%\deepseek-ocr\config.toml` | `%LOCALAPPDATA%\deepseek-ocr\models\<id>\…` |
 
 - 可通过 `--config /path/to/config.toml`（CLI/Server 通用）自定义路径；当文件不存在时会自动创建并写入默认内容。
-- 默认的 `config.toml` 已包含 `deepseek-ocr`（默认）与 `paddleocr-vl` 两个模型条目，可通过 `--model paddleocr-vl`（或修改 `[models].active`）在 DeepSeek 与 PaddleOCR-VL 之间即时切换。
+- 默认的 `config.toml` 已包含 `deepseek-ocr`（默认）、`paddleocr-vl` 与 `dots-ocr` 三个模型条目，可通过 `--model paddleocr-vl` / `--model dots-ocr`（或修改 `[models].active`）在后端之间即时切换；
 - 需要自定义资源位置时，可在对应 `models.entries.<id>` 下设置 `config`/`tokenizer`/`weights`，或直接在运行时使用 `--model-config`、`--tokenizer`、`--weights` 覆盖。
 - `config.toml` 中的 `[models.entries."<id>"]` 节点允许为不同模型指定独立的 `config`、`tokenizer`、`weights` 路径；若留空则使用上表所示缓存目录并按需下载。
 - 参数覆盖顺序为：命令行参数 → `config.toml` → 内置默认值。HTTP API 请求体中的字段（例如 `max_tokens`）会在该次调用中继续覆盖前述设置。
