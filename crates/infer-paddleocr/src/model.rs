@@ -353,15 +353,15 @@ impl OcrEngine for PaddleOcrModel {
         let mut rng = init_rng(params.seed);
         let mut generated = Vec::with_capacity(params.max_new_tokens);
         let mut current = select_token_id(&logits, params, &context_tokens, &mut rng)?;
-        if let Some(eos) = eos_token_id {
-            if current == eos {
-                return Ok(DecodeOutcome {
-                    text: String::new(),
-                    prompt_tokens: prompt_len,
-                    response_tokens: 0,
-                    generated_tokens: Vec::new(),
-                });
-            }
+        if let Some(eos) = eos_token_id
+            && current == eos
+        {
+            return Ok(DecodeOutcome {
+                text: String::new(),
+                prompt_tokens: prompt_len,
+                response_tokens: 0,
+                generated_tokens: Vec::new(),
+            });
         }
 
         while generated.len() < params.max_new_tokens {
@@ -370,10 +370,10 @@ impl OcrEngine for PaddleOcrModel {
             if let Some(callback) = stream {
                 callback(generated.len(), &generated);
             }
-            if let Some(eos) = eos_token_id {
-                if current == eos {
-                    break;
-                }
+            if let Some(eos) = eos_token_id
+                && current == eos
+            {
+                break;
             }
             if generated.len() >= params.max_new_tokens {
                 break;
@@ -475,15 +475,15 @@ pub(crate) fn build_prompt_tokens(
                 .encode(*segment, false)
                 .map_err(|err| anyhow!("tokenization failed: {err}"))?;
             tokens.extend(encoding.get_ids().iter().map(|&id| id as i64));
-            mask.extend(std::iter::repeat(0u8).take(encoding.len()));
+            mask.extend(std::iter::repeat_n(0u8, encoding.len()));
         }
 
         if idx < grids.len() {
             let placeholders = projector_token_count(grids[idx], merge)?;
             tokens.push(vision_start_id);
             mask.push(0);
-            tokens.extend(std::iter::repeat(image_token_id).take(placeholders));
-            mask.extend(std::iter::repeat(1u8).take(placeholders));
+            tokens.extend(std::iter::repeat_n(image_token_id, placeholders));
+            mask.extend(std::iter::repeat_n(1u8, placeholders));
             if let Some(end_id) = vision_end_id {
                 tokens.push(end_id);
                 mask.push(0);
@@ -632,7 +632,7 @@ pub(crate) fn compute_position_ids(
             per_row_positions.push(positions);
             let delta = max_val + 1 - (ids_row.len() as i64);
             deltas.push(delta);
-        } else if let Some(_) = attention_mask {
+        } else if attention_mask.is_some() {
             let (positions, max_val) = build_masked_text_positions(ids_row.len(), &mask_vec)?;
             per_row_positions.push(positions);
             let delta = max_val + 1 - (seq_len as i64);
@@ -768,8 +768,8 @@ fn build_mrope_positions_for_row(
     let mut positions = Vec::with_capacity(ids.len());
     let mut active_iter = axis_t
         .into_iter()
-        .zip(axis_h.into_iter())
-        .zip(axis_w.into_iter())
+        .zip(axis_h)
+        .zip(axis_w)
         .map(|((t, h), w)| [t, h, w]);
     for &flag in mask {
         if flag != 0 {

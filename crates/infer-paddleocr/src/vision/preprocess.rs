@@ -166,7 +166,7 @@ fn compute_grids(
 ) -> Result<(usize, usize, usize)> {
     let patch = config.patch_size;
     anyhow::ensure!(
-        height % patch == 0 && width % patch == 0,
+        height.is_multiple_of(patch) && width.is_multiple_of(patch),
         "resized dimensions ({height}, {width}) not divisible by patch size {patch}"
     );
     let grid_h = height / patch;

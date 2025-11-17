@@ -121,17 +121,16 @@ impl AppState {
         model_id: &str,
     ) -> Result<(SharedModel, Arc<Tokenizer>, String, ModelKind), ApiError> {
         {
-            if let Ok(guard) = self.current.lock() {
-                if let Some(loaded) = guard.as_ref() {
-                    if loaded.id == model_id {
-                        return Ok((
-                            Arc::clone(&loaded.model),
-                            Arc::clone(&loaded.tokenizer),
-                            loaded.id.clone(),
-                            loaded.kind,
-                        ));
-                    }
-                }
+            if let Ok(guard) = self.current.lock()
+                && let Some(loaded) = guard.as_ref()
+                && loaded.id == model_id
+            {
+                return Ok((
+                    Arc::clone(&loaded.model),
+                    Arc::clone(&loaded.tokenizer),
+                    loaded.id.clone(),
+                    loaded.kind,
+                ));
             }
         }
 

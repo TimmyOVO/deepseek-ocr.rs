@@ -40,6 +40,7 @@ pub fn supports_flash_attention(cfg: &PaddleOcrVlConfig, device: &Device, dtype:
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn attention_forward(
     ctx: &AttentionContext<'_>,
     hidden_states: &Tensor,
@@ -50,8 +51,8 @@ pub fn attention_forward(
     past_key_value: Option<&KvCacheEntry>,
     use_cache: bool,
 ) -> Result<(Tensor, Option<KvCacheChunk>)> {
-    if ctx.cfg.use_flash_attention {
-        if let Some(result) = flash_attention_forward(
+    if ctx.cfg.use_flash_attention
+        && let Some(result) = flash_attention_forward(
             ctx,
             hidden_states,
             weights,
@@ -60,9 +61,9 @@ pub fn attention_forward(
             attn_bias,
             past_key_value,
             use_cache,
-        )? {
-            return Ok(result);
-        }
+        )?
+    {
+        return Ok(result);
     }
 
     let cfg = ctx.cfg;
@@ -77,7 +78,7 @@ pub fn attention_forward(
     let num_heads = cfg.num_attention_heads;
     let num_kv_heads = cfg.resolved_num_key_value_heads();
     ensure!(
-        num_heads % num_kv_heads == 0,
+        num_heads.is_multiple_of(num_kv_heads),
         "num_attention_heads {} must be divisible by num_key_value_heads {}",
         num_heads,
         num_kv_heads
@@ -272,7 +273,7 @@ fn validate_cache_shapes(
     Ok(())
 }
 
-#[allow(unused_variables)]
+#[allow(unused_variables, clippy::too_many_arguments)]
 fn flash_attention_forward(
     ctx: &AttentionContext<'_>,
     hidden_states: &Tensor,
@@ -295,7 +296,7 @@ fn flash_attention_forward(
             past_key_value,
             use_cache,
         );
-        return Ok(None);
+        Ok(None)
     }
     #[cfg(feature = "flash-attn")]
     {

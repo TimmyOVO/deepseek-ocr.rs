@@ -189,7 +189,7 @@ impl DeepseekLanguageModel {
         let normed = rms_norm(
             &decoder_out.hidden_states,
             &self.final_layernorm,
-            self.cfg.rms_norm_eps as f32,
+            self.cfg.rms_norm_eps,
         )?;
         let (b, s, h) = normed.shape().dims3()?;
         ensure!(

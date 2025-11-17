@@ -124,7 +124,7 @@ impl LocalFileSystem {
         &self.app_name
     }
 
-    fn resolve<'a>(&'a self, path: &VirtualPath) -> Result<PathBuf> {
+    fn resolve(&self, path: &VirtualPath) -> Result<PathBuf> {
         let root = match path.namespace() {
             Namespace::Config => &self.config_root,
             Namespace::Cache => &self.cache_root,

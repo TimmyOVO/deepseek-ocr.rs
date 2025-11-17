@@ -17,7 +17,7 @@ pub struct RopeCache {
 impl RopeCache {
     pub fn new(device: &Device, dtype: DType, rope_dim: usize, theta: f64) -> Result<Self> {
         ensure!(
-            rope_dim % 2 == 0,
+            rope_dim.is_multiple_of(2),
             "rope dimension must be even (got {rope_dim})"
         );
         Ok(Self {
@@ -127,7 +127,7 @@ fn build_rope_tables(
     dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
     ensure!(
-        rope_dim % 2 == 0,
+        rope_dim.is_multiple_of(2),
         "rope dimension must be even (got {rope_dim})"
     );
     let half = rope_dim / 2;

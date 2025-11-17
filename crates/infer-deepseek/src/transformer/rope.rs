@@ -22,7 +22,7 @@ pub struct RopeCache {
 impl RopeCache {
     pub fn new(device: &Device, dtype: DType, rope_dim: usize) -> Result<Self> {
         ensure!(
-            rope_dim % 2 == 0,
+            rope_dim.is_multiple_of(2),
             "rope dimension must be even (got {rope_dim})"
         );
         let cos = Tensor::zeros((1, 1, 0, rope_dim), dtype, device)?;
@@ -167,10 +167,10 @@ fn build_rope_tables(
     dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
     ensure!(
-        rope_dim % 2 == 0,
+        rope_dim.is_multiple_of(2),
         "rope dimension must be even, got {rope_dim}"
     );
-    let base = cfg.rope_theta as f32;
+    let base = cfg.rope_theta;
     let half = rope_dim / 2;
     let mut inv_freq = Vec::with_capacity(half);
     for i in 0..half {

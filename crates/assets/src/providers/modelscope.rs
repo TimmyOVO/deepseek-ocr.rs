@@ -158,10 +158,10 @@ fn manifest_cache() -> &'static Mutex<HashMap<String, Arc<Vec<ModelScopeFile>>>>
 }
 
 fn manifest_exists(repo_id: &str) -> bool {
-    if let Some(cache) = MODELSCOPE_MANIFESTS.get() {
-        if let Ok(guard) = cache.lock() {
-            return guard.contains_key(repo_id);
-        }
+    if let Some(cache) = MODELSCOPE_MANIFESTS.get()
+        && let Ok(guard) = cache.lock()
+    {
+        return guard.contains_key(repo_id);
     }
     false
 }

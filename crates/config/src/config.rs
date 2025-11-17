@@ -16,20 +16,11 @@ use crate::fs::{VirtualFileSystem, VirtualPath};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AppConfig {
     pub models: ModelRegistry,
     pub inference: InferenceSettings,
     pub server: ServerSettings,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            models: ModelRegistry::default(),
-            inference: InferenceSettings::default(),
-            server: ServerSettings::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,9 +42,7 @@ impl Default for ModelRegistry {
 }
 
 fn ensure_default_model_entries(entries: &mut BTreeMap<String, ModelEntry>) {
-    entries
-        .entry("deepseek-ocr".to_string())
-        .or_insert_with(ModelEntry::default);
+    entries.entry("deepseek-ocr".to_string()).or_default();
     entries
         .entry("paddleocr-vl".to_string())
         .or_insert_with(|| ModelEntry {
@@ -275,10 +264,7 @@ impl AppConfig {
     pub fn apply_overrides(&mut self, overrides: &ConfigOverrides) {
         if let Some(model_id) = overrides.model_id.as_ref() {
             self.models.active = model_id.clone();
-            self.models
-                .entries
-                .entry(model_id.clone())
-                .or_insert_with(ModelEntry::default);
+            self.models.entries.entry(model_id.clone()).or_default();
         }
 
         if let Some(entry) = self.models.entries.get_mut(&self.models.active) {
@@ -517,7 +503,7 @@ impl ConfigOverride for ConfigOverrides {
     }
 }
 
-impl<'a> ConfigOverride for &'a ConfigOverrides {
+impl ConfigOverride for &ConfigOverrides {
     fn apply(self, config: &mut AppConfig) {
         config.apply_overrides(self);
     }

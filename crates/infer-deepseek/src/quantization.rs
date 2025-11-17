@@ -120,11 +120,10 @@ impl QuantizationState {
         if self.summary_logged.swap(true, Ordering::SeqCst) {
             return;
         }
-        let stats = self
+        let stats = *self
             .stats
             .lock()
-            .expect("quantization stats mutex poisoned")
-            .clone();
+            .expect("quantization stats mutex poisoned");
         info!(
             backend = backend_label(device),
             verbose = self.config.verbose_per_layer,

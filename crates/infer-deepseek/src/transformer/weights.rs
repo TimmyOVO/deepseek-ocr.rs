@@ -46,6 +46,7 @@ impl LinearWeights {
         LinearSpec::new(qualified_name(vb, "weight"), out_dim, in_dim)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn load(
         vb: &VarBuilder,
         out_dim: usize,
@@ -67,53 +68,53 @@ impl LinearWeights {
         let quant = QuantizationState::global();
         let mut qmatmul = None;
         // If snapshot hits were preloaded, prefer them regardless of env quant targets/kind.
-        if let Some(hits) = snapshot_hits {
-            if let Some(hit) = hits.remove(&label) {
-                let container = snapshot_label.unwrap_or("snapshot");
-                match hit {
-                    SnapshotLinear::Quantized { qmatmul: qm, bias } => {
-                        let path = if device.is_cuda() || device.is_metal() {
-                            "kernel_upcast"
-                        } else {
-                            "kernel"
-                        };
-                        trace!(
-                            tensor = label,
-                            ?group,
-                            in_dim,
-                            out_dim = out_dim,
-                            backend = backend_label(device),
-                            path,
-                            container,
-                            source = "snapshot",
-                            action = "quantized",
-                            "quant-linear"
-                        );
-                        quant.record_attempt(module, QuantizationOutcome::Quantized);
-                        bias_tensor = bias;
-                        qmatmul = Some(qm);
-                        weight = None;
-                    }
-                    SnapshotLinear::Float {
-                        weight: snapshot_weight,
-                        bias,
-                    } => {
-                        trace!(
-                            tensor = label,
-                            ?group,
-                            in_dim,
-                            out_dim = out_dim,
-                            backend = backend_label(device),
-                            path = "snapshot-float",
-                            container,
-                            source = "snapshot",
-                            action = "float",
-                            "quant-linear"
-                        );
-                        quant.record_attempt(module, QuantizationOutcome::Fallback);
-                        bias_tensor = bias;
-                        weight = Some(snapshot_weight);
-                    }
+        if let Some(hits) = snapshot_hits
+            && let Some(hit) = hits.remove(&label)
+        {
+            let container = snapshot_label.unwrap_or("snapshot");
+            match hit {
+                SnapshotLinear::Quantized { qmatmul: qm, bias } => {
+                    let path = if device.is_cuda() || device.is_metal() {
+                        "kernel_upcast"
+                    } else {
+                        "kernel"
+                    };
+                    trace!(
+                        tensor = label,
+                        ?group,
+                        in_dim,
+                        out_dim = out_dim,
+                        backend = backend_label(device),
+                        path,
+                        container,
+                        source = "snapshot",
+                        action = "quantized",
+                        "quant-linear"
+                    );
+                    quant.record_attempt(module, QuantizationOutcome::Quantized);
+                    bias_tensor = bias;
+                    qmatmul = Some(qm);
+                    weight = None;
+                }
+                SnapshotLinear::Float {
+                    weight: snapshot_weight,
+                    bias,
+                } => {
+                    trace!(
+                        tensor = label,
+                        ?group,
+                        in_dim,
+                        out_dim = out_dim,
+                        backend = backend_label(device),
+                        path = "snapshot-float",
+                        container,
+                        source = "snapshot",
+                        action = "float",
+                        "quant-linear"
+                    );
+                    quant.record_attempt(module, QuantizationOutcome::Fallback);
+                    bias_tensor = bias;
+                    weight = Some(snapshot_weight);
                 }
             }
         }
@@ -169,7 +170,7 @@ impl AttentionWeights {
         let hidden_size = cfg.hidden_size;
         let num_heads = cfg.num_attention_heads;
         ensure!(
-            hidden_size % num_heads == 0,
+            hidden_size.is_multiple_of(num_heads),
             "hidden_size {hidden_size} not divisible by num_attention_heads {num_heads}"
         );
         let head_dim = hidden_size / num_heads;
@@ -212,7 +213,7 @@ impl AttentionWeights {
             true,
             LinearLayerGroup::Text,
             QuantModule::TextLinear,
-            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_hits.as_mut(),
             snapshot_label,
         )?;
         let k_proj = LinearWeights::load(
@@ -222,7 +223,7 @@ impl AttentionWeights {
             true,
             LinearLayerGroup::Text,
             QuantModule::TextLinear,
-            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_hits.as_mut(),
             snapshot_label,
         )?;
         let v_proj = LinearWeights::load(
@@ -232,7 +233,7 @@ impl AttentionWeights {
             true,
             LinearLayerGroup::Text,
             QuantModule::TextLinear,
-            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_hits.as_mut(),
             snapshot_label,
         )?;
         let o_proj = LinearWeights::load(
@@ -242,7 +243,7 @@ impl AttentionWeights {
             true,
             LinearLayerGroup::Text,
             QuantModule::TextLinear,
-            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_hits.as_mut(),
             snapshot_label,
         )?;
         Ok(Self {
@@ -297,7 +298,7 @@ impl DenseMlpWeights {
             true,
             LinearLayerGroup::Text,
             QuantModule::TextLinear,
-            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_hits.as_mut(),
             snapshot_label,
         )?;
         let up_proj = LinearWeights::load(
@@ -307,7 +308,7 @@ impl DenseMlpWeights {
             true,
             LinearLayerGroup::Text,
             QuantModule::TextLinear,
-            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_hits.as_mut(),
             snapshot_label,
         )?;
         let down_proj = LinearWeights::load(
@@ -317,7 +318,7 @@ impl DenseMlpWeights {
             true,
             LinearLayerGroup::Text,
             QuantModule::TextLinear,
-            snapshot_hits.as_mut().map(|hits| hits),
+            snapshot_hits.as_mut(),
             snapshot_label,
         )?;
         Ok(Self {
@@ -607,7 +608,7 @@ fn should_use_moe(cfg: &DeepseekV2Config, layer_idx: usize) -> bool {
     if layer_idx < first_dense {
         return false;
     }
-    layer_idx % cfg.moe_layer_freq == 0
+    layer_idx.is_multiple_of(cfg.moe_layer_freq)
 }
 
 fn non_zero_or(value: Option<usize>, fallback: usize) -> usize {

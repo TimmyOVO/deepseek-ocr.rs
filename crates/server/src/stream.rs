@@ -222,10 +222,8 @@ impl StreamControllerInner {
                 created,
             } => {
                 let mut delta = json!({ "content": text });
-                if include_role {
-                    if let serde_json::Value::Object(obj) = &mut delta {
-                        obj.insert("role".into(), serde_json::Value::String("assistant".into()));
-                    }
+                if include_role && let serde_json::Value::Object(obj) = &mut delta {
+                    obj.insert("role".into(), serde_json::Value::String("assistant".into()));
                 }
                 let payload = json!({
                     "id": completion_id,

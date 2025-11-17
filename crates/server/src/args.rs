@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use deepseek_ocr_config::{AppConfig, ConfigOverride, ConfigOverrides};
+use deepseek_ocr_config::{
+    AppConfig, ConfigOverride, ConfigOverrides,
+    config::{InferenceOverride, ServerOverride},
+};
 use deepseek_ocr_core::runtime::{DeviceKind, Precision};
 
 #[derive(Parser, Debug)]
@@ -90,28 +93,36 @@ pub struct Args {
 
 impl From<&Args> for ConfigOverrides {
     fn from(args: &Args) -> Self {
-        let mut overrides = ConfigOverrides::default();
-        overrides.config_path = args.config.clone();
-        overrides.model_id = args.model.clone();
-        overrides.model_config = args.model_config.clone();
-        overrides.tokenizer = args.tokenizer.clone();
-        overrides.weights = args.weights.clone();
-        overrides.inference.device = args.device;
-        overrides.inference.precision = args.dtype;
-        overrides.inference.base_size = args.base_size;
-        overrides.inference.image_size = args.image_size;
-        overrides.inference.crop_mode = args.crop_mode;
-        overrides.inference.max_new_tokens = args.max_new_tokens;
-        overrides.inference.do_sample = args.do_sample;
-        overrides.inference.temperature = args.temperature;
-        overrides.inference.top_p = args.top_p;
-        overrides.inference.top_k = args.top_k;
-        overrides.inference.repetition_penalty = args.repetition_penalty;
-        overrides.inference.no_repeat_ngram_size = args.no_repeat_ngram_size;
-        overrides.inference.seed = args.seed;
-        overrides.server.host = args.host.clone();
-        overrides.server.port = args.port;
-        overrides
+        let inference = InferenceOverride {
+            device: args.device,
+            precision: args.dtype,
+            base_size: args.base_size,
+            image_size: args.image_size,
+            crop_mode: args.crop_mode,
+            max_new_tokens: args.max_new_tokens,
+            do_sample: args.do_sample,
+            temperature: args.temperature,
+            top_p: args.top_p,
+            top_k: args.top_k,
+            repetition_penalty: args.repetition_penalty,
+            no_repeat_ngram_size: args.no_repeat_ngram_size,
+            seed: args.seed,
+            ..Default::default()
+        };
+        let server = ServerOverride {
+            host: args.host.clone(),
+            port: args.port,
+        };
+
+        ConfigOverrides {
+            config_path: args.config.clone(),
+            model_id: args.model.clone(),
+            model_config: args.model_config.clone(),
+            tokenizer: args.tokenizer.clone(),
+            weights: args.weights.clone(),
+            inference,
+            server,
+        }
     }
 }
 

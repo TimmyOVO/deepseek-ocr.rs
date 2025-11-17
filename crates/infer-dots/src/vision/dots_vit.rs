@@ -35,7 +35,7 @@ impl DotsVisionModel {
         let mut blocks = Vec::with_capacity(config.num_hidden_layers);
         let mut snapshot_hits = snapshot_hits;
         for idx in 0..config.num_hidden_layers {
-            let block_vb = vb.pp(&format!("blocks.{idx}"));
+            let block_vb = vb.pp(format!("blocks.{idx}"));
             blocks.push(DotsVisionBlock::load(
                 config.as_ref(),
                 &block_vb,
@@ -55,7 +55,7 @@ impl DotsVisionModel {
         let merger = PatchMerger::load(
             config.as_ref(),
             &vb.pp("merger"),
-            snapshot_hits.as_deref_mut(),
+            snapshot_hits,
             snapshot_label,
         )?;
         let rotary = VisionRotaryEmbedding::new(config.as_ref(), &device)?;
@@ -117,7 +117,7 @@ impl SequenceLayout {
         let group_size = merge * merge;
         for &[t, h, w] in grid_thw {
             ensure!(
-                h as usize % merge == 0 && w as usize % merge == 0,
+                (h as usize).is_multiple_of(merge) && (w as usize).is_multiple_of(merge),
                 "grid dims {}x{} not divisible by merge {}",
                 h,
                 w,
@@ -127,7 +127,7 @@ impl SequenceLayout {
             let w = w as usize;
             let patches_per_frame = h * w;
             ensure!(
-                patches_per_frame % group_size == 0,
+                patches_per_frame.is_multiple_of(group_size),
                 "patch grid {} not divisible by merge group {}",
                 patches_per_frame,
                 group_size
@@ -188,7 +188,7 @@ impl SequenceLayout {
 fn build_frame_positions(height: usize, width: usize, merge: usize) -> Result<Vec<[u32; 2]>> {
     let mut positions = Vec::with_capacity(height * width);
     ensure!(
-        height % merge == 0 && width % merge == 0,
+        height.is_multiple_of(merge) && width.is_multiple_of(merge),
         "frame {}x{} incompatible with merge {}",
         height,
         width,
@@ -219,9 +219,11 @@ struct DotsPatchEmbed {
 
 impl DotsPatchEmbed {
     fn load(cfg: &DotsVisionConfig, vb: &VarBuilder) -> Result<Self> {
-        let mut conv_cfg = Conv2dConfig::default();
-        conv_cfg.stride = cfg.patch_size;
-        conv_cfg.padding = 0;
+        let conv_cfg = Conv2dConfig {
+            stride: cfg.patch_size,
+            padding: 0,
+            ..Default::default()
+        };
         let proj = if vb.contains_tensor("patchifier.proj.bias") {
             conv2d(
                 cfg.num_channels,
@@ -290,12 +292,7 @@ impl DotsVisionBlock {
             snapshot_hits.as_deref_mut(),
             snapshot_label,
         )?;
-        let mlp = DotsSwiGLUFFN::load(
-            cfg,
-            &vb.pp("mlp"),
-            snapshot_hits.as_deref_mut(),
-            snapshot_label,
-        )?;
+        let mlp = DotsSwiGLUFFN::load(cfg, &vb.pp("mlp"), snapshot_hits, snapshot_label)?;
         Ok(Self {
             norm1,
             norm2,
@@ -349,11 +346,11 @@ impl VisionAttention {
             cfg.embed_dim,
             cfg.embed_dim,
             cfg.use_bias,
-            snapshot_hits.as_deref_mut(),
+            snapshot_hits,
             snapshot_label,
         )?;
         ensure!(
-            cfg.embed_dim % cfg.num_attention_heads == 0,
+            cfg.embed_dim.is_multiple_of(cfg.num_attention_heads),
             "embed_dim not divisible by num_heads"
         );
         Ok(Self {
@@ -430,7 +427,7 @@ impl VisionAttention {
                 Tensor::cat(&refs, 0)?
             }
         };
-        Ok(self.proj.forward(&concatenated)?)
+        self.proj.forward(&concatenated)
     }
 
     fn forward_uniform(
@@ -496,7 +493,7 @@ impl VisionAttention {
             .reshape((frame_count, self.num_heads, frame_len, self.head_dim))?
             .transpose(1, 2)?
             .reshape((frame_count * frame_len, self.num_heads * self.head_dim))?;
-        Ok(self.proj.forward(&ctx)?)
+        self.proj.forward(&ctx)
     }
 }
 
@@ -631,18 +628,17 @@ impl DotsSwiGLUFFN {
         snapshot_label: Option<&'static str>,
     ) -> Result<Self> {
         let mut snapshot_hits = snapshot_hits;
-        let mut make_linear =
-            |input: usize, output: usize, name: &str| -> Result<QuantLinear> {
-                let sub = vb.pp(name);
-                QuantLinear::load(
-                    sub,
-                    output,
-                    input,
-                    cfg.use_bias,
-                    snapshot_hits.as_deref_mut(),
-                    snapshot_label,
-                )
-            };
+        let mut make_linear = |input: usize, output: usize, name: &str| -> Result<QuantLinear> {
+            let sub = vb.pp(name);
+            QuantLinear::load(
+                sub,
+                output,
+                input,
+                cfg.use_bias,
+                snapshot_hits.as_deref_mut(),
+                snapshot_label,
+            )
+        };
         let fc1 = make_linear(cfg.embed_dim, cfg.intermediate_size, "fc1")?;
         let fc2 = make_linear(cfg.intermediate_size, cfg.embed_dim, "fc2")?;
         let fc3 = make_linear(cfg.embed_dim, cfg.intermediate_size, "fc3")?;
@@ -653,7 +649,7 @@ impl DotsSwiGLUFFN {
         let gate = self.fc1.forward(input)?.silu()?;
         let up = self.fc3.forward(input)?;
         let hidden = gate.broadcast_mul(&up)?;
-        Ok(self.fc2.forward(&hidden)?)
+        self.fc2.forward(&hidden)
     }
 }
 
@@ -689,7 +685,7 @@ impl PatchMerger {
             cfg.hidden_size,
             hidden,
             true,
-            snapshot_hits.as_deref_mut(),
+            snapshot_hits,
             snapshot_label,
         )?;
         Ok(Self {
@@ -724,7 +720,10 @@ struct VisionRotaryEmbedding {
 impl VisionRotaryEmbedding {
     fn new(cfg: &DotsVisionConfig, device: &Device) -> Result<Self> {
         let head_dim = cfg.embed_dim / cfg.num_attention_heads;
-        ensure!(head_dim % 4 == 0, "vision head dim must be divisible by 4");
+        ensure!(
+            head_dim.is_multiple_of(4),
+            "vision head dim must be divisible by 4"
+        );
         let rope_dim = head_dim / 2;
         let axis_dim = rope_dim / 2;
         let mut inv_freq = Vec::with_capacity(axis_dim);

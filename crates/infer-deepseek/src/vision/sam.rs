@@ -390,9 +390,11 @@ impl PatchEmbed {
         patch_size: usize,
         vb: VarBuilder,
     ) -> candle_core::Result<Self> {
-        let mut config = Conv2dConfig::default();
-        config.stride = patch_size;
-        config.padding = 0;
+        let config = Conv2dConfig {
+            stride: patch_size,
+            padding: 0,
+            ..Default::default()
+        };
         let conv = conv2d(in_channels, out_channels, patch_size, config, vb.pp("proj"))?;
         Ok(Self { conv })
     }
@@ -432,8 +434,10 @@ impl SamNeck {
         let conv1 = conv2d_no_bias(embed_dim, neck_channels, 1, conv1_cfg, vb.pp("0"))?;
         let norm1 = LayerNorm2d::new(neck_channels, vb.pp("1"))?;
 
-        let mut conv2_cfg = Conv2dConfig::default();
-        conv2_cfg.padding = 1;
+        let conv2_cfg = Conv2dConfig {
+            padding: 1,
+            ..Default::default()
+        };
         let conv2 = conv2d_no_bias(neck_channels, neck_channels, 3, conv2_cfg, vb.pp("2"))?;
         let norm2 = LayerNorm2d::new(neck_channels, vb.pp("3"))?;
 
@@ -470,9 +474,11 @@ impl SamDownsample {
                 out_channels.len()
             )));
         }
-        let mut cfg = Conv2dConfig::default();
-        cfg.stride = 2;
-        cfg.padding = 1;
+        let cfg = Conv2dConfig {
+            stride: 2,
+            padding: 1,
+            ..Default::default()
+        };
         let net2 = conv2d_no_bias(in_channels, out_channels[0], 3, cfg, vb.pp("net_2"))?;
         let net3 = conv2d_no_bias(out_channels[0], out_channels[1], 3, cfg, vb.pp("net_3"))?;
         Ok(Self { net2, net3 })
@@ -513,7 +519,7 @@ fn patch_embed_shape(
     patch_size: usize,
     _embed_dim: usize,
 ) -> Result<PatchShape> {
-    if height % patch_size != 0 || width % patch_size != 0 {
+    if !height.is_multiple_of(patch_size) || !width.is_multiple_of(patch_size) {
         bail!(
             "image dimensions {}x{} must be divisible by patch size {}",
             height,
@@ -999,7 +1005,7 @@ pub fn bicubic_resize_antialiased(input: &Tensor, out_h: usize, out_w: usize) ->
             let mut acc = vec![0f32; in_w];
             for (k, &src_y) in iy[oh].iter().enumerate() {
                 let weight = wy[oh][k];
-                let row_offset = ((ch * in_h + src_y) * in_w) as usize;
+                let row_offset = (ch * in_h + src_y) * in_w;
                 for x in 0..in_w {
                     acc[x] += flat[row_offset + x] * weight;
                 }
@@ -1111,15 +1117,15 @@ fn get_rel_pos_vec(q_size: usize, k_size: usize, rel_pos: &Tensor) -> Result<Vec
         } else {
             (orig_len - 1) as f32 / (max_rel_dist - 1) as f32
         };
-        for i in 0..max_rel_dist {
+        for (i, row) in resized.iter_mut().enumerate().take(max_rel_dist) {
             let src_pos = scale * i as f32;
             let left = src_pos.floor() as usize;
             let right = (left + 1).min(orig_len - 1);
             let weight = src_pos - left as f32;
-            for d in 0..head_dim {
+            for (d, value) in row.iter_mut().enumerate().take(head_dim) {
                 let left_val = rel_data[left][d];
                 let right_val = rel_data[right][d];
-                resized[i][d] = left_val * (1.0 - weight) + right_val * weight;
+                *value = left_val * (1.0 - weight) + right_val * weight;
             }
         }
         resized

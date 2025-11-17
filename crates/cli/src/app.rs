@@ -34,6 +34,8 @@ use crate::{
     },
 };
 
+type TokenCallback = Box<dyn Fn(usize, &[i64])>;
+
 #[derive(Default)]
 struct StreamProgress {
     last_count: usize,
@@ -159,10 +161,11 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
     let progress_callback = move |count: usize, ids: &[i64]| {
         let mut delta_to_emit = None;
 
-        if count > 0 && prefill_duration_for_cb.get().is_none() {
-            if let Some(start) = start_time_for_cb.get() {
-                prefill_duration_for_cb.set(Some(start.elapsed()));
-            }
+        if count > 0
+            && prefill_duration_for_cb.get().is_none()
+            && let Some(start) = start_time_for_cb.get()
+        {
+            prefill_duration_for_cb.set(Some(start.elapsed()));
         }
 
         {
@@ -199,7 +202,7 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
         }
     };
 
-    let mut callback_holder: Option<Box<dyn Fn(usize, &[i64])>> = None;
+    let mut callback_holder: Option<TokenCallback> = None;
     if !quiet {
         callback_holder = Some(Box::new(progress_callback));
     }

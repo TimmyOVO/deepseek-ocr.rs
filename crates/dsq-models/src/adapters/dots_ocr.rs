@@ -20,7 +20,9 @@ impl ModelAdapter for DotsOcrAdapter {
         cfg.as_object()
             .and_then(|root| root.get("model_type"))
             .and_then(Value::as_str)
-            .map(|ty| ty.eq_ignore_ascii_case("dots_ocr") || ty.to_ascii_lowercase().contains("dots"))
+            .map(|ty| {
+                ty.eq_ignore_ascii_case("dots_ocr") || ty.to_ascii_lowercase().contains("dots")
+            })
             .unwrap_or(false)
     }
 

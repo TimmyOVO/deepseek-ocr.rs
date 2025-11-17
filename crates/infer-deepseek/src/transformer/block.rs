@@ -64,7 +64,7 @@ impl<'a> TransformerBlock<'a> {
         let normed = rms_norm(
             hidden_states,
             &self.weights.input_layernorm.weight,
-            self.cfg.rms_norm_eps as f32,
+            self.cfg.rms_norm_eps,
         )
         .context("input rms norm failed")?;
 
@@ -87,7 +87,7 @@ impl<'a> TransformerBlock<'a> {
         let normed = rms_norm(
             residual,
             &self.weights.post_attention_layernorm.weight,
-            self.cfg.rms_norm_eps as f32,
+            self.cfg.rms_norm_eps,
         )
         .context("post-attention rms norm failed")?;
         let MlpForwardOutput {
@@ -105,6 +105,7 @@ impl<'a> TransformerBlock<'a> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attention_forward(
     hidden_states: &Tensor,
     weights: &AttentionWeights,
@@ -119,8 +120,8 @@ fn attention_forward(
         bail!("LoRA attention path not yet implemented");
     }
 
-    if use_flash_attention {
-        if let Some(result) = flash_attention_forward(
+    if use_flash_attention
+        && let Some(result) = flash_attention_forward(
             hidden_states,
             weights,
             cfg,
@@ -128,9 +129,9 @@ fn attention_forward(
             additive_attn_bias,
             past_key_value,
             use_cache,
-        )? {
-            return Ok(result);
-        }
+        )?
+    {
+        return Ok(result);
     }
 
     let (batch, seq_len, hidden_size) = hidden_states
@@ -222,8 +223,8 @@ fn attention_forward(
         } else {
             None
         };
-        let q_rot = apply_rope(&q_rot, &cos, &sin)?;
-        let k_rot = apply_rope(&k_rot, &cos, &sin)?;
+        let q_rot = apply_rope(&q_rot, cos, sin)?;
+        let k_rot = apply_rope(&k_rot, cos, sin)?;
         q = if let Some(tail) = q_tail {
             Tensor::cat(&[q_rot, tail], D::Minus1)?
         } else {
@@ -237,7 +238,7 @@ fn attention_forward(
     }
 
     ensure!(
-        cfg.num_attention_heads % num_kv_heads == 0,
+        cfg.num_attention_heads.is_multiple_of(num_kv_heads),
         "num_attention_heads {} must be divisible by num_key_value_heads {}",
         cfg.num_attention_heads,
         num_kv_heads
@@ -381,7 +382,7 @@ fn flash_attention_forward(
             past_key_value,
             use_cache,
         );
-        return Ok(None);
+        Ok(None)
     }
     #[cfg(feature = "flash-attn")]
     {

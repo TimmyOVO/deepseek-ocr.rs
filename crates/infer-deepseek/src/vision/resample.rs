@@ -65,18 +65,18 @@ fn compute_resample_coeffs(input_size: usize, output_size: usize) -> ResampleCoe
         let ss = 1.0 / filterscale;
         coeff_row.fill(0.0);
         let mut sum = 0.0;
-        for i in 0..length {
+        for (i, coeff) in coeff_row.iter_mut().enumerate().take(length) {
             let sample_pos = xmin as f64 + i as f64;
             let weight = bicubic_kernel((sample_pos - center + 0.5) * ss);
-            coeff_row[i] = weight;
+            *coeff = weight;
             sum += weight;
         }
-        for i in length..ksize {
-            coeff_row[i] = 0.0;
+        for coeff in coeff_row.iter_mut().take(ksize).skip(length) {
+            *coeff = 0.0;
         }
         if sum != 0.0 {
-            for i in 0..length {
-                coeff_row[i] /= sum;
+            for coeff in coeff_row.iter_mut().take(length) {
+                *coeff /= sum;
             }
         }
         let coeff_row_int = &mut coeffs_int[out_index * ksize..out_index * ksize + ksize];

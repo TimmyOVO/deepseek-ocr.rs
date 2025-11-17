@@ -19,6 +19,7 @@ pub struct QuantLinear {
     pub qmatmul: Option<Arc<QMatMul>>,
     pub out_dim: usize,
     pub in_dim: usize,
+    #[allow(dead_code)]
     pub label: String,
 }
 
@@ -29,7 +30,7 @@ impl QuantLinear {
         out_dim: usize,
         in_dim: usize,
         use_bias: bool,
-        mut snapshot_hits: Option<&mut SnapshotLinearMap>,
+        snapshot_hits: Option<&mut SnapshotLinearMap>,
         snapshot_label: Option<&'static str>,
     ) -> Result<Self> {
         let label = qualified_name(&vb, "weight");
@@ -38,10 +39,7 @@ impl QuantLinear {
         let mut bias: Option<Tensor> = None;
         let mut qmatmul: Option<Arc<QMatMul>> = None;
 
-        if let Some(hit) = snapshot_hits
-            .as_deref_mut()
-            .and_then(|hits| hits.remove(&label))
-        {
+        if let Some(hit) = snapshot_hits.and_then(|hits| hits.remove(&label)) {
             match hit {
                 SnapshotLinear::Quantized {
                     qmatmul: qm,

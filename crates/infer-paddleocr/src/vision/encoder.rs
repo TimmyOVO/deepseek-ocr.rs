@@ -564,7 +564,7 @@ impl SiglipEncoderLayer {
             &vb.pp("mlp"),
             cfg,
             compute_dtype,
-            snapshot_hits.as_deref_mut(),
+            snapshot_hits,
             snapshot_label,
         )?;
         Ok(Self {
@@ -633,7 +633,7 @@ impl SiglipAttention {
             cfg.hidden_size,
             cfg.hidden_size,
             compute_dtype,
-            snapshot_hits.as_deref_mut(),
+            snapshot_hits,
             snapshot_label,
         )?;
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
@@ -720,7 +720,7 @@ impl SiglipAttention {
             .contiguous()?
             .reshape((batch, seq_len, hidden_size))?
             .to_dtype(hidden.dtype())?;
-        Ok(self.out_proj.forward(&context)?)
+        self.out_proj.forward(&context)
     }
 }
 
@@ -751,7 +751,7 @@ impl SiglipMlp {
             cfg.hidden_size,
             cfg.intermediate_size,
             compute_dtype,
-            snapshot_hits.as_deref_mut(),
+            snapshot_hits,
             snapshot_label,
         )?;
         Ok(Self { fc1, fc2 })
@@ -759,12 +759,12 @@ impl SiglipMlp {
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let hidden = gelu_pytorch_tanh(&self.fc1.forward(input)?)?;
-        Ok(self.fc2.forward(&hidden)?)
+        self.fc2.forward(&hidden)
     }
 }
 
 fn gelu_pytorch_tanh(input: &Tensor) -> Result<Tensor> {
-    const SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
     let device = input.device();
     let dtype = input.dtype();
     let shape = input.shape().clone();
@@ -971,7 +971,10 @@ fn rotate_half_local(tensor: &Tensor) -> Result<Tensor> {
     let dims = tensor.shape().dims();
     ensure!(!dims.is_empty(), "rotate_half requires tensor rank >= 1");
     let last = *dims.last().expect("checked non-empty");
-    ensure!(last % 2 == 0, "rotate_half expects even last dimension");
+    ensure!(
+        last.is_multiple_of(2),
+        "rotate_half expects even last dimension"
+    );
     let half = last / 2;
     let first = tensor.narrow(D::Minus1, 0, half)?;
     let second = tensor.narrow(D::Minus1, half, half)?;

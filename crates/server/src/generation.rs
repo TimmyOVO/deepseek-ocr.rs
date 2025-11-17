@@ -15,6 +15,8 @@ use crate::{
     stream::{StreamContext, StreamController},
 };
 
+type StreamCallback = Box<dyn Fn(usize, &[i64])>;
+
 #[derive(Debug)]
 pub struct GenerationResult {
     pub text: String,
@@ -84,7 +86,7 @@ fn generate_blocking(
         .map_err(|_| ApiError::Internal("model lock poisoned".into()))?;
     let tokenizer_ref = tokenizer.as_ref();
     let stream_controller = stream.map(|ctx| StreamController::new(Arc::clone(&tokenizer), ctx));
-    let mut callback_box: Option<Box<dyn Fn(usize, &[i64])>> = None;
+    let mut callback_box: Option<StreamCallback> = None;
     if let Some(controller) = stream_controller.as_ref() {
         controller.send_initial();
         let callback = controller.callback();

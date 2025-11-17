@@ -2,8 +2,8 @@
 
 /// Computes the suffix of `current` that differs from `previous`.
 pub fn extract_delta(previous: &str, current: &str) -> String {
-    if current.starts_with(previous) {
-        return current[previous.len()..].to_owned();
+    if let Some(delta) = current.strip_prefix(previous) {
+        return delta.to_owned();
     }
 
     let mut prefix_bytes = 0;
@@ -48,15 +48,13 @@ impl DeltaTracker {
             return raw_delta;
         }
 
-        if !is_final {
-            if let Some(idx) = raw_delta.find(char::REPLACEMENT_CHARACTER) {
-                if idx == 0 {
-                    return String::new();
-                }
-                raw_delta.truncate(idx);
-                self.previous.push_str(&raw_delta);
-                return raw_delta;
+        if !is_final && let Some(idx) = raw_delta.find(char::REPLACEMENT_CHARACTER) {
+            if idx == 0 {
+                return String::new();
             }
+            raw_delta.truncate(idx);
+            self.previous.push_str(&raw_delta);
+            return raw_delta;
         }
 
         self.previous = current.to_owned();

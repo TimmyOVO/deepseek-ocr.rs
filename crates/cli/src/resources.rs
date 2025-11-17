@@ -79,10 +79,10 @@ pub fn prepare_snapshot_path(
     // specific snapshot path regardless of the configured model entry. This
     // is primarily intended for local testing of freshly exported `.dsq`
     // artifacts.
-    if let Ok(path_str) = std::env::var("DEEPSEEK_OCR_SNAPSHOT_OVERRIDE") {
-        if !path_str.trim().is_empty() {
-            return Ok(Some(PathBuf::from(path_str)));
-        }
+    if let Ok(path_str) = std::env::var("DEEPSEEK_OCR_SNAPSHOT_OVERRIDE")
+        && !path_str.trim().is_empty()
+    {
+        return Ok(Some(PathBuf::from(path_str)));
     }
 
     let Some(entry) = snapshot else {

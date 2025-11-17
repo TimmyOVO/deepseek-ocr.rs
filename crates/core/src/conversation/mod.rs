@@ -128,17 +128,14 @@ impl ConversationTemplate {
         let seps = [self.sep.as_str(), self.sep2.as_deref().unwrap_or_default()];
         let mut buffer = String::new();
         for (idx, (_, message)) in self.messages.iter().enumerate() {
-            match message.as_ref().map(|m| m.trim()).filter(|m| !m.is_empty()) {
-                Some(content) => {
-                    if idx % 2 == 0 {
-                        buffer.push_str("<image>\n");
-                        buffer.push_str(seps[idx % 2]);
-                    } else {
-                        buffer.push_str(content);
-                        buffer.push_str(seps[idx % 2]);
-                    }
+            if let Some(content) = message.as_ref().map(|m| m.trim()).filter(|m| !m.is_empty()) {
+                if idx % 2 == 0 {
+                    buffer.push_str("<image>\n");
+                    buffer.push_str(seps[idx % 2]);
+                } else {
+                    buffer.push_str(content);
+                    buffer.push_str(seps[idx % 2]);
                 }
-                None => {}
             }
         }
         buffer

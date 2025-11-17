@@ -92,16 +92,18 @@ impl AdapterRegistry {
 }
 
 use adapters::{
-    DeepSeekOcrAdapter as DeepSeekAdapterType,
-    DotsOcrAdapter as DotsAdapterType,
+    DeepSeekOcrAdapter as DeepSeekAdapterType, DotsOcrAdapter as DotsAdapterType,
     PaddleOcrVlAdapter as PaddleAdapterType,
 };
 
 static DEEPSEEK_OCR_ADAPTER: DeepSeekAdapterType = DeepSeekAdapterType;
 static PADDLE_OCR_VL_ADAPTER: PaddleAdapterType = PaddleAdapterType;
 static DOTS_OCR_ADAPTER: DotsAdapterType = DotsAdapterType;
-static REGISTERED_ADAPTERS: [&'static dyn ModelAdapter; 3] =
-    [&DEEPSEEK_OCR_ADAPTER, &PADDLE_OCR_VL_ADAPTER, &DOTS_OCR_ADAPTER];
+static REGISTERED_ADAPTERS: [&'static dyn ModelAdapter; 3] = [
+    &DEEPSEEK_OCR_ADAPTER,
+    &PADDLE_OCR_VL_ADAPTER,
+    &DOTS_OCR_ADAPTER,
+];
 static REGISTRY: AdapterRegistry = AdapterRegistry::new(&REGISTERED_ADAPTERS);
 
 #[cfg(test)]

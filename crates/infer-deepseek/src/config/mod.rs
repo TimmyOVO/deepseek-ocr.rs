@@ -344,10 +344,10 @@ fn merge_missing(target: &mut Value, fallback: &Value) {
             }
         }
         Value::Array(target_array) => {
-            if let Value::Array(fallback_array) = fallback {
-                if target_array.is_empty() {
-                    *target = Value::Array(fallback_array.clone());
-                }
+            if let Value::Array(fallback_array) = fallback
+                && target_array.is_empty()
+            {
+                *target = Value::Array(fallback_array.clone());
             }
         }
         Value::Null => {

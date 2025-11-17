@@ -47,14 +47,14 @@ pub fn select_token_id<P: TokenSelectionParams>(
     apply_repetition_penalty(&mut adjusted, context, params.repetition_penalty());
 
     let mut filtered = adjusted.clone();
-    if let Some(ngram) = params.no_repeat_ngram_size() {
-        if ngram > 1 {
-            for token in banned_ngram_tokens(context, ngram) {
-                if let Ok(index) = usize::try_from(token) {
-                    if index < filtered.len() {
-                        filtered[index] = f32::NEG_INFINITY;
-                    }
-                }
+    if let Some(ngram) = params.no_repeat_ngram_size()
+        && ngram > 1
+    {
+        for token in banned_ngram_tokens(context, ngram) {
+            if let Ok(index) = usize::try_from(token)
+                && index < filtered.len()
+            {
+                filtered[index] = f32::NEG_INFINITY;
             }
         }
     }
@@ -67,15 +67,16 @@ pub fn select_token_id<P: TokenSelectionParams>(
             .iter()
             .map(|&v| (v as f64) / params.temperature())
             .collect();
-        if let Some(k) = params.top_k() {
-            if k > 0 && k < logits64.len() {
-                apply_top_k(&mut logits64, k);
-            }
+        if let Some(k) = params.top_k()
+            && k > 0
+            && k < logits64.len()
+        {
+            apply_top_k(&mut logits64, k);
         }
-        if let Some(top_p) = params.top_p() {
-            if (0.0..1.0).contains(&top_p) {
-                apply_top_p(&mut logits64, top_p);
-            }
+        if let Some(top_p) = params.top_p()
+            && (0.0..1.0).contains(&top_p)
+        {
+            apply_top_p(&mut logits64, top_p);
         }
         if let Some(sampled) = sample_from_logits(&logits64, rng) {
             return Ok(sampled as i64);
@@ -116,14 +117,15 @@ fn apply_repetition_penalty(scores: &mut [f32], context: &[i64], penalty: f32) {
     let penalty = penalty.max(f32::MIN_POSITIVE);
     let mut seen = HashSet::new();
     for &token in context {
-        if let Ok(index) = usize::try_from(token) {
-            if index < scores.len() && seen.insert(index) {
-                let entry = &mut scores[index];
-                if *entry > 0.0 {
-                    *entry /= penalty;
-                } else {
-                    *entry *= penalty;
-                }
+        if let Ok(index) = usize::try_from(token)
+            && index < scores.len()
+            && seen.insert(index)
+        {
+            let entry = &mut scores[index];
+            if *entry > 0.0 {
+                *entry /= penalty;
+            } else {
+                *entry *= penalty;
             }
         }
     }

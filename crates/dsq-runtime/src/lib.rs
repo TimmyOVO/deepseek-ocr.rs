@@ -446,6 +446,7 @@ impl QuantizedSnapshot {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dense_tensor(
         &self,
         name: &str,

@@ -28,7 +28,7 @@ pub fn rotate_half(tensor: &Tensor) -> Result<Tensor> {
     );
     let last = *dims.last().expect("dims non-empty");
     ensure!(
-        last % 2 == 0,
+        last.is_multiple_of(2),
         "rotate_half expects even hidden size, got {last}"
     );
     let half = last / 2;

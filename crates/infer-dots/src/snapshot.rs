@@ -41,4 +41,3 @@ pub fn dots_snapshot_specs(
         })
         .collect())
 }
-

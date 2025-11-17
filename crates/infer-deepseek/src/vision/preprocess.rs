@@ -41,10 +41,10 @@ pub fn dynamic_preprocess(
         if ratio_diff < best_ratio_diff {
             best_ratio_diff = ratio_diff;
             target_aspect_ratio = (*w_ratio, *h_ratio);
-        } else if (ratio_diff - best_ratio_diff).abs() < f64::EPSILON {
-            if area > 0.5f64 * (image_size * image_size * *w_ratio * *h_ratio) as f64 {
-                target_aspect_ratio = (*w_ratio, *h_ratio);
-            }
+        } else if (ratio_diff - best_ratio_diff).abs() < f64::EPSILON
+            && area > 0.5f64 * (image_size * image_size * *w_ratio * *h_ratio) as f64
+        {
+            target_aspect_ratio = (*w_ratio, *h_ratio);
         }
     }
 

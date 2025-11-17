@@ -125,7 +125,7 @@ impl DsqWriter {
         if self.records.iter().any(|rec| rec.name == name) {
             return Err(DsqWriterError::DuplicateTensor(name.clone()));
         }
-        if in_dim % Q8_BLOCK != 0 {
+        if !in_dim.is_multiple_of(Q8_BLOCK) {
             return Err(DsqWriterError::InvalidBlock {
                 name: name.clone(),
                 in_dim,
@@ -180,7 +180,7 @@ impl DsqWriter {
         if self.records.iter().any(|rec| rec.name == name) {
             return Err(DsqWriterError::DuplicateTensor(name.clone()));
         }
-        if in_dim % Q4K_BLOCK != 0 {
+        if !in_dim.is_multiple_of(Q4K_BLOCK) {
             return Err(DsqWriterError::InvalidBlock {
                 name: name.clone(),
                 in_dim,
@@ -235,7 +235,7 @@ impl DsqWriter {
         if self.records.iter().any(|rec| rec.name == name) {
             return Err(DsqWriterError::DuplicateTensor(name.clone()));
         }
-        if in_dim % Q6K_BLOCK != 0 {
+        if !in_dim.is_multiple_of(Q6K_BLOCK) {
             return Err(DsqWriterError::InvalidBlock {
                 name: name.clone(),
                 in_dim,
@@ -537,7 +537,7 @@ fn write_string(buf: &mut Vec<u8>, value: &str) {
 }
 
 pub fn encode_bias_values(values: &[f32]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
+    let mut buf = Vec::with_capacity(std::mem::size_of_val(values));
     for value in values {
         buf.extend_from_slice(&value.to_le_bytes());
     }
@@ -545,16 +545,11 @@ pub fn encode_bias_values(values: &[f32]) -> Vec<u8> {
 }
 
 fn slice_as_bytes<T>(values: &[T]) -> &[u8] {
-    unsafe {
-        slice::from_raw_parts(
-            values.as_ptr() as *const u8,
-            values.len() * mem::size_of::<T>(),
-        )
-    }
+    unsafe { slice::from_raw_parts(values.as_ptr() as *const u8, std::mem::size_of_val(values)) }
 }
 
 pub fn quantize_q8_0(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8>> {
-    if cols % Q8_BLOCK != 0 {
+    if !cols.is_multiple_of(Q8_BLOCK) {
         return Err(DsqWriterError::InvalidBlock {
             name: "quantize_q8_0".into(),
             in_dim: cols,
@@ -585,7 +580,7 @@ pub fn quantize_q8_0(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8
             let scale = if amax > 0.0 { amax / 127.0 } else { 0.0 };
             result.extend_from_slice(&f16::from_f32(scale).to_le_bytes());
             if scale == 0.0 {
-                result.extend(std::iter::repeat(0u8).take(Q8_BLOCK));
+                result.extend(std::iter::repeat_n(0u8, Q8_BLOCK));
                 continue;
             }
             let inv = 1.0 / scale;
@@ -599,7 +594,7 @@ pub fn quantize_q8_0(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8
 }
 
 pub fn quantize_q4k(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8>> {
-    if cols % Q4K_BLOCK != 0 {
+    if !cols.is_multiple_of(Q4K_BLOCK) {
         return Err(DsqWriterError::InvalidBlock {
             name: "quantize_q4k".into(),
             in_dim: cols,
@@ -633,7 +628,7 @@ pub fn quantize_q4k(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8>
 }
 
 pub fn quantize_q6k(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8>> {
-    if cols % Q6K_BLOCK != 0 {
+    if !cols.is_multiple_of(Q6K_BLOCK) {
         return Err(DsqWriterError::InvalidBlock {
             name: "quantize_q6k".into(),
             in_dim: cols,
@@ -672,7 +667,7 @@ fn ensure_aligned(name: &str, dtype: DsqTensorDType, in_dim: usize) -> Result<us
             "dtype {dtype} is not quantized"
         )));
     };
-    if in_dim % block != 0 {
+    if !in_dim.is_multiple_of(block) {
         return Err(DsqWriterError::InvalidBlock {
             name: name.to_string(),
             in_dim,

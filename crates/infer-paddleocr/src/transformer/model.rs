@@ -48,7 +48,7 @@ impl ErnieDecoder {
             cfg.vocab_size,
             cfg.hidden_size,
             false,
-            snapshot_hits.as_deref_mut(),
+            snapshot_hits,
             snapshot_label,
         )
         .context("failed to load lm_head weights")?;
@@ -185,19 +185,15 @@ impl ErnieDecoder {
                 use_cache,
             )?;
             hidden = output.hidden_states;
-            if let Some(chunk) = output.present_key_value {
-                if let Some(cache_mut) = cache.as_deref_mut() {
-                    cache_mut.append(idx, chunk)?;
-                }
+            if let Some(chunk) = output.present_key_value
+                && let Some(cache_mut) = cache.as_deref_mut()
+            {
+                cache_mut.append(idx, chunk)?;
             }
         }
 
-        let normed = rms_norm(
-            &hidden,
-            &self.weights.final_norm,
-            self.cfg.rms_norm_eps as f32,
-        )
-        .context("final rms norm failed")?;
+        let normed = rms_norm(&hidden, &self.weights.final_norm, self.cfg.rms_norm_eps)
+            .context("final rms norm failed")?;
         let (batch, seq_len, hidden_size) = normed.shape().dims3()?;
         let flat = normed.reshape((batch * seq_len, hidden_size))?;
         let logits = self.lm_head.matmul_2d(&flat)?;

@@ -16,6 +16,7 @@ pub struct LayerOutput {
     pub present_key_value: Option<KvCacheChunk>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn decoder_layer_forward(
     cfg: &PaddleOcrVlConfig,
     layer: &ErnieDecoderLayerWeights,
@@ -28,12 +29,8 @@ pub fn decoder_layer_forward(
     use_cache: bool,
 ) -> Result<LayerOutput> {
     let residual = hidden_states;
-    let normed = rms_norm(
-        hidden_states,
-        &layer.input_layernorm,
-        cfg.rms_norm_eps as f32,
-    )
-    .context("input rms norm failed")?;
+    let normed = rms_norm(hidden_states, &layer.input_layernorm, cfg.rms_norm_eps)
+        .context("input rms norm failed")?;
     let (attn_out, present) = attention_forward(
         rotary_ctx,
         &normed,
@@ -49,12 +46,8 @@ pub fn decoder_layer_forward(
         .context("attention residual add failed")?;
 
     let residual = &hidden_states;
-    let normed = rms_norm(
-        residual,
-        &layer.post_attention_layernorm,
-        cfg.rms_norm_eps as f32,
-    )
-    .context("post-attention rms norm failed")?;
+    let normed = rms_norm(residual, &layer.post_attention_layernorm, cfg.rms_norm_eps)
+        .context("post-attention rms norm failed")?;
     let mlp_out = mlp_forward(&normed, &layer.mlp, cfg).context("mlp forward failed")?;
     let hidden_states = residual.add(&mlp_out).context("mlp residual add failed")?;
 

@@ -132,9 +132,11 @@ impl ClipEmbeddings {
             .get(params.hidden_size, "class_embedding")
             .context("missing clip class_embedding")?;
         let patch_embedding = if vb.contains_tensor("patch_embedding.weight") {
-            let mut config = Conv2dConfig::default();
-            config.stride = params.patch_size;
-            config.padding = 0;
+            let config = Conv2dConfig {
+                stride: params.patch_size,
+                padding: 0,
+                ..Default::default()
+            };
             let conv = conv2d_no_bias(
                 3,
                 params.hidden_size,
@@ -228,7 +230,7 @@ impl ClipTransformer {
         let mut layers = Vec::with_capacity(params.num_layers);
         let layers_vb = vb.pp("layers");
         for idx in 0..params.num_layers {
-            layers.push(ClipBlock::load(params, &layers_vb.pp(&idx.to_string()))?);
+            layers.push(ClipBlock::load(params, &layers_vb.pp(idx.to_string()))?);
         }
         Ok(Self { layers })
     }

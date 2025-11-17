@@ -168,7 +168,7 @@ fn should_use_moe(layer_idx: usize, n_routed: usize, freq: usize, first_dense: u
     if layer_idx < first_dense {
         return false;
     }
-    freq != 0 && (layer_idx % freq == 0)
+    freq != 0 && layer_idx.is_multiple_of(freq)
 }
 
 fn mlp_specs(prefix: &str, hidden_size: usize, intermediate_size: usize) -> Vec<LinearSpec> {

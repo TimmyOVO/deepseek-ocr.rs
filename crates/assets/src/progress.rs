@@ -30,10 +30,10 @@ impl ProgressTracker for SmoothedRate {
     }
 
     fn tick(&mut self, state: &indicatif::ProgressState, now: Instant) {
-        if let Some((last, _)) = self.samples.back() {
-            if now.duration_since(*last) < Duration::from_millis(20) {
-                return;
-            }
+        if let Some((last, _)) = self.samples.back()
+            && now.duration_since(*last) < Duration::from_millis(20)
+        {
+            return;
         }
 
         self.samples.push_back((now, state.pos()));
@@ -51,14 +51,15 @@ impl ProgressTracker for SmoothedRate {
     }
 
     fn write(&self, _state: &indicatif::ProgressState, w: &mut dyn std::fmt::Write) {
-        if let (Some((t0, p0)), Some((t1, p1))) = (self.samples.front(), self.samples.back()) {
-            if self.samples.len() > 1 && t1 > t0 {
-                let elapsed = t1.duration_since(*t0).as_millis() as f64 / 1000.0;
-                let bytes = (p1 - p0) as f64;
-                let rate = if elapsed > 0.0 { bytes / elapsed } else { 0.0 };
-                let _ = write!(w, "{}/s", HumanBytes(rate as u64));
-                return;
-            }
+        if let (Some((t0, p0)), Some((t1, p1))) = (self.samples.front(), self.samples.back())
+            && self.samples.len() > 1
+            && t1 > t0
+        {
+            let elapsed = t1.duration_since(*t0).as_millis() as f64 / 1000.0;
+            let bytes = (p1 - p0) as f64;
+            let rate = if elapsed > 0.0 { bytes / elapsed } else { 0.0 };
+            let _ = write!(w, "{}/s", HumanBytes(rate as u64));
+            return;
         }
 
         let _ = write!(w, "-");

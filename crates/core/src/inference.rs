@@ -6,6 +6,9 @@ use tokenizers::Tokenizer;
 
 use crate::{benchmark::Timer, conversation::get_conv_template, sampling::TokenSelectionParams};
 
+/// Callback used to stream decoded token pieces.
+pub type StreamCallback<'a> = Option<&'a dyn Fn(usize, &[i64])>;
+
 /// Vision pre-processing knobs shared across OCR backends.
 #[derive(Debug, Clone, Copy)]
 pub struct VisionSettings {
@@ -116,7 +119,7 @@ pub trait OcrEngine: Send {
         images: &[DynamicImage],
         vision: VisionSettings,
         params: &DecodeParameters,
-        stream: Option<&dyn Fn(usize, &[i64])>,
+        stream: StreamCallback,
     ) -> Result<DecodeOutcome>;
 }
 
@@ -135,8 +138,6 @@ pub fn render_prompt(template: &str, system_prompt: &str, raw_prompt: &str) -> R
     });
     Ok(prompt)
 }
-
-/// Normalise decoder output by stripping sentinel tokens and Windows line-endings.
 
 /// Normalise decoder output by stripping sentinel tokens and Windows line-endings.
 pub fn normalize_text(s: &str) -> String {

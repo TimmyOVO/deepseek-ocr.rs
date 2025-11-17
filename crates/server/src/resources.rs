@@ -79,10 +79,10 @@ pub fn prepare_snapshot_path(
     // is set, the server will always use the provided snapshot path instead of
     // resolving it via the asset registry. This is useful for validating
     // freshly exported `.dsq` files without touching the global cache.
-    if let Ok(path_str) = std::env::var("DEEPSEEK_OCR_SNAPSHOT_OVERRIDE") {
-        if !path_str.trim().is_empty() {
-            return Ok(Some(PathBuf::from(path_str)));
-        }
+    if let Ok(path_str) = std::env::var("DEEPSEEK_OCR_SNAPSHOT_OVERRIDE")
+        && !path_str.trim().is_empty()
+    {
+        return Ok(Some(PathBuf::from(path_str)));
     }
 
     let Some(entry) = snapshot else {

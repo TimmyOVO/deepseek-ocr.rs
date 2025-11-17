@@ -38,6 +38,9 @@ use deepseek_ocr_core::{
     sampling::{TokenSelectionParams, init_rng, select_token_id},
 };
 
+/// Callback invoked as tokens are generated.
+type ProgressCallback<'a> = Option<&'a dyn Fn(usize, &[i64])>;
+
 pub fn load_model(args: ModelLoadArgs<'_>) -> Result<Box<dyn OcrEngine>> {
     let ModelLoadArgs {
         kind,
@@ -131,7 +134,7 @@ pub struct GenerateOptions<'a> {
     pub image_embeddings: Option<&'a [Tensor]>,
     pub max_new_tokens: usize,
     pub eos_token_id: Option<i64>,
-    pub progress_callback: Option<&'a dyn Fn(usize, &[i64])>,
+    pub progress_callback: ProgressCallback<'a>,
     pub use_cache: bool,
     pub temperature: f64,
     pub top_p: Option<f64>,
@@ -945,6 +948,7 @@ impl DeepseekOcrModel {
     }
 
     /// Forward pass through the multimodal stack, applying optional image-token injection.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward<'a>(
         &self,
         input_ids: Option<&Tensor>,
@@ -991,7 +995,7 @@ impl DeepseekOcrModel {
         };
         let image_embeddings_slice = image_embeddings
             .map(Some)
-            .unwrap_or_else(|| computed_embeddings.as_ref().map(|v| v.as_slice()));
+            .unwrap_or_else(|| computed_embeddings.as_deref());
 
         if let Some(mask) = images_seq_mask {
             embeddings = self.inject_image_tokens(embeddings, mask, image_embeddings_slice)?;
@@ -1611,16 +1615,16 @@ impl DeepseekOcrModel {
             .get(seq_len - 1)
             .context("prefill logits missing final timestep")?;
         let mut current = select_token_id(&last_logits, &options, &context_tokens, &mut rng)?;
-        if let Some(eos) = options.eos_token_id {
-            if current == eos {
-                total_timer.finish(|event| {
-                    event.add_field("prompt_tokens", seq_len as u64);
-                    event.add_field("generated_tokens", 0u64);
-                    event.add_field("max_new_tokens", options.max_new_tokens as u64);
-                    event.add_field("terminated_on_prefill", true);
-                });
-                return self.empty_generation();
-            }
+        if let Some(eos) = options.eos_token_id
+            && current == eos
+        {
+            total_timer.finish(|event| {
+                event.add_field("prompt_tokens", seq_len as u64);
+                event.add_field("generated_tokens", 0u64);
+                event.add_field("max_new_tokens", options.max_new_tokens as u64);
+                event.add_field("terminated_on_prefill", true);
+            });
+            return self.empty_generation();
         }
 
         let mut generated = Vec::with_capacity(options.max_new_tokens);
@@ -1660,10 +1664,10 @@ impl DeepseekOcrModel {
                 .get(0)
                 .context("decode logits missing timestep")?;
             current = select_token_id(&next_logits, &options, &context_tokens, &mut rng)?;
-            if let Some(eos) = options.eos_token_id {
-                if current == eos {
-                    break;
-                }
+            if let Some(eos) = options.eos_token_id
+                && current == eos
+            {
+                break;
             }
         }
         let len = generated.len();
@@ -1773,7 +1777,7 @@ impl DeepseekOcrModel {
             } else if let Some(inputs) = options.image_inputs {
                 let computed = self.compute_image_embeddings(inputs)?;
                 _owned_embeddings = Some(computed);
-                _owned_embeddings.as_ref().map(|v| v.as_slice())
+                _owned_embeddings.as_deref()
             } else {
                 None
             };
@@ -1828,19 +1832,19 @@ impl DeepseekOcrModel {
             .get(tokens.len() - 1)
             .context("prefill logits missing final timestep")?;
         let mut current = select_token_id(&logits, &options, &tokens, &mut rng)?;
-        if let Some(eos) = options.eos_token_id {
-            if current == eos {
-                total_timer.finish(|event| {
-                    event.add_field("prompt_tokens", seq_len as u64);
-                    event.add_field("generated_tokens", 0u64);
-                    event.add_field("max_new_tokens", options.max_new_tokens as u64);
-                    event.add_field("terminated_on_prefill", true);
-                    event.add_field("use_cache", false);
-                    event.add_field("forward_calls", forward_calls);
-                    event.add_field("max_seq_len_seen", max_seq_len_seen);
-                });
-                return self.empty_generation();
-            }
+        if let Some(eos) = options.eos_token_id
+            && current == eos
+        {
+            total_timer.finish(|event| {
+                event.add_field("prompt_tokens", seq_len as u64);
+                event.add_field("generated_tokens", 0u64);
+                event.add_field("max_new_tokens", options.max_new_tokens as u64);
+                event.add_field("terminated_on_prefill", true);
+                event.add_field("use_cache", false);
+                event.add_field("forward_calls", forward_calls);
+                event.add_field("max_seq_len_seen", max_seq_len_seen);
+            });
+            return self.empty_generation();
         }
 
         let progress_callback = options.progress_callback;
@@ -1893,10 +1897,10 @@ impl DeepseekOcrModel {
                 .get(seq_pos)
                 .context("decode logits missing timestep")?;
             current = select_token_id(&next_logits, &options, &tokens, &mut rng)?;
-            if let Some(eos) = options.eos_token_id {
-                if current == eos {
-                    break;
-                }
+            if let Some(eos) = options.eos_token_id
+                && current == eos
+            {
+                break;
             }
         }
 
@@ -2190,7 +2194,7 @@ fn build_prompt_tokens(
             .encode(*segment, false)
             .map_err(|err| anyhow!("tokenization failed: {err}"))?;
         tokens.extend(encoding.get_ids().iter().map(|&id| id as i64));
-        mask.extend(std::iter::repeat(0u8).take(encoding.len()));
+        mask.extend(std::iter::repeat_n(0u8, encoding.len()));
         if idx < embeddings.len() {
             let placeholders = build_image_placeholders(
                 image_token_id,
@@ -2205,7 +2209,7 @@ fn build_prompt_tokens(
                 crop_mode,
             )?;
             tokens.extend(&placeholders);
-            mask.extend(std::iter::repeat(1u8).take(placeholders.len()));
+            mask.extend(std::iter::repeat_n(1u8, placeholders.len()));
         }
     }
 
@@ -2236,7 +2240,7 @@ fn build_image_placeholders(
 
     let push_grid = |placeholders: &mut Vec<i64>, rows: usize, cols: usize, add_terminal: bool| {
         for _ in 0..rows {
-            placeholders.extend(std::iter::repeat(image_token_id).take(cols));
+            placeholders.extend(std::iter::repeat_n(image_token_id, cols));
             placeholders.push(image_token_id);
         }
         if add_terminal {

@@ -54,7 +54,7 @@ impl SiglipProjector {
             output_hidden,
             merged_hidden,
             compute_dtype,
-            snapshot_hits.as_deref_mut(),
+            snapshot_hits,
             snapshot_label,
         )?;
         Ok(Self {

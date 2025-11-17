@@ -340,8 +340,12 @@ fn run_export(args: ExportArgs) -> Result<()> {
         include_projector = scope.includes_projector(),
         "starting DSQ export"
     );
-    let source = TensorSource::from_path(&args.weights)
-        .with_context(|| format!("failed to prepare tensor source from {}", args.weights.display()))?;
+    let source = TensorSource::from_path(&args.weights).with_context(|| {
+        format!(
+            "failed to prepare tensor source from {}",
+            args.weights.display()
+        )
+    })?;
     let metadata = SnapshotMetadata {
         candle_version: args.candle_version.clone(),
         model_id: model_id.clone(),
@@ -680,6 +684,7 @@ fn load_config_value(path: &Path) -> Result<Value> {
         .with_context(|| format!("failed to parse JSON {}", path.display()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_tensors(
     writer: &mut DsqWriter,
     source: &TensorSource,
@@ -815,10 +820,7 @@ impl TensorSource {
                 format!("failed to parse safetensors index at {}", path.display())
             })?;
             if index.weight_map.is_empty() {
-                bail!(
-                    "safetensors index {} lists no tensors",
-                    path.display()
-                );
+                bail!("safetensors index {} lists no tensors", path.display());
             }
             let root = path
                 .parent()
@@ -840,10 +842,7 @@ impl TensorSource {
                 let boxed = data.into_boxed_slice();
                 let static_bytes: &'static [u8] = Box::leak(boxed);
                 let tensors = SafeTensors::deserialize(static_bytes).with_context(|| {
-                    format!(
-                        "failed to parse safetensors shard {}",
-                        shard_path.display()
-                    )
+                    format!("failed to parse safetensors shard {}", shard_path.display())
                 })?;
                 shard_containers.insert(shard.clone(), tensors);
             }
@@ -859,9 +858,8 @@ impl TensorSource {
                 .with_context(|| format!("failed to read weights {}", path.display()))?;
             let boxed = data.into_boxed_slice();
             let static_bytes: &'static [u8] = Box::leak(boxed);
-            let tensors = SafeTensors::deserialize(static_bytes).with_context(|| {
-                format!("failed to parse safetensors {}", path.display())
-            })?;
+            let tensors = SafeTensors::deserialize(static_bytes)
+                .with_context(|| format!("failed to parse safetensors {}", path.display()))?;
             Ok(Self {
                 single: Some(tensors),
                 sharded: None,
@@ -888,16 +886,13 @@ impl TensorSource {
                 name
             )
         })?;
-        let tensors = sharded
-            .shards
-            .get(shard)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "shard `{}` for tensor `{}` missing from loaded containers",
-                    shard,
-                    name
-                )
-            })?;
+        let tensors = sharded.shards.get(shard).ok_or_else(|| {
+            anyhow::anyhow!(
+                "shard `{}` for tensor `{}` missing from loaded containers",
+                shard,
+                name
+            )
+        })?;
         tensors.tensor(name).map_err(|err| match err {
             SafeTensorError::TensorNotFound(_) => {
                 anyhow::anyhow!(
@@ -930,16 +925,13 @@ impl TensorSource {
             Some(s) => s,
             None => return Ok(None),
         };
-        let tensors = sharded
-            .shards
-            .get(shard_name)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "shard `{}` for tensor `{}` missing from loaded containers",
-                    shard_name,
-                    name
-                )
-            })?;
+        let tensors = sharded.shards.get(shard_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "shard `{}` for tensor `{}` missing from loaded containers",
+                shard_name,
+                name
+            )
+        })?;
         match tensors.tensor(name) {
             Ok(view) => Ok(Some(view)),
             Err(SafeTensorError::TensorNotFound(_)) => Ok(None),
@@ -966,7 +958,7 @@ fn select_dtype(primary: DsqTensorDType, in_dim: usize) -> Result<SelectionResul
 
     loop {
         let block = dtype_block_size(current);
-        if in_dim % block == 0 {
+        if in_dim.is_multiple_of(block) {
             return Ok(SelectionResult {
                 dtype: current,
                 fallback_from,

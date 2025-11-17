@@ -6,11 +6,7 @@ use candle_nn::{
 };
 use deepseek_ocr_core::cache::{KvCacheChunk, KvCacheEntry};
 
-use crate::{
-    config::DotsOcrTextConfig,
-    quant::QuantLinear,
-    snapshot::SnapshotLinearMap,
-};
+use crate::{config::DotsOcrTextConfig, quant::QuantLinear, snapshot::SnapshotLinearMap};
 
 #[derive(Debug)]
 pub struct Qwen2Block {
@@ -43,12 +39,7 @@ impl Qwen2Block {
             snapshot_hits.as_deref_mut(),
             snapshot_label,
         )?;
-        let mlp = Qwen2Mlp::load(
-            cfg,
-            &vb.pp("mlp"),
-            snapshot_hits.as_deref_mut(),
-            snapshot_label,
-        )?;
+        let mlp = Qwen2Mlp::load(cfg, &vb.pp("mlp"), snapshot_hits, snapshot_label)?;
         Ok(Self {
             norm1,
             norm2,
@@ -120,7 +111,7 @@ impl Qwen2Attention {
         let v_proj = make_linear("v_proj", kv_dim)?;
         let o_proj = make_linear("o_proj", cfg.hidden_size)?;
         ensure!(
-            cfg.hidden_size % cfg.num_attention_heads == 0,
+            cfg.hidden_size.is_multiple_of(cfg.num_attention_heads),
             "hidden_size {} not divisible by num_attention_heads {}",
             cfg.hidden_size,
             cfg.num_attention_heads
@@ -271,7 +262,7 @@ impl Qwen2Mlp {
         let gate = self.gate.forward(input)?.silu()?;
         let up = self.up.forward(input)?;
         let hidden = gate.broadcast_mul(&up)?;
-        Ok(self.down.forward(&hidden)?)
+        self.down.forward(&hidden)
     }
 }
 

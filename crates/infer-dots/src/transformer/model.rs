@@ -8,11 +8,7 @@ use deepseek_ocr_core::{
     tensor::gather_token_embeddings,
 };
 
-use crate::{
-    config::DotsOcrTextConfig,
-    quant::run_quantized_matmul,
-    snapshot::SnapshotLinearMap,
-};
+use crate::{config::DotsOcrTextConfig, quant::run_quantized_matmul, snapshot::SnapshotLinearMap};
 
 use super::{block::Qwen2Block, rope::RopeCache};
 
@@ -51,7 +47,7 @@ impl Qwen2LanguageModel {
         let mut blocks = Vec::with_capacity(cfg.num_hidden_layers);
         let mut snapshot_hits = snapshot_hits;
         for idx in 0..cfg.num_hidden_layers {
-            let layer_vb = model_vb.pp(&format!("layers.{idx}"));
+            let layer_vb = model_vb.pp(format!("layers.{idx}"));
             blocks.push(Qwen2Block::load(
                 cfg.as_ref(),
                 &layer_vb,
@@ -80,25 +76,25 @@ impl Qwen2LanguageModel {
             )
         };
 
-        if let Some(hits) = snapshot_hits.as_deref_mut() {
-            if let Some(hit) = hits.remove(lm_head_label) {
-                match hit {
-                    crate::snapshot::SnapshotLinear::Quantized { qmatmul, bias } => {
-                        trace_lm_head("quantized", lm_head_label, snapshot_label);
-                        // DotsOCR lm_head is biasless in the upstream checkpoint; if a bias
-                        // is present in the snapshot we still honour it by folding it into
-                        // the matmul at runtime.
-                        lm_head_q = Some(qmatmul);
-                        // Bias, when present, is applied inside the matmul wrapper.
-                        // For now we drop it and rely on float/quant parity in the exporter.
-                        let _ = bias;
-                        lm_head_weight = None;
-                    }
-                    crate::snapshot::SnapshotLinear::Float { weight, bias } => {
-                        trace_lm_head("float", lm_head_label, snapshot_label);
-                        let _ = bias;
-                        lm_head_weight = Some(weight);
-                    }
+        if let Some(hits) = snapshot_hits
+            && let Some(hit) = hits.remove(lm_head_label)
+        {
+            match hit {
+                crate::snapshot::SnapshotLinear::Quantized { qmatmul, bias } => {
+                    trace_lm_head("quantized", lm_head_label, snapshot_label);
+                    // DotsOCR lm_head is biasless in the upstream checkpoint; if a bias
+                    // is present in the snapshot we still honour it by folding it into
+                    // the matmul at runtime.
+                    lm_head_q = Some(qmatmul);
+                    // Bias, when present, is applied inside the matmul wrapper.
+                    // For now we drop it and rely on float/quant parity in the exporter.
+                    let _ = bias;
+                    lm_head_weight = None;
+                }
+                crate::snapshot::SnapshotLinear::Float { weight, bias } => {
+                    trace_lm_head("float", lm_head_label, snapshot_label);
+                    let _ = bias;
+                    lm_head_weight = Some(weight);
                 }
             }
         }
@@ -166,12 +162,11 @@ impl Qwen2LanguageModel {
         let total_len = past_len + seq_len;
         let attn_mask = match attention_mask {
             Some(mask) => {
-                let dtype_match = if mask.dtype() == embeddings.dtype() {
+                if mask.dtype() == embeddings.dtype() {
                     mask.clone()
                 } else {
                     mask.to_dtype(embeddings.dtype())?
-                };
-                dtype_match
+                }
             }
             None => build_causal_mask(
                 batch,

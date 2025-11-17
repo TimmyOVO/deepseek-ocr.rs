@@ -193,14 +193,14 @@ fn patches_from_normalised(
     cfg: &DotsPreprocessConfig,
 ) -> Result<Vec<f32>> {
     let patch = cfg.patch_size;
-    ensure!(width % patch == 0 && height % patch == 0);
+    ensure!(width.is_multiple_of(patch) && height.is_multiple_of(patch));
     let channels = 3usize;
     let row_stride = width * channels;
     let mut patches = Vec::with_capacity(width * height * channels);
     let grid_h = height / patch;
     let grid_w = width / patch;
     ensure!(
-        grid_h % cfg.merge_size == 0 && grid_w % cfg.merge_size == 0,
+        grid_h.is_multiple_of(cfg.merge_size) && grid_w.is_multiple_of(cfg.merge_size),
         "grid {}x{} not divisible by merge size {}",
         grid_h,
         grid_w,

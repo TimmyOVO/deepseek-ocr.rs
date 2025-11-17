@@ -18,7 +18,7 @@ impl ErnieRotaryEmbedding {
     pub fn new(cfg: Arc<PaddleOcrVlConfig>) -> Result<Self> {
         let head_dim = cfg.head_dim;
         ensure!(
-            head_dim % 2 == 0,
+            head_dim.is_multiple_of(2),
             "rope head dim must be even (got {head_dim})"
         );
         let theta = cfg.rope_theta as f32;

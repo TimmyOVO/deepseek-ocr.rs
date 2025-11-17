@@ -153,18 +153,18 @@ impl TransformerDecoder {
                 if needs_new {
                     *rope_entry = Some(RopeCache::new(device, dtype, rope_dim)?);
                 }
-                if let Some(cache) = rope_entry.as_mut() {
-                    if let Some(ids) = ids_for_rope {
-                        let want = if q_len == 0 {
-                            past_len
-                        } else {
-                            let ids_cpu = ids.to_device(&candle_core::Device::Cpu)?;
-                            let max_pos = ids_cpu.max_all()?.to_scalar::<i64>()? as usize;
-                            (past_len + q_len).max(max_pos + 1)
-                        };
-                        cache.ensure_len(&self.cfg, want)?;
-                        rope_tensors = Some(cache.select(batch, q_len, Some(ids))?);
-                    }
+                if let Some(cache) = rope_entry.as_mut()
+                    && let Some(ids) = ids_for_rope
+                {
+                    let want = if q_len == 0 {
+                        past_len
+                    } else {
+                        let ids_cpu = ids.to_device(&candle_core::Device::Cpu)?;
+                        let max_pos = ids_cpu.max_all()?.to_scalar::<i64>()? as usize;
+                        (past_len + q_len).max(max_pos + 1)
+                    };
+                    cache.ensure_len(&self.cfg, want)?;
+                    rope_tensors = Some(cache.select(batch, q_len, Some(ids))?);
                 }
             } else {
                 self.rope_cache.borrow_mut().take();
@@ -197,10 +197,10 @@ impl TransformerDecoder {
                 block.forward(&hidden, attn_bias.as_ref(), rope_refs, past, use_cache)?
             };
             hidden = output.hidden_states;
-            if let Some(present) = output.present_key_value {
-                if let Some(cache) = cache.as_mut() {
-                    cache.append(idx, present)?;
-                }
+            if let Some(present) = output.present_key_value
+                && let Some(cache) = cache.as_mut()
+            {
+                cache.append(idx, present)?;
             }
             if let Some(loss) = output.aux_loss {
                 aux_loss = Some(match aux_loss {

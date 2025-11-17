@@ -161,7 +161,7 @@ impl DotsOcrModel {
         let mut outputs = Vec::with_capacity(grids.len());
         let mut offset = 0usize;
         let merge = self.config.vision.spatial_merge_size;
-        let total = vision_hidden.dim(0)? as usize;
+        let total = vision_hidden.dim(0)?;
         for (idx, grid) in grids.iter().enumerate() {
             let tokens = vision_token_count(*grid, merge)?;
             ensure!(
@@ -312,15 +312,15 @@ impl OcrEngine for DotsOcrModel {
         let mut rng = init_rng(params.seed);
         let mut generated = Vec::with_capacity(params.max_new_tokens);
         let mut current = select_token_id(&logits, params, &context_tokens, &mut rng)?;
-        if let Some(eos) = eos_token_id {
-            if current == eos {
-                return Ok(DecodeOutcome {
-                    text: String::new(),
-                    prompt_tokens: prompt_len,
-                    response_tokens: 0,
-                    generated_tokens: Vec::new(),
-                });
-            }
+        if let Some(eos) = eos_token_id
+            && current == eos
+        {
+            return Ok(DecodeOutcome {
+                text: String::new(),
+                prompt_tokens: prompt_len,
+                response_tokens: 0,
+                generated_tokens: Vec::new(),
+            });
         }
 
         while generated.len() < params.max_new_tokens {
@@ -329,10 +329,10 @@ impl OcrEngine for DotsOcrModel {
             if let Some(callback) = stream {
                 callback(generated.len(), &generated);
             }
-            if let Some(eos) = eos_token_id {
-                if current == eos {
-                    break;
-                }
+            if let Some(eos) = eos_token_id
+                && current == eos
+            {
+                break;
             }
             if generated.len() >= params.max_new_tokens {
                 break;
@@ -476,7 +476,7 @@ fn vision_token_count(grid: [u32; 3], merge: usize) -> Result<usize> {
     let h = grid[1] as usize;
     let w = grid[2] as usize;
     ensure!(
-        h % merge == 0 && w % merge == 0,
+        h.is_multiple_of(merge) && w.is_multiple_of(merge),
         "grid {}x{} not divisible by merge {}",
         h,
         w,
@@ -506,15 +506,15 @@ fn build_prompt_inputs(
                 .encode(*segment, false)
                 .map_err(|err| anyhow!("tokenization failed: {err}"))?;
             tokens.extend(encoding.get_ids().iter().map(|&id| id as i64));
-            mask.extend(std::iter::repeat(0u8).take(encoding.len()));
+            mask.extend(std::iter::repeat_n(0u8, encoding.len()));
         }
         if idx < per_image_tokens.len() {
             let placeholders = per_image_tokens[idx];
             ensure!(placeholders > 0, "image {idx} produced zero vision tokens");
             tokens.push(image_tokens.start as i64);
             mask.push(0);
-            tokens.extend(std::iter::repeat(image_tokens.pad as i64).take(placeholders));
-            mask.extend(std::iter::repeat(1u8).take(placeholders));
+            tokens.extend(std::iter::repeat_n(image_tokens.pad as i64, placeholders));
+            mask.extend(std::iter::repeat_n(1u8, placeholders));
             tokens.push(image_tokens.end as i64);
             mask.push(0);
         }
