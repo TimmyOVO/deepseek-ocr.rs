@@ -236,7 +236,7 @@ Notes:
 - Works out of the box with tools such as [Open WebUI](https://github.com/open-webui/open-webui) or any OpenAI-compatible client—just point the base URL to your server (`http://localhost:8000/v1`) and select either the `deepseek-ocr` or `paddleocr-vl` model ID exposed in `/v1/models`.
 - Adjust the request body limit with Rocket config if you routinely send large images.
 
-![Open WebUI connected to deepseek-ocr.rs](./baselines/sample_1.png)
+![Open WebUI connected to deepseek-ocr.rs](./assets/sample_1.png)
 
 ## GPU Acceleration ⚡
 
