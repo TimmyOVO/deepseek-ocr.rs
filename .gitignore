@@ -12,3 +12,16 @@ __pycache__
 .hf-cache
 *.bin
 *.dsq
+.cli-cache
+.cli-config
+.conda
+.home
+.ocr-cache
+.ocr-config
+.pip-cache
+.tmp
+baselines
+DeepSeek_OCR
+ocr2_config.toml
+ocr2_config_deepseek.toml
+HunyuanOCR
