@@ -13,7 +13,7 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, ensure};
-use candle_core::{Tensor, quantized::QMatMul};
+use candle_core::{DType, Tensor, quantized::QMatMul};
 use candle_nn::VarBuilder;
 use tracing::trace;
 
@@ -21,6 +21,7 @@ use tracing::trace;
 #[derive(Clone)]
 pub struct LinearWeights {
     pub weight: Option<Tensor>,
+    pub weight_f32: Option<Tensor>,
     pub bias: Option<Tensor>,
     pub qmatmul: Option<Arc<QMatMul>>,
     pub out_dim: usize,
@@ -58,11 +59,16 @@ impl LinearWeights {
         snapshot_label: Option<&'static str>,
     ) -> Result<Self> {
         let label = qualified_name(vb, "weight");
-        let mut weight = Some(
-            vb.get((out_dim, in_dim), "weight")
-                .with_context(|| format!("missing linear weight `{label}`"))?
-                .contiguous()?,
-        );
+        let weight_init = vb
+            .get((out_dim, in_dim), "weight")
+            .with_context(|| format!("missing linear weight `{label}`"))?
+            .contiguous()?;
+        let mut weight = Some(weight_init.clone());
+        let weight_f32 = if matches!(weight_init.dtype(), DType::F16 | DType::BF16) {
+            Some(weight_init.to_dtype(DType::F32)?.contiguous()?)
+        } else {
+            None
+        };
         let mut bias_tensor: Option<Tensor> = None;
         let device = vb.device();
         let quant = QuantizationState::global();
@@ -130,6 +136,7 @@ impl LinearWeights {
         }
         Ok(Self {
             weight,
+            weight_f32,
             bias: bias_tensor,
             qmatmul,
             out_dim,

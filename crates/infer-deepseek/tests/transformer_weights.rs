@@ -21,6 +21,8 @@ fn transformer_weights_load_from_safetensor() -> Result<()> {
             .attention
             .q_proj
             .weight
+            .as_ref()
+            .expect("q_proj weight should be present")
             .shape()
             .dims2()
             .expect("q_proj dims"),

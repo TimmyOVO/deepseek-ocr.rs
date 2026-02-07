@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Module, Tensor, shape::D};
 use candle_nn::{
-    Conv2dConfig, LayerNorm, VarBuilder, conv2d_no_bias, layer_norm,
+    Conv2d, Conv2dConfig, LayerNorm, VarBuilder, conv2d_no_bias, layer_norm,
     ops::{sigmoid, softmax},
 };
 
@@ -121,7 +121,7 @@ impl ClipVisionModel {
 
 struct ClipEmbeddings {
     class_embedding: Tensor,
-    patch_embedding: Option<candle_nn::Conv2d>,
+    patch_embedding: Option<Conv2d>,
     position_embedding: Tensor,
     seq_length: usize,
 }
@@ -175,7 +175,12 @@ impl ClipEmbeddings {
                     .patch_embedding
                     .as_ref()
                     .context("patch_embeds missing and patch_embedding weights unavailable")?;
-                conv.forward(pixel_values)?
+                let input = if pixel_values.dtype() == conv.weight().dtype() {
+                    pixel_values.clone()
+                } else {
+                    pixel_values.to_dtype(conv.weight().dtype())?
+                };
+                conv.forward(&input)?
             }
         };
 
@@ -200,12 +205,22 @@ impl ClipEmbeddings {
             .class_embedding
             .reshape((1, 1, embed_dim))?
             .expand((batch, 1, embed_dim))?;
+        let class_embedding = if class_embedding.dtype() == patches.dtype() {
+            class_embedding
+        } else {
+            class_embedding.to_dtype(patches.dtype())?
+        };
         let tokens = Tensor::cat(&[class_embedding, patches], 1)?;
 
         let base_pos = self
             .position_embedding
             .reshape((1, self.seq_length + 1, embed_dim))?;
         let pos = adapt_position_embedding(&base_pos, num_patches + 1)?;
+        let pos = if pos.dtype() == tokens.dtype() {
+            pos
+        } else {
+            pos.to_dtype(tokens.dtype())?
+        };
         let tokens = tokens
             .add(&pos.expand((batch, num_patches + 1, embed_dim))?)?
             .contiguous()?;
@@ -459,6 +474,7 @@ fn load_linear(
     };
     Ok(LinearWeights {
         weight: Some(weight),
+        weight_f32: None,
         bias,
         qmatmul: None,
         out_dim,

@@ -20,13 +20,13 @@ use crate::{
         QuantModule, QuantizationOutcome, QuantizationState, backend_label, run_quantized_matmul,
     },
     transformer::{
-        cache::{DynamicCache, PromptCacheGuard},
+        cache::{DynamicCache, KvCacheChunk, PromptCacheGuard},
         model::{DeepseekLanguageModel, LanguageModelOutput},
         weights::qualified_name,
     },
     vision::{
-        ClipDebugTrace, ClipVisionModel, SamBackbone, SamDebugTrace, dynamic_preprocess,
-        resample::resize_bicubic,
+        ClipDebugTrace, ClipVisionModel, PreprocessParams, Qwen2VisionEncoder, Qwen2VisionInput,
+        SamBackbone, SamDebugTrace, dynamic_preprocess_with_params, resample::resize_bicubic,
     },
 };
 use deepseek_ocr_core::{
@@ -38,8 +38,54 @@ use deepseek_ocr_core::{
     sampling::{TokenSelectionParams, init_rng, select_token_id},
 };
 
+#[cfg(feature = "cli-debug")]
+use crate::debug::{
+    debug_logits_config_from_env, debug_logits_json_path_from_env, logits_top2_at_step,
+    write_debug_logits_json,
+};
+
 /// Callback invoked as tokens are generated.
 type ProgressCallback<'a> = Option<&'a dyn Fn(usize, &[i64])>;
+
+fn cast_dtype(tensor: &Tensor, dtype: DType, context_msg: &'static str) -> Result<Tensor> {
+    if tensor.dtype() == dtype {
+        Ok(tensor.clone())
+    } else {
+        tensor.to_dtype(dtype).context(context_msg)
+    }
+}
+
+fn cast_dtype_owned(tensor: Tensor, dtype: DType, context_msg: &'static str) -> Result<Tensor> {
+    if tensor.dtype() == dtype {
+        Ok(tensor)
+    } else {
+        tensor.to_dtype(dtype).context(context_msg)
+    }
+}
+
+fn select_f32<'a, T>(dtype: DType, native: &'a T, f32: Option<&'a T>) -> &'a T {
+    if dtype == DType::F32 {
+        f32.unwrap_or(native)
+    } else {
+        native
+    }
+}
+
+fn low_precision_compute_dtype(dtype: DType) -> DType {
+    if matches!(dtype, DType::F16 | DType::BF16) {
+        DType::F32
+    } else {
+        dtype
+    }
+}
+
+fn cache_store_dtype(model_dtype: DType, requested_dtype: DType) -> DType {
+    if matches!(model_dtype, DType::F16 | DType::BF16) {
+        DType::F32
+    } else {
+        requested_dtype
+    }
+}
 
 pub fn load_model(args: ModelLoadArgs<'_>) -> Result<Box<dyn OcrEngine>> {
     let ModelLoadArgs {
@@ -244,7 +290,13 @@ impl ImageProjector {
         };
         let image_newline = model_vb
             .get(cfg.n_embed, "image_newline")
-            .with_context(|| "missing projector image_newline tensor")?
+            .or_else(|_| {
+                // Some OCR2 weight snapshots don't include `image_newline`.
+                // The token is only used as a formatting separator in prompt assembly.
+                // Keep inference working by defaulting to a zero vector.
+                // (This is only relevant for the OCR2 variant.)
+                Tensor::zeros(cfg.n_embed, DType::F32, model_vb.device())
+            })?
             .contiguous()?;
         let view_separator = model_vb
             .get(cfg.n_embed, "view_seperator")
@@ -358,15 +410,24 @@ impl ImageProjector {
                 .as_ref()
                 .context("projector float weight missing for non-quantized path")?;
             let weight_t = weight.transpose(0, 1)?;
-            flat.matmul(&weight_t)?
+            if flat.dtype() != weight_t.dtype() {
+                let x = flat.to_dtype(weight_t.dtype())?;
+                let mut out = x.matmul(&weight_t)?;
+                if out.dtype() != flat.dtype() {
+                    out = out.to_dtype(flat.dtype())?;
+                }
+                out
+            } else if matches!(flat.dtype(), DType::F16 | DType::BF16) {
+                // Dtype-sensitive path: keep projector matmul in f32 for low-precision inputs.
+                let x = flat.to_dtype(DType::F32)?;
+                let w = weight_t.to_dtype(DType::F32)?;
+                x.matmul(&w)?.to_dtype(flat.dtype())?
+            } else {
+                flat.matmul(&weight_t)?
+            }
         };
         if let Some(bias) = &self.bias {
-            let bias = if bias.dtype() == proj.dtype() {
-                bias.clone()
-            } else {
-                bias.to_dtype(proj.dtype())
-                    .context("failed to match projector bias dtype")?
-            };
+            let bias = cast_dtype(bias, proj.dtype(), "failed to match projector bias dtype")?;
             proj = proj.broadcast_add(&bias.reshape((1, self.hidden))?)?;
         }
         proj.reshape(
@@ -381,13 +442,7 @@ impl ImageProjector {
 
     fn adapt_tokens(&self, tensor: &Tensor, dtype: DType, device: &Device) -> Result<Tensor> {
         let tensor = tensor.to_device(device)?;
-        if tensor.dtype() == dtype {
-            Ok(tensor)
-        } else {
-            tensor
-                .to_dtype(dtype)
-                .context("failed to cast image embeddings")
-        }
+        cast_dtype(&tensor, dtype, "failed to cast image embeddings")
     }
 
     fn placeholders(&self, count: usize, dtype: DType, device: &Device) -> Result<Tensor> {
@@ -430,10 +485,34 @@ pub struct DeepseekOcrModel {
     language: DeepseekLanguageModel,
     projector_cfg: Arc<ProjectorConfig>,
     projector: ImageProjector,
-    vision: VisionModules,
+    projector_f32: Option<ImageProjector>,
+    variant: OcrVariant,
+    vision: VisionBackend,
+    vision_f32: Option<Box<VisionModules>>,
+    vision_ocr2_f32: Option<Box<Qwen2VisionEncoder>>,
     device: Device,
     dtype: DType,
     weights_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OcrVariant {
+    Ocr1,
+    Ocr2,
+}
+
+enum VisionBackend {
+    Ocr1(Box<VisionModules>),
+    Ocr2(Box<Qwen2VisionEncoder>),
+}
+
+impl VisionBackend {
+    fn sam_backbone(&self) -> &SamBackbone {
+        match self {
+            VisionBackend::Ocr1(vision) => &vision.sam,
+            VisionBackend::Ocr2(vision) => vision.sam_backbone(),
+        }
+    }
 }
 
 struct VisionModules {
@@ -449,14 +528,42 @@ struct VisionContext<'a> {
     parallel: bool,
 }
 
+fn prepare_image_tensor_for_device(
+    tensor: &Tensor,
+    device: &Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    let mut image = if tensor.rank() == 3 {
+        tensor.unsqueeze(0)?
+    } else {
+        tensor.clone()
+    };
+    ensure!(
+        image.rank() == 4,
+        "image tensor must have rank 4 (batch, channels, height, width)"
+    );
+    if !image.device().same_device(device) {
+        image = image.to_device(device)?;
+    }
+    if image.dtype() != dtype {
+        image = image.to_dtype(dtype)?;
+    }
+    Ok(image.contiguous()?)
+}
+
 impl<'a> VisionContext<'a> {
-    fn new(model: &'a DeepseekOcrModel) -> Self {
+    fn new_with_dtype(
+        model: &'a DeepseekOcrModel,
+        vision: &'a VisionModules,
+        projector: &'a ImageProjector,
+        dtype: DType,
+    ) -> Self {
         let parallel = matches!(model.device(), Device::Cpu);
         Self {
-            projector: &model.projector,
-            vision: &model.vision,
+            projector,
+            vision,
             device: model.device(),
-            dtype: model.dtype(),
+            dtype,
             parallel,
         }
     }
@@ -469,31 +576,12 @@ impl<'a> VisionContext<'a> {
         self.device
     }
 
-    fn dtype(&self) -> DType {
-        self.dtype
-    }
-
     fn parallel_enabled(&self) -> bool {
         self.parallel
     }
 
     fn prepare_image_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let mut image = if tensor.rank() == 3 {
-            tensor.unsqueeze(0)?
-        } else {
-            tensor.clone()
-        };
-        ensure!(
-            image.rank() == 4,
-            "image tensor must have rank 4 (batch, channels, height, width)"
-        );
-        if !image.device().same_device(self.device) {
-            image = image.to_device(self.device)?;
-        }
-        if image.dtype() != self.dtype {
-            image = image.to_dtype(self.dtype)?;
-        }
-        Ok(image.contiguous()?)
+        prepare_image_tensor_for_device(tensor, self.device, self.dtype)
     }
 
     fn append_row_breaks(&self, grid: Tensor, newline: &Tensor) -> Result<Tensor> {
@@ -558,7 +646,12 @@ impl<'a> VisionContext<'a> {
         Ok(combined)
     }
 
+    fn newline_for_projected(&self, projected: &Tensor, newline: &Tensor) -> Result<Tensor> {
+        cast_dtype(newline, projected.dtype(), "newline dtype cast failed")
+    }
+
     fn format_global_tokens(&self, projected: &Tensor, newline: &Tensor) -> Result<Tensor> {
+        let newline = self.newline_for_projected(projected, newline)?;
         let (batch, seq, hidden) = projected
             .shape()
             .dims3()
@@ -575,7 +668,7 @@ impl<'a> VisionContext<'a> {
             .reshape((side, side, hidden))?
             .contiguous()
             .context("global grid reshape not contiguous")?;
-        self.append_row_breaks(grid, newline)
+        self.append_row_breaks(grid, &newline)
     }
 
     fn format_local_tokens(
@@ -584,6 +677,7 @@ impl<'a> VisionContext<'a> {
         crop_shape: (usize, usize),
         newline: &Tensor,
     ) -> Result<Tensor> {
+        let newline = self.newline_for_projected(projected, newline)?;
         let (patches, seq, hidden) = projected
             .shape()
             .dims3()
@@ -608,7 +702,7 @@ impl<'a> VisionContext<'a> {
             .reshape((height_crops * side, width_crops * side, hidden))?
             .contiguous()
             .context("local grid reshape not contiguous")?;
-        self.append_row_breaks(grid, newline)
+        self.append_row_breaks(grid, &newline)
     }
 
     fn process_input_full(&self, input: &VisionInput<'_>) -> Result<VisionProcessArtifacts> {
@@ -788,8 +882,11 @@ impl<'a> VisionContext<'a> {
         local_post_opt: Option<Tensor>,
         local_tokens_opt: Option<Tensor>,
     ) -> Result<VisionProcessArtifacts> {
+        let target_dtype = global_tokens.dtype();
         let mut segments = Vec::new();
         if let Some(local_tokens) = local_tokens_opt.clone() {
+            let local_tokens =
+                cast_dtype_owned(local_tokens, target_dtype, "local tokens dtype cast failed")?;
             segments.push(local_tokens);
         }
         segments.push(global_tokens.clone());
@@ -800,6 +897,11 @@ impl<'a> VisionContext<'a> {
             .reshape((1, self.projector.hidden_size()))?
             .contiguous()
             .context("view separator not contiguous")?;
+        let view_separator = cast_dtype_owned(
+            view_separator,
+            target_dtype,
+            "view separator dtype cast failed",
+        )?;
         segments.push(view_separator);
         let fused_tokens = Tensor::cat(&segments, 0)
             .context("failed to concatenate image segments")?
@@ -819,6 +921,21 @@ impl<'a> VisionContext<'a> {
 }
 
 impl DeepseekOcrModel {
+    fn vision_modules(&self) -> Option<&VisionModules> {
+        match &self.vision {
+            VisionBackend::Ocr1(vision) => Some(vision.as_ref()),
+            VisionBackend::Ocr2(_) => None,
+        }
+    }
+
+    fn vision_modules_f32(&self) -> Option<&VisionModules> {
+        self.vision_f32.as_deref()
+    }
+
+    fn projector_for_dtype(&self, dtype: DType) -> &ImageProjector {
+        select_f32(dtype, &self.projector, self.projector_f32.as_ref())
+    }
+
     /// Load the OCR model from disk, pulling configuration and language-model weights.
     ///
     /// The vision/projector paths are stubbed for now; they will be filled in once the Candle
@@ -831,6 +948,7 @@ impl DeepseekOcrModel {
         dtype: DType,
     ) -> Result<Self> {
         let cfg = Arc::new(load_ocr_config(config_path)?);
+        let variant = detect_ocr_variant(&cfg);
         let language_cfg = Arc::new(cfg.resolved_language_config()?);
         let snapshot = if let Some(path) = snapshot_path {
             info!(
@@ -861,9 +979,47 @@ impl DeepseekOcrModel {
             VarBuilder::from_mmaped_safetensors(&[resolved_weights.as_path()], dtype, &device)
         }
         .with_context(|| format!("failed to mmap weights at {}", resolved_weights.display()))?;
-        let language =
-            DeepseekLanguageModel::load_with_snapshot(language_cfg, &vb, snapshot.as_deref())
-                .context("failed to load language model")?;
+        let mut language = DeepseekLanguageModel::load_with_snapshot(
+            language_cfg.clone(),
+            &vb,
+            snapshot.as_deref(),
+        )
+        .context("failed to load language model")?;
+
+        let low_precision = matches!(dtype, DType::F16 | DType::BF16);
+        if low_precision {
+            let vb_f32_lang = unsafe {
+                VarBuilder::from_mmaped_safetensors(
+                    &[resolved_weights.as_path()],
+                    DType::F32,
+                    &device,
+                )
+            }
+            .with_context(|| {
+                format!(
+                    "failed to mmap f32 language weights at {}",
+                    resolved_weights.display()
+                )
+            })?;
+
+            let norm_f32 = vb_f32_lang
+                .pp("model")
+                .pp("norm")
+                .get(language_cfg.hidden_size, "weight")
+                .context("failed to load f32 final layernorm weight")?
+                .to_dtype(DType::F32)?
+                .contiguous()?;
+            let lm_head_f32 = vb_f32_lang
+                .pp("lm_head")
+                .get(
+                    (language_cfg.vocab_size, language_cfg.hidden_size),
+                    "weight",
+                )
+                .context("failed to load f32 lm_head weight")?
+                .to_dtype(DType::F32)?
+                .contiguous()?;
+            language.set_output_weights_f32(norm_f32, lm_head_f32);
+        }
         let projector_cfg = Arc::new(
             cfg.resolved_projector_config()
                 .context("projector configuration missing")?,
@@ -876,11 +1032,56 @@ impl DeepseekOcrModel {
         );
         let projector = ImageProjector::load(&vb, projector_cfg.as_ref(), snapshot.as_deref())
             .context("failed to load image projector")?;
-        let sam = SamBackbone::new(cfg.as_ref(), &vb.pp("model").pp("sam_model"))
-            .context("failed to load SAM backbone")?;
-        let clip = ClipVisionModel::load(cfg.as_ref(), &vb.pp("model").pp("vision_model"))
-            .context("failed to load CLIP vision model")?;
-        let vision = VisionModules { sam, clip };
+        let low_precision = matches!(dtype, DType::F16 | DType::BF16);
+        let (projector_f32, vision_f32, vision_ocr2_f32) = if low_precision {
+            let vb_f32 = unsafe {
+                VarBuilder::from_mmaped_safetensors(
+                    &[resolved_weights.as_path()],
+                    DType::F32,
+                    &device,
+                )
+            }
+            .with_context(|| {
+                format!(
+                    "failed to mmap f32 weights at {}",
+                    resolved_weights.display()
+                )
+            })?;
+            let projector_f32 =
+                ImageProjector::load(&vb_f32, projector_cfg.as_ref(), snapshot.as_deref())
+                    .context("failed to load f32 image projector")?;
+            let (vision_f32, vision_ocr2_f32) = match variant {
+                OcrVariant::Ocr1 => {
+                    let sam = SamBackbone::new(cfg.as_ref(), &vb_f32.pp("model").pp("sam_model"))
+                        .context("failed to load f32 SAM backbone")?;
+                    let clip =
+                        ClipVisionModel::load(cfg.as_ref(), &vb_f32.pp("model").pp("vision_model"))
+                            .context("failed to load f32 CLIP vision model")?;
+                    (Some(Box::new(VisionModules { sam, clip })), None)
+                }
+                OcrVariant::Ocr2 => {
+                    let vision = Qwen2VisionEncoder::new(cfg.as_ref(), &vb_f32)
+                        .context("failed to load f32 Qwen2 vision encoder")?;
+                    (None, Some(Box::new(vision)))
+                }
+            };
+            (Some(projector_f32), vision_f32, vision_ocr2_f32)
+        } else {
+            (None, None, None)
+        };
+        let vision = match variant {
+            OcrVariant::Ocr1 => {
+                let sam = SamBackbone::new(cfg.as_ref(), &vb.pp("model").pp("sam_model"))
+                    .context("failed to load SAM backbone")?;
+                let clip = ClipVisionModel::load(cfg.as_ref(), &vb.pp("model").pp("vision_model"))
+                    .context("failed to load CLIP vision model")?;
+                VisionBackend::Ocr1(Box::new(VisionModules { sam, clip }))
+            }
+            OcrVariant::Ocr2 => VisionBackend::Ocr2(Box::new(
+                Qwen2VisionEncoder::new(cfg.as_ref(), &vb)
+                    .context("failed to load Qwen2 vision encoder")?,
+            )),
+        };
         // Log quantization summary after all quantizable modules (language + projector) are loaded.
         QuantizationState::global().log_summary(&device);
 
@@ -889,7 +1090,11 @@ impl DeepseekOcrModel {
             language,
             projector_cfg,
             projector,
+            projector_f32,
+            variant,
             vision,
+            vision_f32,
+            vision_ocr2_f32,
             device,
             dtype,
             weights_path: resolved_weights,
@@ -937,6 +1142,27 @@ impl DeepseekOcrModel {
         DynamicCache::with_num_layers(layers)
     }
 
+    /// Construct a fresh dynamic cache sized for this model, matching the model dtype.
+    pub fn new_cache_for_dtype(&self, dtype: DType) -> Result<DynamicCache> {
+        let layers = self.language.transformer_weights().layers.len();
+        let mut cache = DynamicCache::with_num_layers(layers);
+        // Pre-seed a zero-length cache entry per layer so cache dtype is deterministic.
+        // Low-precision models keep cache storage in f32 to reduce accumulation drift.
+        let store_dtype = cache_store_dtype(self.dtype, dtype);
+        for layer in 0..layers {
+            let heads = self.language.config().num_attention_heads;
+            let head_dim = self.language.config().hidden_size / heads;
+            let v_head_dim = self.language.config().v_head_dim.unwrap_or(head_dim);
+            let device = self.device.clone();
+            let key_t =
+                Tensor::zeros((1, heads, head_dim, 0), store_dtype, &device)?.contiguous()?;
+            let value =
+                Tensor::zeros((1, heads, 0, v_head_dim), store_dtype, &device)?.contiguous()?;
+            cache.append(layer, KvCacheChunk::new(key_t, value)?)?;
+        }
+        Ok(cache)
+    }
+
     /// Helper to guard prompt-scoped cache state.
     pub fn prompt_guard<'a>(&'a self, cache: &'a mut DynamicCache) -> PromptCacheGuard<'a> {
         self.language.prompt_guard(cache)
@@ -944,7 +1170,7 @@ impl DeepseekOcrModel {
 
     #[doc(hidden)]
     pub fn sam_backbone(&self) -> &SamBackbone {
-        &self.vision.sam
+        self.vision.sam_backbone()
     }
 
     /// Forward pass through the multimodal stack, applying optional image-token injection.
@@ -993,6 +1219,7 @@ impl DeepseekOcrModel {
         } else {
             None
         };
+
         let image_embeddings_slice = image_embeddings
             .map(Some)
             .unwrap_or_else(|| computed_embeddings.as_deref());
@@ -1001,14 +1228,23 @@ impl DeepseekOcrModel {
             embeddings = self.inject_image_tokens(embeddings, mask, image_embeddings_slice)?;
         }
 
-        self.language.forward(
+        let language_input_dtype = low_precision_compute_dtype(self.dtype);
+        embeddings = cast_dtype_owned(
+            embeddings,
+            language_input_dtype,
+            "failed to cast language input embeddings",
+        )?;
+
+        let lm_out = self.language.forward(
             None,
             Some(&embeddings),
             attention_mask,
             position_ids,
             cache,
             use_cache,
-        )
+        )?;
+
+        Ok(lm_out)
     }
 
     /// Convenience wrapper around the language-model forward path without image tokens.
@@ -1038,32 +1274,102 @@ impl DeepseekOcrModel {
         &self,
         inputs: &[Option<VisionInput<'_>>],
     ) -> Result<Vec<Tensor>> {
-        let ctx = VisionContext::new(self);
-        let hidden = ctx.hidden_size();
-        let dtype = ctx.dtype();
-        let device = ctx.device();
-        if ctx.parallel_enabled() {
-            inputs
-                .par_iter()
-                .map(|input| {
-                    if let Some(vision_input) = input {
-                        ctx.process_input(vision_input)
+        match &self.vision {
+            VisionBackend::Ocr1(_vision) => {
+                let compute_dtype = low_precision_compute_dtype(self.dtype);
+                let vision_native = self.vision_modules().context("vision modules missing")?;
+                let vision = select_f32(compute_dtype, vision_native, self.vision_modules_f32());
+                let projector = self.projector_for_dtype(compute_dtype);
+                let ctx = VisionContext::new_with_dtype(self, vision, projector, compute_dtype);
+                let hidden = ctx.hidden_size();
+                let device = ctx.device();
+                if ctx.parallel_enabled() {
+                    inputs
+                        .par_iter()
+                        .map(|input| {
+                            if let Some(vision_input) = input {
+                                ctx.process_input(vision_input)
+                            } else {
+                                Tensor::zeros((0, hidden), compute_dtype, device)
+                                    .map_err(Into::into)
+                            }
+                        })
+                        .collect::<Result<Vec<_>>>()
+                } else {
+                    inputs
+                        .iter()
+                        .map(|input| {
+                            if let Some(vision_input) = input {
+                                ctx.process_input(vision_input)
+                            } else {
+                                Tensor::zeros((0, hidden), compute_dtype, device)
+                                    .map_err(Into::into)
+                            }
+                        })
+                        .collect::<Result<Vec<_>>>()
+                }
+            }
+            VisionBackend::Ocr2(vision) => {
+                let hidden = self.projector.hidden_size();
+                let compute_dtype = low_precision_compute_dtype(self.dtype());
+                let device = self.device();
+                let parallel = matches!(self.device(), Device::Cpu);
+                let vision = select_f32(
+                    compute_dtype,
+                    vision.as_ref(),
+                    self.vision_ocr2_f32.as_deref(),
+                );
+
+                let encode = |vision_input: &VisionInput<'_>| -> Result<Tensor> {
+                    let global = prepare_image_tensor_for_device(
+                        vision_input.global,
+                        device,
+                        compute_dtype,
+                    )?;
+                    let patches = if let Some(patches) = vision_input.patches {
+                        Some(prepare_image_tensor_for_device(
+                            patches,
+                            device,
+                            compute_dtype,
+                        )?)
                     } else {
-                        Tensor::zeros((0, hidden), dtype, device).map_err(Into::into)
-                    }
-                })
-                .collect()
-        } else {
-            inputs
-                .iter()
-                .map(|input| {
-                    if let Some(vision_input) = input {
-                        ctx.process_input(vision_input)
-                    } else {
-                        Tensor::zeros((0, hidden), dtype, device).map_err(Into::into)
-                    }
-                })
-                .collect()
+                        None
+                    };
+                    let qwen_input = Qwen2VisionInput {
+                        global: &global,
+                        patches: patches.as_ref(),
+                        crop_shape: vision_input.crop_shape,
+                    };
+                    let encoded = vision.encode(qwen_input)?;
+                    cast_dtype_owned(encoded, compute_dtype, "qwen2 encoded dtype cast failed")
+                };
+
+                if parallel {
+                    inputs
+                        .par_iter()
+                        .map(|input| {
+                            if let Some(vision_input) = input {
+                                encode(vision_input)
+                            } else {
+                                Tensor::zeros((0, hidden), compute_dtype, device)
+                                    .map_err(Into::into)
+                            }
+                        })
+                        .collect()
+                } else {
+                    inputs
+                        .iter()
+                        .map(|input| {
+                            if let Some(vision_input) = input {
+                                encode(vision_input)
+                            } else {
+                                Tensor::zeros((0, hidden), compute_dtype, device)
+                                    .map_err(Into::into)
+                            }
+                        })
+                        .collect()
+                }
+            }
         }
     }
 
@@ -1154,19 +1460,26 @@ impl DeepseekOcrModel {
         &self,
         input: &VisionInput<'_>,
     ) -> Result<VisionDebugFeatures> {
+        let vision_dtype = self.dtype;
+        let vision_modules = match &self.vision {
+            VisionBackend::Ocr1(vision) => vision,
+            VisionBackend::Ocr2(_) => {
+                anyhow::bail!("vision debug features are not available for OCR2 backends")
+            }
+        };
         let global = self
             .prepare_image_tensor(input.global)
             .context("invalid global image tensor")?;
-        let (sam_global_raw, sam_trace_global_raw) = self
-            .vision
+        let (sam_global_raw, sam_trace_global_raw) = vision_modules
             .sam
             .forward_with_trace(&global)
             .context("sam forward (global)")?;
         let sam_global = sam_global_raw
             .contiguous()
             .context("sam global not contiguous")?;
-        let clip_trace_global_raw = self
-            .vision
+        let sam_global =
+            cast_dtype_owned(sam_global, vision_dtype, "sam global dtype cast failed")?;
+        let clip_trace_global_raw = vision_modules
             .clip
             .forward_with_trace(&global, Some(&sam_global))
             .context("clip forward (global)")?;
@@ -1259,16 +1572,16 @@ impl DeepseekOcrModel {
             let (patch_batch, _c, _h, _w) =
                 patches.shape().dims4().context("patch tensor must be 4D")?;
             if patch_batch > 0 {
-                let (sam_local_raw, sam_trace_local_raw) = self
-                    .vision
+                let (sam_local_raw, sam_trace_local_raw) = vision_modules
                     .sam
                     .forward_with_trace(&patches)
                     .context("sam forward (local)")?;
                 let sam_local = sam_local_raw
                     .contiguous()
                     .context("sam local not contiguous")?;
-                let clip_trace_local_raw = self
-                    .vision
+                let sam_local =
+                    cast_dtype_owned(sam_local, vision_dtype, "sam local dtype cast failed")?;
+                let clip_trace_local_raw = vision_modules
                     .clip
                     .forward_with_trace(&patches, Some(&sam_local))
                     .context("clip forward (local)")?;
@@ -1369,11 +1682,22 @@ impl DeepseekOcrModel {
     }
 
     fn process_vision_input_full(&self, input: &VisionInput<'_>) -> Result<VisionProcessArtifacts> {
-        VisionContext::new(self).process_input_full(input)
+        match &self.vision {
+            VisionBackend::Ocr1(vision) => {
+                let dtype = low_precision_compute_dtype(self.dtype);
+                let vision = select_f32(dtype, vision.as_ref(), self.vision_modules_f32());
+                let projector = self.projector_for_dtype(dtype);
+                VisionContext::new_with_dtype(self, vision, projector, dtype)
+                    .process_input_full(input)
+            }
+            VisionBackend::Ocr2(_) => {
+                anyhow::bail!("vision projection is not available for OCR2 backends")
+            }
+        }
     }
 
     fn prepare_image_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        VisionContext::new(self).prepare_image_tensor(tensor)
+        prepare_image_tensor_for_device(tensor, self.device(), self.dtype())
     }
 
     /// Construct normalized tensors for a single multimodal example.
@@ -1386,20 +1710,25 @@ impl DeepseekOcrModel {
     ) -> Result<OwnedVisionInput> {
         let global_size = if crop_mode { base_size } else { image_size };
         let global_view = build_global_view(image, global_size);
-        let global = image_to_tensor(&global_view, self.device(), self.dtype)?
+        let vision_dtype = low_precision_compute_dtype(self.dtype);
+        let global = image_to_tensor(&global_view, self.device(), vision_dtype)?
             .unsqueeze(0)?
             .contiguous()?;
 
         let (patches, crop_shape) = if crop_mode {
-            let preprocess = dynamic_preprocess(image, 2, 9, image_size, false);
-            let crop = (preprocess.ratio.0 as usize, preprocess.ratio.1 as usize);
+            let params = match self.variant {
+                OcrVariant::Ocr1 => PreprocessParams::ocr1(base_size, image_size),
+                OcrVariant::Ocr2 => PreprocessParams::ocr2(base_size, image_size),
+            };
+            let preprocess = dynamic_preprocess_with_params(image, &params, false);
+            let crop = (preprocess.grid().0 as usize, preprocess.grid().1 as usize);
             let tiles = preprocess.tiles;
             if tiles.is_empty() {
                 (None, Some(crop))
             } else {
                 tracing::info!("Preparing {} image crops for vision input", tiles.len());
                 let device = self.device().clone();
-                let dtype = self.dtype();
+                let dtype = vision_dtype;
                 let tensors: Vec<Tensor> = if matches!(self.device(), Device::Cpu) {
                     tiles
                         .into_par_iter()
@@ -1439,11 +1768,7 @@ impl DeepseekOcrModel {
                 tokens.len()
             );
         }
-        let mask = if mask.dtype() == DType::U8 {
-            mask.clone()
-        } else {
-            mask.to_dtype(DType::U8)?
-        };
+        let mask = cast_dtype(mask, DType::U8, "images_seq_mask dtype cast failed")?;
         let (mask_batch, mask_seq) = mask
             .shape()
             .dims2()
@@ -1476,10 +1801,13 @@ impl DeepseekOcrModel {
                 let per_batch = tokens
                     .get(b)
                     .context("image_embeddings missing entry for batch row")?;
-                let adapted = self
-                    .projector
-                    .adapt_tokens(per_batch, dtype, device)?
-                    .contiguous()?;
+                let adapted = cast_dtype(per_batch, dtype, "failed to cast image embeddings")?;
+                let adapted = if adapted.device().same_device(device) {
+                    adapted
+                } else {
+                    adapted.to_device(device)?
+                }
+                .contiguous()?;
                 let (count, embed_dim) = adapted
                     .shape()
                     .dims2()
@@ -1566,16 +1894,13 @@ impl DeepseekOcrModel {
         }
 
         let mut context_tokens = {
-            let rows = if input_ids.dtype() == DType::I64 {
-                input_ids
-                    .to_vec2::<i64>()
-                    .context("failed to extract prompt tokens for generation")?
-            } else {
-                input_ids
-                    .to_dtype(DType::I64)?
-                    .to_vec2::<i64>()
-                    .context("failed to extract prompt tokens for generation")?
-            };
+            let rows = cast_dtype(
+                input_ids,
+                DType::I64,
+                "failed to cast prompt tokens for generation",
+            )?
+            .to_vec2::<i64>()
+            .context("failed to extract prompt tokens for generation")?;
             rows.into_iter()
                 .next()
                 .context("input_ids must have batch dimension 1")?
@@ -1588,8 +1913,11 @@ impl DeepseekOcrModel {
         );
         let mut rng = init_rng(options.seed);
 
-        let mut cache = self.new_cache();
+        let mut cache = self.new_cache_for_dtype(self.dtype)?;
+        // Zero-length seeded cache entries are only used to lock dtype; clear them before decode.
+        cache.clear();
         let mut guard = self.prompt_guard(&mut cache);
+
         let prefill_timer = Timer::new("decode.prefill");
         let prefill = self.forward(
             Some(input_ids),
@@ -1615,6 +1943,19 @@ impl DeepseekOcrModel {
             .get(seq_len - 1)
             .context("prefill logits missing final timestep")?;
         let mut current = select_token_id(&last_logits, &options, &context_tokens, &mut rng)?;
+
+        // Debug-only: capture top-2 logits at a specific generated token step.
+        // step=0 corresponds to the first generated token (selected from prompt prefill logits).
+        #[cfg(feature = "cli-debug")]
+        if let (Some(cfg), Some(path)) = (
+            debug_logits_config_from_env(),
+            debug_logits_json_path_from_env(),
+        ) {
+            if cfg.step == 0 {
+                let info = logits_top2_at_step(0, &last_logits)?;
+                write_debug_logits_json(&path, &info, current)?;
+            }
+        }
         if let Some(eos) = options.eos_token_id
             && current == eos
         {
@@ -1629,6 +1970,7 @@ impl DeepseekOcrModel {
 
         let mut generated = Vec::with_capacity(options.max_new_tokens);
         let decode_timer = Timer::new("decode.iterative");
+        let decode_input_dtype = low_precision_compute_dtype(self.dtype);
         for step in 0..options.max_new_tokens {
             context_tokens.push(current);
             generated.push(current);
@@ -1640,12 +1982,17 @@ impl DeepseekOcrModel {
             }
             let token_index = usize::try_from(current)
                 .context("token id out of range while preparing decode embedding")?;
-            let decode_inputs = self
+            let mut decode_inputs = self
                 .language
                 .token_embedding_for_id(token_index)
                 .context("failed to gather embedding for decode token")?
                 .unsqueeze(0)?
                 .unsqueeze(0)?;
+            decode_inputs = cast_dtype_owned(
+                decode_inputs,
+                decode_input_dtype,
+                "failed to cast decode input embedding",
+            )?;
             let decode = self.forward(
                 None,
                 Some(&decode_inputs),
@@ -1664,6 +2011,18 @@ impl DeepseekOcrModel {
                 .get(0)
                 .context("decode logits missing timestep")?;
             current = select_token_id(&next_logits, &options, &context_tokens, &mut rng)?;
+
+            // step=N selects token N from logits given prompt + first N tokens.
+            #[cfg(feature = "cli-debug")]
+            if let (Some(cfg), Some(path)) = (
+                debug_logits_config_from_env(),
+                debug_logits_json_path_from_env(),
+            ) {
+                if cfg.step == step + 1 {
+                    let info = logits_top2_at_step(cfg.step, &next_logits)?;
+                    write_debug_logits_json(&path, &info, current)?;
+                }
+            }
             if let Some(eos) = options.eos_token_id
                 && current == eos
             {
@@ -1788,10 +2147,18 @@ impl DeepseekOcrModel {
         };
 
         let to_tensor_i64 = |data: &[i64], device: &Device| -> Result<Tensor> {
-            Ok(Tensor::from_slice(data, (1, data.len()), device)?.to_dtype(DType::I64)?)
+            cast_dtype_owned(
+                Tensor::from_slice(data, (1, data.len()), device)?,
+                DType::I64,
+                "failed to cast token ids to i64",
+            )
         };
         let to_tensor_u8 = |data: &[u8], device: &Device| -> Result<Tensor> {
-            Ok(Tensor::from_slice(data, (1, data.len()), device)?.to_dtype(DType::U8)?)
+            cast_dtype_owned(
+                Tensor::from_slice(data, (1, data.len()), device)?,
+                DType::U8,
+                "failed to cast image mask to u8",
+            )
         };
 
         let mut attention_tensor = match &attention_vec {
@@ -1973,14 +2340,10 @@ pub fn image_to_tensor(image: &DynamicImage, device: &Device, dtype: DType) -> R
         }
     }
     let tensor = Tensor::from_vec(data, (3, height as usize, width as usize), device)?;
-    if tensor.dtype() == dtype {
-        Ok(tensor)
-    } else {
-        Ok(tensor.to_dtype(dtype)?)
-    }
+    cast_dtype_owned(tensor, dtype, "image tensor dtype cast failed")
 }
 
-impl deepseek_ocr_core::inference::OcrEngine for DeepseekOcrModel {
+impl OcrEngine for DeepseekOcrModel {
     fn kind(&self) -> ModelKind {
         ModelKind::Deepseek
     }
@@ -2028,16 +2391,23 @@ impl deepseek_ocr_core::inference::OcrEngine for DeepseekOcrModel {
             vision.base_size,
             vision.image_size,
             vision.crop_mode,
+            self.variant,
         )
         .with_context(|| "prompt formatting failed")?;
 
         let input_len = input_ids_vec.len();
         let device = self.device();
 
-        let input_ids = Tensor::from_vec(input_ids_vec.clone(), (1, input_len), device)?
-            .to_dtype(DType::I64)?;
-        let mask_tensor =
-            Tensor::from_vec(mask_vec.clone(), (1, mask_vec.len()), device)?.to_dtype(DType::U8)?;
+        let input_ids = cast_dtype_owned(
+            Tensor::from_vec(input_ids_vec.clone(), (1, input_len), device)?,
+            DType::I64,
+            "failed to cast decode input_ids",
+        )?;
+        let mask_tensor = cast_dtype_owned(
+            Tensor::from_vec(mask_vec.clone(), (1, mask_vec.len()), device)?,
+            DType::U8,
+            "failed to cast decode images_seq_mask",
+        )?;
 
         let mut options = GenerateOptions::new(params.max_new_tokens);
         options.images_seq_mask = Some(&mask_tensor);
@@ -2163,6 +2533,7 @@ fn build_prompt_tokens(
     base_size: u32,
     image_size: u32,
     crop_mode: bool,
+    variant: OcrVariant,
 ) -> Result<(Vec<i64>, Vec<u8>)> {
     let timer = Timer::new("prompt.build_tokens");
     let image_token_id = tokenizer
@@ -2207,6 +2578,7 @@ fn build_prompt_tokens(
                 base_size,
                 image_size,
                 crop_mode,
+                variant,
             )?;
             tokens.extend(&placeholders);
             mask.extend(std::iter::repeat_n(1u8, placeholders.len()));
@@ -2232,45 +2604,74 @@ fn build_image_placeholders(
     base_size: u32,
     image_size: u32,
     crop_mode: bool,
+    variant: OcrVariant,
 ) -> Result<Vec<i64>> {
     const PATCH_SIZE: u32 = 16;
     const DOWNSAMPLE_RATIO: u32 = 4;
 
     let mut placeholders = Vec::new();
 
-    let push_grid = |placeholders: &mut Vec<i64>, rows: usize, cols: usize, add_terminal: bool| {
-        for _ in 0..rows {
-            placeholders.extend(std::iter::repeat_n(image_token_id, cols));
-            placeholders.push(image_token_id);
-        }
-        if add_terminal {
-            placeholders.push(image_token_id);
-        }
+    let push_grid_with_row_breaks =
+        |placeholders: &mut Vec<i64>, rows: usize, cols: usize, add_terminal: bool| {
+            for _ in 0..rows {
+                placeholders.extend(std::iter::repeat_n(image_token_id, cols));
+                placeholders.push(image_token_id);
+            }
+            if add_terminal {
+                placeholders.push(image_token_id);
+            }
+        };
+
+    let push_grid_flat = |placeholders: &mut Vec<i64>, rows: usize, cols: usize| {
+        placeholders.extend(std::iter::repeat_n(image_token_id, rows * cols));
     };
 
     if crop_mode {
-        let grid = (base_size / PATCH_SIZE) as usize;
-        let num_queries_global = ((grid as f32) / (DOWNSAMPLE_RATIO as f32)).ceil() as usize;
-        push_grid(
-            &mut placeholders,
-            num_queries_global,
-            num_queries_global,
-            true,
-        );
-
+        let global_grid = (base_size / PATCH_SIZE) as usize;
+        let num_queries_global = ((global_grid as f32) / (DOWNSAMPLE_RATIO as f32)).ceil() as usize;
+        let local_grid = (image_size / PATCH_SIZE) as usize;
+        let num_queries_local = ((local_grid as f32) / (DOWNSAMPLE_RATIO as f32)).ceil() as usize;
         let (width_crops, height_crops) = input.crop_shape.unwrap_or((1, 1));
+
         if width_crops > 1 || height_crops > 1 {
-            let local_grid = (image_size / PATCH_SIZE) as usize;
-            let num_queries_local =
-                ((local_grid as f32) / (DOWNSAMPLE_RATIO as f32)).ceil() as usize;
             let rows = num_queries_local * height_crops;
             let cols = num_queries_local * width_crops;
-            push_grid(&mut placeholders, rows, cols, false);
+            match variant {
+                OcrVariant::Ocr1 => {
+                    push_grid_with_row_breaks(&mut placeholders, rows, cols, false);
+                }
+                OcrVariant::Ocr2 => {
+                    push_grid_flat(&mut placeholders, rows, cols);
+                }
+            }
+        }
+
+        match variant {
+            OcrVariant::Ocr1 => {
+                push_grid_with_row_breaks(
+                    &mut placeholders,
+                    num_queries_global,
+                    num_queries_global,
+                    true,
+                );
+            }
+            OcrVariant::Ocr2 => {
+                push_grid_flat(&mut placeholders, num_queries_global, num_queries_global);
+                placeholders.push(image_token_id);
+            }
         }
     } else {
         let grid = (image_size / PATCH_SIZE) as usize;
         let num_queries = ((grid as f32) / (DOWNSAMPLE_RATIO as f32)).ceil() as usize;
-        push_grid(&mut placeholders, num_queries, num_queries, true);
+        match variant {
+            OcrVariant::Ocr1 => {
+                push_grid_with_row_breaks(&mut placeholders, num_queries, num_queries, true);
+            }
+            OcrVariant::Ocr2 => {
+                push_grid_flat(&mut placeholders, num_queries, num_queries);
+                placeholders.push(image_token_id);
+            }
+        }
     }
 
     anyhow::ensure!(
@@ -2280,4 +2681,25 @@ fn build_image_placeholders(
         expected_tokens
     );
     Ok(placeholders)
+}
+
+fn detect_ocr_variant(cfg: &DeepseekOcrConfig) -> OcrVariant {
+    if cfg
+        .vision_config
+        .as_ref()
+        .and_then(|v| v.model_name.as_deref())
+        .map(|name| name.eq_ignore_ascii_case("deepencoderv2"))
+        .unwrap_or(false)
+    {
+        return OcrVariant::Ocr2;
+    }
+    if cfg
+        .vision_config
+        .as_ref()
+        .and_then(|v| v.width.get("qwen2-0-5b"))
+        .is_some()
+    {
+        return OcrVariant::Ocr2;
+    }
+    OcrVariant::Ocr1
 }

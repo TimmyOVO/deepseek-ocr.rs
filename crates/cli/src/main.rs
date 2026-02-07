@@ -1,6 +1,7 @@
 mod app;
 mod args;
 mod bench;
+mod debug;
 mod logging;
 mod prompt;
 mod resources;

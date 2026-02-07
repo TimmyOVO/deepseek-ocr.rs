@@ -4,6 +4,8 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 use deepseek_ocr_config::{AppConfig, ConfigOverride, ConfigOverrides, config::InferenceOverride};
 use deepseek_ocr_core::runtime::{DeviceKind, Precision};
 
+use crate::debug::DebugArgs;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about = "DeepSeek-OCR CLI", long_about = None)]
 pub struct Cli {
@@ -76,6 +78,9 @@ pub struct InferArgs {
     /// Prompt file path (UTF-8). Overrides `--prompt` when provided.
     #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
     pub prompt_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub debug: DebugArgs,
 
     /// Conversation template name (plain/deepseek/deepseekv2/alignment).
     #[arg(long, help_heading = "Inference")]

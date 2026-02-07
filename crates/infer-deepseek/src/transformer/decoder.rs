@@ -19,27 +19,6 @@ pub struct TransformerDecoder {
     use_flash_attention: bool,
 }
 
-fn parse_layer_slice(spec: &str) -> Option<(usize, Option<usize>)> {
-    let trimmed = spec.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(idx) = trimmed.find("..") {
-        let start_str = &trimmed[..idx];
-        let end_str = &trimmed[idx + 2..];
-        let start = start_str.trim().parse::<usize>().ok()?;
-        let end = if end_str.trim().is_empty() {
-            None
-        } else {
-            Some(end_str.trim().parse::<usize>().ok()?)
-        };
-        Some((start, end))
-    } else {
-        let value = trimmed.parse::<usize>().ok()?;
-        Some((value, Some(value + 1)))
-    }
-}
-
 #[derive(Debug)]
 pub struct DecoderOutput {
     pub hidden_states: Tensor,
@@ -96,26 +75,26 @@ impl TransformerDecoder {
         let (batch, q_len, _) = hidden_states.shape().dims3()?;
         let dtype = hidden_states.dtype();
         let device = hidden_states.device();
+        let bias_dtype = if matches!(dtype, DType::F16 | DType::BF16) {
+            DType::F32
+        } else {
+            dtype
+        };
         let k_len = past_len + q_len;
 
-        let attn_bias =
-            build_attention_bias(attention_mask, batch, q_len, k_len, past_len, dtype, device)?;
+        let attn_bias = build_attention_bias(
+            attention_mask,
+            batch,
+            q_len,
+            k_len,
+            past_len,
+            bias_dtype,
+            device,
+        )?;
 
         let total_layers = self.weights.layers.len();
-        let (layer_start, layer_end) = std::env::var("DEEPSEEK_OCR_LAYER_SLICE")
-            .ok()
-            .and_then(|spec| parse_layer_slice(&spec))
-            .map(|(start, end_opt)| {
-                let end = end_opt.unwrap_or(total_layers);
-                (start.min(total_layers), end.min(total_layers))
-            })
-            .unwrap_or((0, total_layers));
-        ensure!(
-            layer_start < layer_end,
-            "invalid layer slice: {}..{}",
-            layer_start,
-            layer_end
-        );
+        let layer_start = 0;
+        let layer_end = total_layers;
 
         let head_dim = self.cfg.hidden_size / self.cfg.num_attention_heads;
         let rope_dim_cfg = self.cfg.qk_rope_head_dim.unwrap_or(head_dim);
@@ -194,7 +173,7 @@ impl TransformerDecoder {
             let output = {
                 let past = cache.as_deref().and_then(|cache| cache.get(idx));
                 let rope_refs = rope_tensors.as_ref().map(|(cos, sin)| (cos, sin));
-                block.forward(&hidden, attn_bias.as_ref(), rope_refs, past, use_cache)?
+                block.forward(idx, &hidden, attn_bias.as_ref(), rope_refs, past, use_cache)?
             };
             hidden = output.hidden_states;
             if let Some(present) = output.present_key_value

@@ -27,7 +27,7 @@ use tracing::info;
 
 use crate::{
     args::{InferArgs, SnapshotArgs, WeightsArgs, WeightsCommand},
-    bench,
+    bench, debug,
     prompt::load_prompt,
     resources::{
         ensure_config_file, ensure_tokenizer_file, prepare_snapshot_path, prepare_weights_path,
@@ -47,7 +47,14 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
     let bench_enabled = args.bench || args.bench_output.is_some();
     let bench_session = bench::maybe_start(bench_enabled, args.bench_output.clone())?;
 
-    let prompt_raw = load_prompt(&args)?;
+    // When `cli-debug` is enabled, allow overriding the prompt with a baseline
+    // `prompt.json` (rendered_prompt). This must happen before we validate
+    // that a prompt is present.
+    let prompt_raw = if let Some(override_prompt) = debug::load_prompt_override(&args.debug)? {
+        override_prompt
+    } else {
+        load_prompt(&args)?
+    };
 
     let fs = LocalFileSystem::new("deepseek-ocr");
     let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.config.as_deref())?;
@@ -112,6 +119,7 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
         )
     })?;
 
+    let prompt_user = prompt_raw.clone();
     let prompt_with_template = render_prompt(&app_config.inference.template, "", &prompt_raw)?;
     let image_slots = prompt_with_template.matches("<image>").count();
     anyhow::ensure!(
@@ -250,18 +258,57 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
         )
         .unwrap_or_default();
 
-    let final_delta = {
-        let mut state = progress_state.borrow_mut();
-        state.last_count = generated_tokens.len();
-        state.delta.advance(&decoded, true)
-    };
-    if !final_delta.is_empty() {
-        let mut handle = stdout.borrow_mut();
-        let _ = write!(handle, "{}", final_delta);
-        let _ = handle.flush();
+    if debug::wants_output_json(&args.debug) {
+        let device_label = format!("{device:?}");
+        let dtype_label = format!("{dtype:?}");
+        let image_paths: Vec<String> = args
+            .images
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        debug::write_output_json(
+            &args.debug,
+            debug::DebugOutput {
+                model_id: &resources.id,
+                weights_path: &weights_path,
+                tokenizer_path: &tokenizer_path,
+                device: &device_label,
+                dtype: &dtype_label,
+                template: &app_config.inference.template,
+                base_size: app_config.inference.base_size,
+                image_size: app_config.inference.image_size,
+                crop_mode: app_config.inference.crop_mode,
+                max_new_tokens: app_config.inference.max_new_tokens,
+                repetition_penalty: app_config.inference.repetition_penalty,
+                no_repeat_ngram_size: app_config.inference.no_repeat_ngram_size,
+                use_cache: app_config.inference.use_cache,
+                prompt_user: &prompt_user,
+                rendered_prompt: &prompt_with_template,
+                image_paths: &image_paths,
+                prompt_tokens,
+                generated_len: response_tokens,
+                tokens: &generated_tokens,
+                decoded: &decoded,
+                normalized: &normalized,
+            },
+        )?;
     }
-    info!("Final output:\n{normalized}");
 
+    // When quiet, we must not emit any decoded text to stdout.
+    // The gate script relies on stdout being clean for progress visualization.
+    if !quiet {
+        let final_delta = {
+            let mut state = progress_state.borrow_mut();
+            state.last_count = generated_tokens.len();
+            state.delta.advance(&decoded, true)
+        };
+        if !final_delta.is_empty() {
+            let mut handle = stdout.borrow_mut();
+            let _ = write!(handle, "{}", final_delta);
+            let _ = handle.flush();
+        }
+        info!("Final output:\n{normalized}");
+    }
     {
         let total_elapsed = elapsed;
         let prefill_elapsed = prefill_duration_cell
@@ -302,7 +349,6 @@ pub fn run_weights(args: WeightsArgs) -> Result<()> {
         WeightsCommand::Snapshot(cmd) => run_snapshot(cmd),
     }
 }
-
 fn run_snapshot(cmd: SnapshotArgs) -> Result<()> {
     let mut instructions = vec![
         "cargo run -p deepseek-ocr-dsq-cli --release -- export".to_string(),

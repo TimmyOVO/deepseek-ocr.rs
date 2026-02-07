@@ -348,7 +348,7 @@ mod tests {
             weight: Some(Tensor::zeros(
                 (cfg.vocab_size, cfg.hidden_size),
                 DType::F32,
-                device,
+                &device,
             )?),
             bias: None,
             qmatmul: None,

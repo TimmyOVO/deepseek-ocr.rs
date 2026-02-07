@@ -42,6 +42,7 @@ fn transformer_block_forward_shapes() -> Result<()> {
     let hidden = Tensor::zeros((1, 4, config.hidden_size), DType::F32, &device)?;
     let rope = rope_for(config.as_ref(), 1, 4, &device, DType::F32)?;
     let output = block.forward(
+        0,
         &hidden,
         None,
         rope.as_ref().map(|(c, s)| (c, s)),
@@ -75,6 +76,7 @@ fn transformer_block_handles_padding_mask() -> Result<()> {
     let mask = lengths_to_padding_mask(&[2], 4, &device)?;
     let rope = rope_for(config.as_ref(), 1, 4, &device, DType::F32)?;
     let output = block.forward(
+        0,
         &hidden,
         Some(&mask),
         rope.as_ref().map(|(c, s)| (c, s)),

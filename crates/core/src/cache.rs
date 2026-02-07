@@ -202,7 +202,17 @@ impl KvCacheEntry {
     }
 
     pub fn append(&mut self, chunk: &KvCacheChunk) -> Result<()> {
-        self.validate_chunk(chunk)?;
+        let chunk = if chunk.key_t.dtype() != self.key_t.dtype()
+            || chunk.value.dtype() != self.value.dtype()
+        {
+            KvCacheChunk::new(
+                chunk.key_t.to_dtype(self.key_t.dtype())?,
+                chunk.value.to_dtype(self.value.dtype())?,
+            )?
+        } else {
+            chunk.clone()
+        };
+        self.validate_chunk(&chunk)?;
         let chunk_len = chunk.seq_len();
         if chunk_len == 0 {
             return Ok(());

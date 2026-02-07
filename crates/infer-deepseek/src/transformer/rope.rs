@@ -17,6 +17,7 @@ pub struct RopeCache {
     rope_dim: usize,
     dtype: DType,
     device: Device,
+    force_f32: bool,
 }
 
 impl RopeCache {
@@ -25,8 +26,10 @@ impl RopeCache {
             rope_dim.is_multiple_of(2),
             "rope dimension must be even (got {rope_dim})"
         );
-        let cos = Tensor::zeros((1, 1, 0, rope_dim), dtype, device)?;
-        let sin = Tensor::zeros((1, 1, 0, rope_dim), dtype, device)?;
+        let force_f32 = matches!(dtype, DType::F16 | DType::BF16);
+        let cache_dtype = if force_f32 { DType::F32 } else { dtype };
+        let cos = Tensor::zeros((1, 1, 0, rope_dim), cache_dtype, device)?;
+        let sin = Tensor::zeros((1, 1, 0, rope_dim), cache_dtype, device)?;
         Ok(Self {
             cos,
             sin,
@@ -35,6 +38,7 @@ impl RopeCache {
             rope_dim,
             dtype,
             device: device.clone(),
+            force_f32,
         })
     }
 
@@ -60,9 +64,14 @@ impl RopeCache {
     }
 
     fn rebuild(&mut self, cfg: &DeepseekV2Config, new_cap: usize) -> Result<()> {
+        let cache_dtype = if self.force_f32 {
+            DType::F32
+        } else {
+            self.dtype
+        };
         if new_cap == 0 {
-            self.cos = Tensor::zeros((1, 1, 0, self.rope_dim), self.dtype, &self.device)?;
-            self.sin = Tensor::zeros((1, 1, 0, self.rope_dim), self.dtype, &self.device)?;
+            self.cos = Tensor::zeros((1, 1, 0, self.rope_dim), cache_dtype, &self.device)?;
+            self.sin = Tensor::zeros((1, 1, 0, self.rope_dim), cache_dtype, &self.device)?;
             self.cap = 0;
             self.len = 0;
             #[cfg(feature = "memlog")]
@@ -70,7 +79,7 @@ impl RopeCache {
             return Ok(());
         }
 
-        let (cos, sin) = build_rope_tables(cfg, new_cap, self.rope_dim, &self.device, self.dtype)?;
+        let (cos, sin) = build_rope_tables(cfg, new_cap, self.rope_dim, &self.device, cache_dtype)?;
         self.cos = cos;
         self.sin = sin;
         self.cap = new_cap;
@@ -141,12 +150,13 @@ impl RopeCache {
                 .reshape((batch, 1, seq_len, 1))?
                 .expand((batch, 1, seq_len, self.rope_dim))?
                 .contiguous()?;
-            Ok((cos_active.gather(&ids, 2)?, sin_active.gather(&ids, 2)?))
+            let cos = cos_active.gather(&ids, 2)?;
+            let sin = sin_active.gather(&ids, 2)?;
+            Ok((cos, sin))
         } else {
-            Ok((
-                cos_active.narrow(2, 0, seq_len)?,
-                sin_active.narrow(2, 0, seq_len)?,
-            ))
+            let cos = cos_active.narrow(2, 0, seq_len)?;
+            let sin = sin_active.narrow(2, 0, seq_len)?;
+            Ok((cos, sin))
         }
     }
 
@@ -174,7 +184,7 @@ fn build_rope_tables(
     let half = rope_dim / 2;
     let mut inv_freq = Vec::with_capacity(half);
     for i in 0..half {
-        let exponent = i as f32 / half as f32;
+        let exponent = (i as f32 * 2.0) / (rope_dim as f32);
         inv_freq.push(1.0f32 / base.powf(exponent));
     }
 

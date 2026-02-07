@@ -51,10 +51,43 @@ impl SamBackboneParams {
         let num_heads = backbone.heads.unwrap_or(12);
         let window_size = 14;
         let neck_channels = 256;
-        let out_channels = backbone
-            .downsample_channels
-            .clone()
-            .unwrap_or_else(|| vec![512, 1024]);
+        let mut out_channels = if let Some(channels) = backbone.downsample_channels.clone() {
+            channels
+        } else if let Some(widths) = vision
+            .and_then(|v| v.width.get("sam_vit_b"))
+            .and_then(|w| w.downsample_channels.clone())
+        {
+            widths
+        } else {
+            vec![512, 1024]
+        };
+        let qwen2_dim = vision
+            .and_then(|v| v.width.get("qwen2-0-5b"))
+            .and_then(|cfg| {
+                cfg.width.or_else(|| {
+                    cfg.extra
+                        .get("dim")
+                        .and_then(|value| value.as_u64())
+                        .map(|value| value as usize)
+                })
+            });
+        if let Some(dim) = qwen2_dim {
+            let current = out_channels.last().copied().unwrap_or(0);
+            if current != dim {
+                let first = out_channels.first().copied().unwrap_or(512);
+                out_channels = vec![first, dim];
+            }
+        } else if vision
+            .and_then(|v| v.model_name.as_deref())
+            .map(|name| name.eq_ignore_ascii_case("deepencoderv2"))
+            .unwrap_or(false)
+        {
+            let current = out_channels.last().copied().unwrap_or(0);
+            if current != 896 {
+                let first = out_channels.first().copied().unwrap_or(512);
+                out_channels = vec![first, 896];
+            }
+        }
         let global_attn_indexes = backbone
             .global_attn_indexes
             .clone()
@@ -196,9 +229,15 @@ impl SamBackbone {
             self.params.embed_dim,
         )?;
 
+        let input_f32 = if input.dtype() == DType::F32 {
+            input.clone()
+        } else {
+            input.to_dtype(DType::F32)?
+        };
+
         let patch = self
             .patch_embed
-            .forward(input)
+            .forward(&input_f32)
             .map_err(|err| anyhow!("patch embedding failed: {err}"))?;
 
         let mut x = patch
@@ -271,9 +310,15 @@ impl SamBackbone {
             self.params.embed_dim,
         )?;
 
+        let input_f32 = if input.dtype() == DType::F32 {
+            input.clone()
+        } else {
+            input.to_dtype(DType::F32)?
+        };
+
         let patch = self
             .patch_embed
-            .forward(input)
+            .forward(&input_f32)
             .map_err(|err| anyhow!("patch embedding failed: {err}"))?;
 
         let mut x = patch
@@ -400,7 +445,13 @@ impl PatchEmbed {
     }
 
     fn forward(&self, input: &Tensor) -> candle_core::Result<Tensor> {
-        self.conv.forward(input)
+        let weight_dtype = self.conv.weight().dtype();
+        let input = if input.dtype() == weight_dtype {
+            input.clone()
+        } else {
+            input.to_dtype(weight_dtype)?
+        };
+        self.conv.forward(&input)
     }
 }
 
@@ -450,8 +501,20 @@ impl SamNeck {
     }
 
     fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
-        let x = self.conv1.forward(x)?;
+        let weight_dtype = self.conv1.weight().dtype();
+        let x = if x.dtype() == weight_dtype {
+            x.clone()
+        } else {
+            x.to_dtype(weight_dtype)?
+        };
+        let x = self.conv1.forward(&x)?;
         let x = self.norm1.forward(&x)?;
+        let weight_dtype = self.conv2.weight().dtype();
+        let x = if x.dtype() == weight_dtype {
+            x
+        } else {
+            x.to_dtype(weight_dtype)?
+        };
         let x = self.conv2.forward(&x)?;
         self.norm2.forward(&x)
     }
@@ -492,6 +555,10 @@ impl SamDownsample {
                 h, w
             )));
         }
+        let weight_dtype = self.net2.weight().dtype();
+        if x.dtype() != weight_dtype {
+            x = x.to_dtype(weight_dtype)?;
+        }
         x = self.net2.forward(&x)?;
         let (_, _, h, w) = x.shape().dims4()?;
         if h % 2 != 0 || w % 2 != 0 {
@@ -499,6 +566,10 @@ impl SamDownsample {
                 "spatial dims {}x{} cannot be evenly downsampled by stride 2",
                 h, w
             )));
+        }
+        let weight_dtype = self.net3.weight().dtype();
+        if x.dtype() != weight_dtype {
+            x = x.to_dtype(weight_dtype)?;
         }
         self.net3.forward(&x)
     }
@@ -846,7 +917,8 @@ impl SamMlp {
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let x = linear_forward(&self.fc1, input)?;
-        let x = x.gelu()?;
+        // Match PyTorch `nn.GELU()` default (approximate="none").
+        let x = x.gelu_erf()?;
         linear_forward(&self.fc2, &x)
     }
 }
@@ -926,52 +998,64 @@ fn adapt_position_embedding(
 }
 
 pub fn bicubic_resize_antialiased(input: &Tensor, out_h: usize, out_w: usize) -> Result<Tensor> {
+    // Match PyTorch's internal antialiased bicubic implementation (aten::_upsample_bicubic2d_aa),
+    // which is based on Pillow's bicubic filter (a=-0.5) and uses a different
+    // center/span computation than the non-antialiased bicubic kernel.
     #[inline(always)]
-    fn cubic(a: f32, x: f32) -> f32 {
+    fn bicubic_filter_pillow(x: f32) -> f32 {
+        let a = -0.5f32;
         let x = x.abs();
-        if x <= 1.0 {
-            (a + 2.0) * x * x * x - (a + 3.0) * x * x + 1.0
+        if x < 1.0 {
+            ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0
         } else if x < 2.0 {
-            a * x * x * x - 5.0 * a * x * x + 8.0 * a * x - 4.0 * a
+            (((x - 5.0) * x + 8.0) * x - 4.0) * a
         } else {
             0.0
         }
     }
 
-    fn compute_axis_weights(
+    fn compute_axis_weights_aa(
         in_len: usize,
         out_len: usize,
         scale: f32,
-        support_scale: f32,
-        a: f32,
     ) -> (Vec<Vec<f32>>, Vec<Vec<usize>>) {
-        // PyTorch 在下采样时会把 bicubic 核的支撑区放大到 2 * support_scale，
-        // 相当于先低通滤波再重采样，避免 aliasing，尽量缩小和PyTorch实现的差别。
-        let radius = 2.0 * support_scale;
+        // For align_corners=false and size-based interpolation, PyTorch uses scale=in_len/out_len.
+        // With antialias, the filter support is expanded when downsampling.
+        let support = if scale >= 1.0 { 2.0 * scale } else { 2.0 };
+        let invscale = if scale >= 1.0 { 1.0 / scale } else { 1.0 };
+
         let mut weights = vec![Vec::new(); out_len];
         let mut indices = vec![Vec::new(); out_len];
 
         for out_idx in 0..out_len {
-            let center = (out_idx as f32 + 0.5) * scale - 0.5;
-            let start = (center - radius).floor() as isize;
-            let end = (center + radius).ceil() as isize;
-            let mut idxs = Vec::new();
-            let mut wts = Vec::new();
-            for src_idx in start..=end {
-                let clamped = src_idx.clamp(0, (in_len as isize) - 1) as usize;
-                let distance = (center - src_idx as f32) / support_scale;
-                let weight = cubic(a, distance) / support_scale;
-                if weight != 0.0 {
-                    idxs.push(clamped);
-                    wts.push(weight);
-                }
+            // Antialiased kernels use center = scale * (i + 0.5) (no -0.5 shift).
+            let center = scale * (out_idx as f32 + 0.5);
+
+            // Compute contiguous source span [xmin, xmin+xsize)
+            let xmin = ((center - support + 0.5).floor() as isize).max(0) as usize;
+            let xmax_excl =
+                ((center + support + 0.5).floor() as isize).min(in_len as isize) as usize;
+            let xsize = xmax_excl.saturating_sub(xmin);
+
+            let mut idxs = Vec::with_capacity(xsize);
+            let mut wts = Vec::with_capacity(xsize);
+            let xmin_m_center = xmin as f32 - center;
+            let mut total_w = 0f32;
+
+            for j in 0..xsize {
+                let arg = (j as f32 + xmin_m_center + 0.5) * invscale;
+                let w = bicubic_filter_pillow(arg);
+                idxs.push(xmin + j);
+                wts.push(w);
+                total_w += w;
             }
-            let sum: f32 = wts.iter().sum();
-            if sum != 0.0 {
+
+            if total_w != 0.0 {
                 for w in &mut wts {
-                    *w /= sum;
+                    *w /= total_w;
                 }
             }
+
             weights[out_idx] = wts;
             indices[out_idx] = idxs;
         }
@@ -979,6 +1063,7 @@ pub fn bicubic_resize_antialiased(input: &Tensor, out_h: usize, out_w: usize) ->
         (weights, indices)
     }
 
+    let orig_dtype = input.dtype();
     let input = input.contiguous()?.to_dtype(DType::F32)?;
     let (batch, channels, in_h, in_w) = input.shape().dims4()?;
     ensure!(batch == 1, "bicubic resize expects batch size 1");
@@ -989,12 +1074,9 @@ pub fn bicubic_resize_antialiased(input: &Tensor, out_h: usize, out_w: usize) ->
 
     let scale_y = in_h as f32 / out_h as f32;
     let scale_x = in_w as f32 / out_w as f32;
-    let support_y = scale_y.max(1.0);
-    let support_x = scale_x.max(1.0);
-    let a = -0.75f32;
 
-    let (wy, iy) = compute_axis_weights(in_h, out_h, scale_y, support_y, a);
-    let (wx, ix) = compute_axis_weights(in_w, out_w, scale_x, support_x, a);
+    let (wy, iy) = compute_axis_weights_aa(in_h, out_h, scale_y);
+    let (wx, ix) = compute_axis_weights_aa(in_w, out_w, scale_x);
 
     let flat = input.flatten_all()?.to_vec1::<f32>()?;
     let mut tmp = vec![0f32; channels * out_h * in_w];
@@ -1032,7 +1114,12 @@ pub fn bicubic_resize_antialiased(input: &Tensor, out_h: usize, out_w: usize) ->
         }
     }
 
-    Tensor::from_vec(out, (1, channels, out_h, out_w), input.device()).map_err(Into::into)
+    let out = Tensor::from_vec(out, (1, channels, out_h, out_w), input.device())?;
+    if orig_dtype == DType::F16 {
+        out.to_dtype(DType::F16).map_err(Into::into)
+    } else {
+        Ok(out)
+    }
 }
 fn compute_relative_bias(
     q: &Tensor,
@@ -1112,16 +1199,29 @@ fn get_rel_pos_vec(q_size: usize, k_size: usize, rel_pos: &Tensor) -> Result<Vec
         rel_data
     } else {
         let mut resized = vec![vec![0f32; head_dim]; max_rel_dist];
-        let scale = if max_rel_dist == 1 {
+        // Match PyTorch `F.interpolate(..., mode="linear")` default behavior
+        // (align_corners defaults to False for linear/bilinear/bicubic/trilinear).
+        // For align_corners=false and size-based interpolation:
+        //   src = scale * (dst + 0.5) - 0.5, where scale = in_len / out_len.
+        let scale = if max_rel_dist == 0 {
             0.0
         } else {
-            (orig_len - 1) as f32 / (max_rel_dist - 1) as f32
+            orig_len as f32 / max_rel_dist as f32
         };
         for (i, row) in resized.iter_mut().enumerate().take(max_rel_dist) {
-            let src_pos = scale * i as f32;
-            let left = src_pos.floor() as usize;
+            let mut src = scale * (i as f32 + 0.5) - 0.5;
+            // Linear (non-cubic) uses bounded indices.
+            if src < 0.0 {
+                src = 0.0;
+            }
+            let max_src = (orig_len - 1) as f32;
+            if src > max_src {
+                src = max_src;
+            }
+            let left_f = src.floor();
+            let left = left_f as usize;
             let right = (left + 1).min(orig_len - 1);
-            let weight = src_pos - left as f32;
+            let weight = (src - left_f).clamp(0.0, 1.0);
             for (d, value) in row.iter_mut().enumerate().take(head_dim) {
                 let left_val = rel_data[left][d];
                 let right_val = rel_data[right][d];

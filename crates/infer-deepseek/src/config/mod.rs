@@ -82,7 +82,12 @@ impl DeepseekOcrConfig {
             let defaults_value = serde_json::to_value(defaults)?;
             merge_missing(&mut primary_value, &defaults_value);
         }
-        let merged: DeepseekV2Config = serde_json::from_value(primary_value)?;
+        let mut merged: DeepseekV2Config = serde_json::from_value(primary_value)?;
+        if let Some(language_cfg) = &self.language_config {
+            if let Some(freq) = language_cfg.model.moe_layer_freq_override {
+                merged.moe_layer_freq = freq;
+            }
+        }
         Ok(merged)
     }
 
@@ -164,6 +169,8 @@ pub struct DeepseekV2Config {
     pub num_experts_per_tok: Option<usize>,
     #[serde(default = "default_moe_layer_freq")]
     pub moe_layer_freq: usize,
+    #[serde(default)]
+    pub moe_layer_freq_override: Option<usize>,
     #[serde(default)]
     pub first_k_dense_replace: Option<usize>,
     #[serde(default)]

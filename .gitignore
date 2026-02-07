@@ -25,3 +25,4 @@ DeepSeek_OCR
 ocr2_config.toml
 ocr2_config_deepseek.toml
 HunyuanOCR
+session

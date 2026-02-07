@@ -61,6 +61,15 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         preprocessor: None,
     },
     ModelAsset {
+        id: "deepseek-ocr-2",
+        kind: ModelKind::Deepseek,
+        repo_id: "deepseek-ai/DeepSeek-OCR-2",
+        config: "config.json",
+        tokenizer: "tokenizer.json",
+        weights: "model-00001-of-000001.safetensors",
+        preprocessor: None,
+    },
+    ModelAsset {
         id: "paddleocr-vl",
         kind: ModelKind::PaddleOcrVl,
         repo_id: "PaddlePaddle/PaddleOCR-VL",

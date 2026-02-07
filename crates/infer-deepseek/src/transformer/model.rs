@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, IndexOp, Tensor, quantized::QMatMul};
-use candle_nn::ops::rms_norm;
+use candle_nn::ops::{rms_norm, rms_norm_slow};
 use deepseek_ocr_core::tensor::gather_token_embeddings;
 
 use crate::{
@@ -20,6 +20,7 @@ use crate::{
 #[derive(Debug)]
 pub struct LanguageModelOutput {
     pub hidden_states: Tensor,
+    pub pre_logits: Tensor,
     pub logits: Tensor,
     pub aux_loss: Option<Tensor>,
 }
@@ -36,7 +37,9 @@ pub struct DeepseekLanguageModel {
     transformer_weights: Arc<TransformerWeights>,
     token_embedding: Tensor,
     final_layernorm: Tensor,
+    final_layernorm_f32: Option<Tensor>,
     lm_head_weight: Option<Tensor>,
+    lm_head_weight_f32: Option<Tensor>,
     lm_head_q: Option<Arc<QMatMul>>,
     lm_out_dim: usize,
     lm_in_dim: usize,
@@ -77,7 +80,9 @@ impl DeepseekLanguageModel {
             transformer_weights: transformer,
             token_embedding: weights.token_embedding,
             final_layernorm: weights.final_layernorm.weight,
+            final_layernorm_f32: None,
             lm_head_weight: weights.lm_head_weight,
+            lm_head_weight_f32: None,
             lm_head_q: weights.lm_head_q,
             lm_out_dim: weights.lm_out_dim,
             lm_in_dim: weights.lm_in_dim,
@@ -91,6 +96,11 @@ impl DeepseekLanguageModel {
 
     pub fn transformer_weights(&self) -> &TransformerWeights {
         self.transformer_weights.as_ref()
+    }
+
+    pub fn set_output_weights_f32(&mut self, norm: Tensor, lm_head: Tensor) {
+        self.final_layernorm_f32 = Some(norm);
+        self.lm_head_weight_f32 = Some(lm_head);
     }
 
     #[doc(hidden)]
@@ -109,7 +119,11 @@ impl DeepseekLanguageModel {
         } else {
             input_ids.to_dtype(DType::I64)?
         };
-        gather_token_embeddings(&self.token_embedding, &ids)
+        let mut embeds = gather_token_embeddings(&self.token_embedding, &ids)?;
+        if matches!(embeds.dtype(), DType::F16 | DType::BF16) {
+            embeds = embeds.to_dtype(DType::F32)?;
+        }
+        Ok(embeds)
     }
 
     pub fn token_embedding_for_id(&self, token_id: usize) -> Result<Tensor> {
@@ -118,7 +132,11 @@ impl DeepseekLanguageModel {
             token_id < vocab,
             "token id {token_id} out of bounds for vocab size {vocab}"
         );
-        Ok(self.token_embedding.i(token_id)?)
+        let mut embedding = self.token_embedding.i(token_id)?;
+        if matches!(embedding.dtype(), DType::F16 | DType::BF16) {
+            embedding = embedding.to_dtype(DType::F32)?;
+        }
+        Ok(embedding)
     }
 
     pub fn prompt_guard<'a>(&'a self, cache: &'a mut DynamicCache) -> PromptCacheGuard<'a> {
@@ -186,12 +204,36 @@ impl DeepseekLanguageModel {
             self.decoder
                 .forward(&embeds, attention_mask, position_ids_ref, cache, use_cache)?;
 
-        let normed = rms_norm(
-            &decoder_out.hidden_states,
-            &self.final_layernorm,
-            self.cfg.rms_norm_eps,
-        )?;
-        let (b, s, h) = normed.shape().dims3()?;
+        let hs = &decoder_out.hidden_states;
+        let (b, s, h) = hs.shape().dims3()?;
+
+        // Final RMSNorm + logits are sensitive for greedy argmax; keep
+        // low-precision activations on a stable f32 accumulation path.
+        let (normed, normed_f32_for_logits) = if hs.dtype() == DType::F32 {
+            let ln_w_f32 = if let Some(w) = &self.final_layernorm_f32 {
+                w.clone()
+            } else if self.final_layernorm.dtype() == DType::F32 {
+                self.final_layernorm.contiguous()?
+            } else {
+                self.final_layernorm.to_dtype(DType::F32)?.contiguous()?
+            };
+            let normed_f32 = rms_norm_slow(hs, &ln_w_f32, self.cfg.rms_norm_eps)?;
+            (normed_f32.clone(), Some(normed_f32))
+        } else if matches!(hs.dtype(), DType::F16 | DType::BF16) {
+            let hs_f32 = hs.to_dtype(DType::F32)?;
+            let ln_w_f32 = if let Some(w) = &self.final_layernorm_f32 {
+                w.clone()
+            } else {
+                self.final_layernorm.to_dtype(DType::F32)?.contiguous()?
+            };
+            let normed_f32 = rms_norm_slow(&hs_f32, &ln_w_f32, self.cfg.rms_norm_eps)?;
+            (normed_f32.to_dtype(hs.dtype())?, Some(normed_f32))
+        } else {
+            let normed = rms_norm(hs, &self.final_layernorm, self.cfg.rms_norm_eps)?;
+            (normed, None)
+        };
+
+        let pre_logits = normed.clone();
         ensure!(
             h == self.lm_in_dim,
             "lm_head expects hidden {}, got {}",
@@ -206,12 +248,30 @@ impl DeepseekLanguageModel {
                 .lm_head_weight
                 .as_ref()
                 .context("lm_head float weight missing for non-quantized path")?;
-            flat.matmul(&w.transpose(0, 1)?)?
+            let use_f32_logits = normed_f32_for_logits.is_some()
+                || matches!(hs.dtype(), DType::F16 | DType::BF16)
+                || hs.dtype() != w.dtype();
+            if use_f32_logits {
+                let flat_f32 = if let Some(normed_f32) = normed_f32_for_logits.as_ref() {
+                    normed_f32.reshape((b * s, h))?.contiguous()?
+                } else {
+                    flat.to_dtype(DType::F32)?.contiguous()?
+                };
+                let w_f32 = if let Some(w) = &self.lm_head_weight_f32 {
+                    w.clone()
+                } else {
+                    w.to_dtype(DType::F32)?
+                };
+                flat_f32.matmul(&w_f32.transpose(0, 1)?)?
+            } else {
+                flat.matmul(&w.transpose(0, 1)?)?
+            }
         };
         let logits = logits.reshape((b, s, self.lm_out_dim))?;
 
         Ok(LanguageModelOutput {
             hidden_states: normed,
+            pre_logits,
             logits,
             aux_loss: decoder_out.aux_loss,
         })
