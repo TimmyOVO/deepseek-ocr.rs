@@ -110,7 +110,7 @@ jobs:
           - cuda: '12.4.1'
             artifact_suffix_base: cuda12-4-1
           - cuda: '13.0.2'
-            artifact_suffix_base: cuda13-0-2-preview
+            artifact_suffix_base: cuda13-0-2
         exclude:
           - cuda: '12.4.1'
             compute_cap: 120
@@ -133,45 +133,12 @@ jobs:
           restore-keys: |
             windows-cargo-
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        if: matrix.cuda == '13.0.2'
-        with:
-          python-version: '3.x'
-
       - name: Install CUDA Toolkit ${{ matrix.cuda }}
         uses: Jimver/cuda-toolkit@v0.2.29
         with:
           cuda: ${{ matrix.cuda }}
           method: local
           log-file-suffix: windows-cuda.txt
-
-      - name: Switch Candle manifest to git tip
-        if: matrix.cuda == '13.0.2'
-        shell: pwsh
-        run: |
-          $pythonCode = @"
-          from pathlib import Path
-
-          path = Path('Cargo.toml')
-          text = path.read_text()
-          stable_core = 'candle-core = { version = "0.9", default-features = false }'
-          stable_nn = 'candle-nn = { version = "0.9", default-features = false }'
-          git_core = 'candle-core = { git = "https://github.com/huggingface/candle", rev = "d4545ebbbfb37d3cf0e228642ffaaa75b5d6bce9", default-features = false }'
-          git_nn = 'candle-nn = { git = "https://github.com/huggingface/candle", rev = "d4545ebbbfb37d3cf0e228642ffaaa75b5d6bce9", default-features = false }'
-          if stable_core not in text or stable_nn not in text:
-              raise SystemExit('Expected stable candle deps not found in Cargo.toml')
-          text = text.replace(stable_core, git_core, 1)
-          text = text.replace(stable_nn, git_nn, 1)
-          path.write_text(text)
-          "@
-          python -c $pythonCode
-
-      - name: Upgrade Candle to git tip for CUDA 13
-        if: matrix.cuda == '13.0.2'
-        shell: pwsh
-        run: |
-          cargo fetch
 
       - name: Locate MSVC toolchain
         shell: pwsh
@@ -226,7 +193,3 @@ jobs:
         with:
           files: deepseek-ocr-windows-${{ matrix.artifact_suffix_base }}-sm${{ matrix.compute_cap }}.zip
 
-      - name: Restore manifest and lockfile
-        if: matrix.cuda == '13.0.2'
-        shell: pwsh
-        run: git checkout -- Cargo.toml Cargo.lock
