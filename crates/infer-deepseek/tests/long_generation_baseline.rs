@@ -145,7 +145,8 @@ fn load_baseline(baseline_dir: &Path) -> Result<(BaselineMetadata, PromptAssets,
 fn expected_generated_tokens(out: &OutputTokens) -> Vec<i64> {
     let mut generated = out.tokens[out.prefill_len..].to_vec();
     if let Some(eos) = out.eos_token_id
-        && generated.last().copied() == Some(eos) {
+        && generated.last().copied() == Some(eos)
+    {
         generated.pop();
     }
     generated
@@ -279,8 +280,8 @@ fn run_one_baseline(baseline_dir: &Path) -> Result<()> {
             let mask_dbg = Tensor::from_vec(mask_dbg, (1, seq_len_dbg), model.device())?
                 .to_dtype(DType::U8)?;
 
-            let owned_input = model
-                .prepare_vision_input_from_image(&image, base_size, image_size, crop_mode)?;
+            let owned_input =
+                model.prepare_vision_input_from_image(&image, base_size, image_size, crop_mode)?;
             let vision_input = owned_input.as_ref();
             let image_embeddings = model.compute_image_embeddings(&[Some(vision_input)])?;
 

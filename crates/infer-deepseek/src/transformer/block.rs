@@ -531,9 +531,7 @@ fn attention_forward(
         kv_head_dim
     );
     if rope_dim > 0 {
-        let (cos, sin) = options
-            .rope
-            .context("missing rope tensors for attention")?;
+        let (cos, sin) = options.rope.context("missing rope tensors for attention")?;
         ensure!(
             cos.shape().dims() == [batch, 1, seq_len, rope_dim],
             "cos shape {:?} incompatible with (batch={}, seq={}, rope_dim={})",

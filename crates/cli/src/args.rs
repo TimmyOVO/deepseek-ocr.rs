@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
-use deepseek_ocr_config::{AppConfig, ConfigOverride, ConfigOverrides, config::InferenceOverride};
+use deepseek_ocr_config::{AppConfig, ConfigOverride, ConfigOverrides, InferenceOverride};
 use deepseek_ocr_core::runtime::{DeviceKind, Precision};
 
 use crate::debug::DebugArgs;
@@ -169,23 +169,22 @@ pub struct InferArgs {
 
 impl From<&InferArgs> for ConfigOverrides {
     fn from(args: &InferArgs) -> Self {
-        let inference = InferenceOverride {
-            device: args.device,
-            precision: args.dtype,
-            template: args.template.clone(),
-            base_size: args.base_size,
-            image_size: args.image_size,
-            crop_mode: args.crop_mode,
-            max_new_tokens: args.max_new_tokens,
-            use_cache: args.no_cache.then_some(false),
-            do_sample: args.do_sample,
-            temperature: args.temperature,
-            top_p: args.top_p,
-            top_k: args.top_k,
-            repetition_penalty: args.repetition_penalty,
-            no_repeat_ngram_size: args.no_repeat_ngram_size,
-            seed: args.seed,
-        };
+        let mut inference = InferenceOverride::default();
+        inference.device = args.device;
+        inference.precision = args.dtype;
+        inference.template = args.template.clone();
+        inference.base_size = args.base_size;
+        inference.image_size = args.image_size;
+        inference.crop_mode = args.crop_mode;
+        inference.max_new_tokens = args.max_new_tokens;
+        inference.use_cache = args.no_cache.then_some(false);
+        inference.do_sample = args.do_sample;
+        inference.temperature = args.temperature;
+        inference.top_p = args.top_p;
+        inference.top_k = args.top_k;
+        inference.repetition_penalty = args.repetition_penalty;
+        inference.no_repeat_ngram_size = args.no_repeat_ngram_size;
+        inference.seed = args.seed;
 
         ConfigOverrides {
             config_path: args.config.clone(),

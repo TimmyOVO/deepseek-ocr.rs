@@ -168,7 +168,53 @@ pub fn write_output_json(args: &DebugArgs, out: DebugOutput<'_>) -> Result<()> {
 
     #[cfg(not(feature = "cli-debug"))]
     {
-        let _ = (args, out);
+        let _ = args;
+        let DebugOutput {
+            model_id,
+            weights_path,
+            tokenizer_path,
+            device,
+            dtype,
+            template,
+            base_size,
+            image_size,
+            crop_mode,
+            max_new_tokens,
+            repetition_penalty,
+            no_repeat_ngram_size,
+            use_cache,
+            prompt_user,
+            rendered_prompt,
+            image_paths,
+            prompt_tokens,
+            generated_len,
+            tokens,
+            decoded,
+            normalized,
+        } = out;
+        let _ = (
+            model_id,
+            weights_path,
+            tokenizer_path,
+            device,
+            dtype,
+            template,
+            base_size,
+            image_size,
+            crop_mode,
+            max_new_tokens,
+            repetition_penalty,
+            no_repeat_ngram_size,
+            use_cache,
+            prompt_user,
+            rendered_prompt,
+            image_paths,
+            prompt_tokens,
+            generated_len,
+            tokens,
+            decoded,
+            normalized,
+        );
         Ok(())
     }
 }

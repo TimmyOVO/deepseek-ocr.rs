@@ -42,7 +42,12 @@ impl Default for ModelRegistry {
 }
 
 fn ensure_default_model_entries(entries: &mut BTreeMap<String, ModelEntry>) {
-    entries.entry("deepseek-ocr".to_string()).or_default();
+    entries
+        .entry("deepseek-ocr".to_string())
+        .or_insert_with(deepseek_ocr1_entry);
+    entries
+        .entry("deepseek-ocr-2".to_string())
+        .or_insert_with(deepseek_ocr2_entry);
     entries
         .entry("paddleocr-vl".to_string())
         .or_insert_with(|| ModelEntry {
@@ -57,31 +62,84 @@ fn ensure_default_model_entries(entries: &mut BTreeMap<String, ModelEntry>) {
         });
     entries
         .entry("deepseek-ocr-q4k".to_string())
-        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q4_K"));
+        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q4_K", "deepseek-ocr"));
     entries
         .entry("deepseek-ocr-q6k".to_string())
-        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q6_K"));
+        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q6_K", "deepseek-ocr"));
     entries
         .entry("deepseek-ocr-q8k".to_string())
-        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q8_0"));
+        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q8_0", "deepseek-ocr"));
     entries
         .entry("paddleocr-vl-q4k".to_string())
-        .or_insert_with(|| quantized_entry(ModelKind::PaddleOcrVl, "Q4_K"));
+        .or_insert_with(|| quantized_entry(ModelKind::PaddleOcrVl, "Q4_K", "paddleocr-vl"));
     entries
         .entry("paddleocr-vl-q6k".to_string())
-        .or_insert_with(|| quantized_entry(ModelKind::PaddleOcrVl, "Q6_K"));
+        .or_insert_with(|| quantized_entry(ModelKind::PaddleOcrVl, "Q6_K", "paddleocr-vl"));
     entries
         .entry("paddleocr-vl-q8k".to_string())
-        .or_insert_with(|| quantized_entry(ModelKind::PaddleOcrVl, "Q8_0"));
+        .or_insert_with(|| quantized_entry(ModelKind::PaddleOcrVl, "Q8_0", "paddleocr-vl"));
     entries
         .entry("dots-ocr-q4k".to_string())
-        .or_insert_with(|| quantized_entry(ModelKind::DotsOcr, "Q4_K"));
+        .or_insert_with(|| quantized_entry(ModelKind::DotsOcr, "Q4_K", "dots-ocr"));
     entries
         .entry("dots-ocr-q6k".to_string())
-        .or_insert_with(|| quantized_entry(ModelKind::DotsOcr, "Q6_K"));
+        .or_insert_with(|| quantized_entry(ModelKind::DotsOcr, "Q6_K", "dots-ocr"));
     entries
         .entry("dots-ocr-q8k".to_string())
-        .or_insert_with(|| quantized_entry(ModelKind::DotsOcr, "Q8_0"));
+        .or_insert_with(|| quantized_entry(ModelKind::DotsOcr, "Q8_0", "dots-ocr"));
+
+    ensure_model_defaults(entries);
+}
+
+fn deepseek_ocr1_entry() -> ModelEntry {
+    let mut entry = ModelEntry::default();
+    entry.defaults.inference.base_size = Some(1024);
+    entry.defaults.inference.image_size = Some(640);
+    entry.defaults.inference.crop_mode = Some(true);
+    entry
+}
+
+fn deepseek_ocr2_entry() -> ModelEntry {
+    let mut entry = ModelEntry::default();
+    entry.defaults.inference.base_size = Some(1024);
+    entry.defaults.inference.image_size = Some(768);
+    entry.defaults.inference.crop_mode = Some(true);
+    entry
+}
+
+fn ensure_model_defaults(entries: &mut BTreeMap<String, ModelEntry>) {
+    let ocr1_defaults = deepseek_ocr1_entry().defaults;
+    let ocr2_defaults = deepseek_ocr2_entry().defaults;
+
+    if let Some(entry) = entries.get_mut("deepseek-ocr") {
+        fill_missing_model_defaults(entry, &ocr1_defaults);
+    }
+    if let Some(entry) = entries.get_mut("deepseek-ocr-2") {
+        fill_missing_model_defaults(entry, &ocr2_defaults);
+    }
+
+    let quantized_deepseek_ids = ["deepseek-ocr-q4k", "deepseek-ocr-q6k", "deepseek-ocr-q8k"];
+    for model_id in quantized_deepseek_ids {
+        if let Some(entry) = entries.get_mut(model_id) {
+            fill_missing_model_defaults(entry, &ocr1_defaults);
+        }
+    }
+}
+
+fn fill_missing_model_defaults(entry: &mut ModelEntry, defaults: &ModelDefaults) {
+    fill_missing_inference_override(&mut entry.defaults.inference, &defaults.inference);
+}
+
+fn fill_missing_inference_override(target: &mut InferenceOverride, defaults: &InferenceOverride) {
+    if target.base_size.is_none() {
+        target.base_size = defaults.base_size;
+    }
+    if target.image_size.is_none() {
+        target.image_size = defaults.image_size;
+    }
+    if target.crop_mode.is_none() {
+        target.crop_mode = defaults.crop_mode;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +150,7 @@ pub struct ModelEntry {
     pub tokenizer: Option<PathBuf>,
     pub weights: Option<PathBuf>,
     pub snapshot: Option<SnapshotEntry>,
+    pub defaults: ModelDefaults,
 }
 
 impl Default for ModelEntry {
@@ -102,6 +161,7 @@ impl Default for ModelEntry {
             tokenizer: None,
             weights: None,
             snapshot: None,
+            defaults: ModelDefaults::default(),
         }
     }
 }
@@ -277,53 +337,13 @@ impl AppConfig {
             if let Some(path) = overrides.weights.as_ref() {
                 entry.weights = Some(path.clone());
             }
+
+            // Per-model inference defaults apply before CLI/runtime overrides.
+            entry.defaults.inference.apply_to(&mut self.inference);
         }
 
-        if let Some(device) = overrides.inference.device {
-            self.inference.device = device;
-        }
-        if overrides.inference.precision.is_some() {
-            self.inference.precision = overrides.inference.precision;
-        }
-        if let Some(template) = overrides.inference.template.as_ref() {
-            self.inference.template = template.clone();
-        }
-        if let Some(base_size) = overrides.inference.base_size {
-            self.inference.base_size = base_size;
-        }
-        if let Some(image_size) = overrides.inference.image_size {
-            self.inference.image_size = image_size;
-        }
-        if let Some(crop_mode) = overrides.inference.crop_mode {
-            self.inference.crop_mode = crop_mode;
-        }
-        if let Some(max_new_tokens) = overrides.inference.max_new_tokens {
-            self.inference.max_new_tokens = max_new_tokens;
-        }
-        if let Some(use_cache) = overrides.inference.use_cache {
-            self.inference.use_cache = use_cache;
-        }
-        if let Some(do_sample) = overrides.inference.do_sample {
-            self.inference.do_sample = do_sample;
-        }
-        if let Some(temperature) = overrides.inference.temperature {
-            self.inference.temperature = temperature;
-        }
-        if let Some(top_p) = overrides.inference.top_p {
-            self.inference.top_p = top_p;
-        }
-        if let Some(top_k) = overrides.inference.top_k {
-            self.inference.top_k = Some(top_k);
-        }
-        if let Some(repetition_penalty) = overrides.inference.repetition_penalty {
-            self.inference.repetition_penalty = repetition_penalty;
-        }
-        if let Some(no_repeat) = overrides.inference.no_repeat_ngram_size {
-            self.inference.no_repeat_ngram_size = Some(no_repeat);
-        }
-        if overrides.inference.seed.is_some() {
-            self.inference.seed = overrides.inference.seed;
-        }
+        overrides.inference.apply_to(&mut self.inference);
+
         if let Some(host) = overrides.server.host.as_ref() {
             self.server.host = host.clone();
         }
@@ -383,12 +403,18 @@ impl SnapshotEntry {
     }
 }
 
-fn quantized_entry(kind: ModelKind, dtype: &str) -> ModelEntry {
+fn quantized_entry(kind: ModelKind, dtype: &str, baseline_id: &str) -> ModelEntry {
+    let defaults = match baseline_id {
+        "deepseek-ocr" => deepseek_ocr1_entry().defaults,
+        "deepseek-ocr-2" => deepseek_ocr2_entry().defaults,
+        _ => ModelDefaults::default(),
+    };
     ModelEntry {
         kind,
         snapshot: Some(SnapshotEntry {
             dtype: dtype.to_string(),
         }),
+        defaults,
         ..ModelEntry::default()
     }
 }
@@ -468,7 +494,8 @@ pub struct ConfigOverrides {
     pub server: ServerOverride,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct InferenceOverride {
     pub device: Option<DeviceKind>,
     pub precision: Option<Precision>,
@@ -485,6 +512,70 @@ pub struct InferenceOverride {
     pub repetition_penalty: Option<f32>,
     pub no_repeat_ngram_size: Option<usize>,
     pub seed: Option<u64>,
+}
+
+impl InferenceOverride {
+    fn apply_to(&self, inference: &mut InferenceSettings) {
+        if let Some(device) = self.device {
+            inference.device = device;
+        }
+        if self.precision.is_some() {
+            inference.precision = self.precision;
+        }
+        if let Some(template) = self.template.as_ref() {
+            inference.template = template.clone();
+        }
+        if let Some(base_size) = self.base_size {
+            inference.base_size = base_size;
+        }
+        if let Some(image_size) = self.image_size {
+            inference.image_size = image_size;
+        }
+        if let Some(crop_mode) = self.crop_mode {
+            inference.crop_mode = crop_mode;
+        }
+        if let Some(max_new_tokens) = self.max_new_tokens {
+            inference.max_new_tokens = max_new_tokens;
+        }
+        if let Some(use_cache) = self.use_cache {
+            inference.use_cache = use_cache;
+        }
+        if let Some(do_sample) = self.do_sample {
+            inference.do_sample = do_sample;
+        }
+        if let Some(temperature) = self.temperature {
+            inference.temperature = temperature;
+        }
+        if let Some(top_p) = self.top_p {
+            inference.top_p = top_p;
+        }
+        if let Some(top_k) = self.top_k {
+            inference.top_k = Some(top_k);
+        }
+        if let Some(repetition_penalty) = self.repetition_penalty {
+            inference.repetition_penalty = repetition_penalty;
+        }
+        if let Some(no_repeat) = self.no_repeat_ngram_size {
+            inference.no_repeat_ngram_size = Some(no_repeat);
+        }
+        if self.seed.is_some() {
+            inference.seed = self.seed;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelDefaults {
+    pub inference: InferenceOverride,
+}
+
+impl Default for ModelDefaults {
+    fn default() -> Self {
+        Self {
+            inference: InferenceOverride::default(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]

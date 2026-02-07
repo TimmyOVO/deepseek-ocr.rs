@@ -61,7 +61,7 @@ fn compare_global_view_preprocessing() -> Result<()> {
     let mut reader = NpzReader::new(File::open(&npz_path)?)
         .with_context(|| format!("failed to open npz {}", npz_path.display()))?;
     let array = load_array_from_npz(&mut reader, "global_view_image0")?;
-    let dims: Vec<usize> = array.shape().iter().map(|&d| d as usize).collect();
+    let dims: Vec<usize> = array.shape().to_vec();
     let len = array.len();
     let (flat, offset) = array.into_raw_vec_and_offset();
     if let Some(off) = offset {
@@ -124,17 +124,13 @@ fn diff_images(
 
 fn flatten_to_2d(tensor: &Tensor) -> Result<Tensor> {
     match tensor.rank() {
-        2 => tensor
-            .contiguous()
-            .context("tensor not contiguous")
-            .map_err(Into::into),
+        2 => tensor.contiguous().context("tensor not contiguous"),
         3 => {
             let (d0, d1, d2) = tensor.shape().dims3()?;
             tensor
                 .reshape((d0 * d1, d2))?
                 .contiguous()
                 .context("flattened tensor not contiguous")
-                .map_err(Into::into)
         }
         other => bail!("unsupported tensor rank {} for flattening", other),
     }
@@ -146,10 +142,7 @@ fn tensor_f32_contiguous(tensor: &Tensor) -> Result<Tensor> {
     } else {
         tensor.to_dtype(DType::F32)?
     };
-    tensor
-        .contiguous()
-        .context("tensor not contiguous")
-        .map_err(Into::into)
+    tensor.contiguous().context("tensor not contiguous")
 }
 
 fn max_abs_diff_tensor_any(tensor: &Tensor, expected: &ArrayD<f32>) -> Result<(f32, Vec<usize>)> {
@@ -184,7 +177,7 @@ fn max_abs_diff_tensor_any(tensor: &Tensor, expected: &ArrayD<f32>) -> Result<(f
     }
 
     let mut coords = vec![0usize; dims_expected.len()];
-    if dims_expected.len() > 0 {
+    if !dims_expected.is_empty() {
         let mut remainder = max_index;
         for axis in (0..dims_expected.len()).rev() {
             let dim = dims_expected[axis];
