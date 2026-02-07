@@ -3,6 +3,7 @@
 target
 .DS_Store
 DeepSeek-OCR
+DeepSeek-OCR-2
 PaddleOCR-VL
 dots.ocr
 baselines/sample
