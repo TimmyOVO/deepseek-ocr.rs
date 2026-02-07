@@ -12,7 +12,6 @@ use deepseek_ocr_core::inference::{DecodeParameters, OcrEngine, VisionSettings};
 use deepseek_ocr_infer_deepseek::vision::dynamic_preprocess;
 use image::open;
 use serde::Deserialize;
-use tokenizers;
 
 fn top2(values: &[f32]) -> (usize, f32, usize, f32) {
     let mut best1 = (0usize, f32::NEG_INFINITY);
@@ -78,7 +77,7 @@ struct BaselineMetadata {
     #[serde(default)]
     crop_mode: Option<bool>,
     #[serde(default)]
-    max_new_tokens: Option<usize>,
+    _max_new_tokens: Option<usize>,
     #[serde(default)]
     prompt_assets_path: Option<String>,
     #[serde(default)]
@@ -145,10 +144,9 @@ fn load_baseline(baseline_dir: &Path) -> Result<(BaselineMetadata, PromptAssets,
 
 fn expected_generated_tokens(out: &OutputTokens) -> Vec<i64> {
     let mut generated = out.tokens[out.prefill_len..].to_vec();
-    if let Some(eos) = out.eos_token_id {
-        if generated.last().copied() == Some(eos) {
-            generated.pop();
-        }
+    if let Some(eos) = out.eos_token_id
+        && generated.last().copied() == Some(eos) {
+        generated.pop();
     }
     generated
 }
@@ -267,47 +265,47 @@ fn run_one_baseline(baseline_dir: &Path) -> Result<()> {
         let generated_vec = outcome.generated_tokens;
 
         let mut debug_logits = None;
-        if generated_vec != expected {
-            if let Some(idx) = first_mismatch(&generated_vec, &expected) {
-                let prefix = &expected[..idx];
-                let mut all_tokens = prompt.input_ids.clone();
-                all_tokens.extend_from_slice(prefix);
-                let seq_len_dbg = all_tokens.len();
-                let input_ids_dbg = Tensor::from_vec(all_tokens, (1, seq_len_dbg), model.device())?
-                    .to_dtype(DType::I64)?;
-                let mut mask_dbg = prompt.images_seq_mask.clone();
-                mask_dbg.extend(std::iter::repeat_n(0u8, prefix.len()));
-                let mask_dbg = Tensor::from_vec(mask_dbg, (1, seq_len_dbg), model.device())?
-                    .to_dtype(DType::U8)?;
+        if generated_vec != expected
+            && let Some(idx) = first_mismatch(&generated_vec, &expected)
+        {
+            let prefix = &expected[..idx];
+            let mut all_tokens = prompt.input_ids.clone();
+            all_tokens.extend_from_slice(prefix);
+            let seq_len_dbg = all_tokens.len();
+            let input_ids_dbg = Tensor::from_vec(all_tokens, (1, seq_len_dbg), model.device())?
+                .to_dtype(DType::I64)?;
+            let mut mask_dbg = prompt.images_seq_mask.clone();
+            mask_dbg.extend(std::iter::repeat_n(0u8, prefix.len()));
+            let mask_dbg = Tensor::from_vec(mask_dbg, (1, seq_len_dbg), model.device())?
+                .to_dtype(DType::U8)?;
 
-                let owned_input = model
-                    .prepare_vision_input_from_image(&image, base_size, image_size, crop_mode)?;
-                let vision_input = owned_input.as_ref();
-                let image_embeddings = model.compute_image_embeddings(&[Some(vision_input)])?;
+            let owned_input = model
+                .prepare_vision_input_from_image(&image, base_size, image_size, crop_mode)?;
+            let vision_input = owned_input.as_ref();
+            let image_embeddings = model.compute_image_embeddings(&[Some(vision_input)])?;
 
-                let forward = model.forward(
-                    Some(&input_ids_dbg),
-                    None,
-                    None,
-                    None,
-                    Some(&mask_dbg),
-                    None,
-                    Some(image_embeddings.as_slice()),
-                    None,
-                    false,
-                )?;
-                let logits_last = forward
-                    .logits
-                    .get(0)
-                    .context("missing batch 0")?
-                    .get(seq_len_dbg - 1)
-                    .context("missing last timestep")?
-                    .to_dtype(DType::F32)?
-                    .contiguous()?;
-                let vec = logits_last.to_vec1::<f32>()?;
-                let (top1, top1v, top2, top2v) = top2(&vec);
-                debug_logits = Some((idx, top1, top1v, top2, top2v));
-            }
+            let forward = model.forward(
+                Some(&input_ids_dbg),
+                None,
+                None,
+                None,
+                Some(&mask_dbg),
+                None,
+                Some(image_embeddings.as_slice()),
+                None,
+                false,
+            )?;
+            let logits_last = forward
+                .logits
+                .get(0)
+                .context("missing batch 0")?
+                .get(seq_len_dbg - 1)
+                .context("missing last timestep")?
+                .to_dtype(DType::F32)?
+                .contiguous()?;
+            let vec = logits_last.to_vec1::<f32>()?;
+            let (top1, top1v, top2, top2v) = top2(&vec);
+            debug_logits = Some((idx, top1, top1v, top2, top2v));
         }
 
         let mut generated_vec_no_cache = None;
@@ -429,10 +427,10 @@ fn long_generation_baseline() -> Result<()> {
             .and_then(|s| s.to_str())
             .unwrap_or("<unknown>")
             .to_string();
-        if let Some(list) = &selected {
-            if !list.iter().any(|sel| sel == &name) {
-                continue;
-            }
+        if let Some(list) = &selected
+            && !list.iter().any(|sel| sel == &name)
+        {
+            continue;
         }
         if let Some(list) = &variants {
             let meta: BaselineMetadata =

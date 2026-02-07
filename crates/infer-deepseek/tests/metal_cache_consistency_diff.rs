@@ -91,10 +91,9 @@ fn metal_cache_consistency_diff() -> Result<()> {
     let use_cache = true;
     let prefill_len = output.prefill_len;
     let mut expected = output.tokens[prefill_len..].to_vec();
-    if let Some(eos) = output.eos_token_id {
-        if expected.last().copied() == Some(eos) {
-            expected.pop();
-        }
+    if let Some(eos) = output.eos_token_id
+        && expected.last().copied() == Some(eos) {
+        expected.pop();
     }
     ensure!(
         mismatch_idx < expected.len(),
@@ -108,7 +107,7 @@ fn metal_cache_consistency_diff() -> Result<()> {
 
     let mut mask_full = prompt.images_seq_mask.clone();
     if mask_full.len() < prefix_len {
-        mask_full.extend(std::iter::repeat(0u8).take(prefix_len - mask_full.len()));
+        mask_full.extend(std::iter::repeat_n(0u8, prefix_len - mask_full.len()));
     } else {
         mask_full.truncate(prefix_len);
     }

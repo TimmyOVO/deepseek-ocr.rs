@@ -398,7 +398,7 @@ fn baseline_vision_embeddings_match_reference() -> Result<()> {
 
         if local_pre_py.is_empty() {
             assert!(
-                local_pre.as_ref().map_or(true, |tensor| tensor
+                local_pre.as_ref().is_none_or(|tensor| tensor
                     .shape()
                     .dims2()
                     .map(|(rows, _)| rows == 0)
@@ -649,13 +649,12 @@ fn baseline_generation_matches_reference() -> Result<()> {
                 .iter()
                 .filter_map(|&id| u32::try_from(id).ok())
                 .collect();
-            if !tokens.is_empty() {
-                if let Ok(decoded) = tokenizer_stream.decode(&tokens, true) {
-                    if !decoded.is_empty() {
-                        print!("{}", decoded);
-                        let _ = io::stdout().flush();
-                    }
-                }
+            if !tokens.is_empty()
+                && let Ok(decoded) = tokenizer_stream.decode(&tokens, true)
+                && !decoded.is_empty()
+            {
+                print!("{}", decoded);
+                let _ = io::stdout().flush();
             }
             *last = count;
         };
@@ -672,7 +671,7 @@ fn baseline_generation_matches_reference() -> Result<()> {
         let generated = model.generate(&input_ids, options)?;
         let generated_vec = generated.to_vec2::<i64>()?;
         let output_tokens = generated_vec
-            .get(0)
+            .first()
             .context("generation output missing row")?;
         println!(
             "Generated {} tokens (first 16: {:?})",
@@ -842,7 +841,7 @@ fn baseline_vision_projector_matches_reference() -> Result<()> {
 
         if local_post_py.is_empty() {
             assert!(
-                local_post.as_ref().map_or(true, |tensor| tensor
+                local_post.as_ref().is_none_or(|tensor| tensor
                     .shape()
                     .dims2()
                     .map(|(rows, _)| rows == 0)
@@ -863,7 +862,7 @@ fn baseline_vision_projector_matches_reference() -> Result<()> {
 
         if local_tokens_py.is_empty() {
             assert!(
-                local_tokens.as_ref().map_or(true, |tensor| tensor
+                local_tokens.as_ref().is_none_or(|tensor| tensor
                     .shape()
                     .dims2()
                     .map(|(rows, _)| rows == 0)
@@ -1038,7 +1037,7 @@ fn baseline_teacher_forcing_matches_reference() -> Result<()> {
         );
 
         let mut mask_vec = prompt.images_seq_mask.clone();
-        mask_vec.extend(std::iter::repeat(0u8).take(outputs.generated_len));
+        mask_vec.extend(std::iter::repeat_n(0u8, outputs.generated_len));
         assert_eq!(mask_vec.len(), seq_len, "mask length mismatch total tokens");
 
         let attention_mask = Tensor::ones((1, seq_len), DType::U8, device)?.to_dtype(DType::I64)?;

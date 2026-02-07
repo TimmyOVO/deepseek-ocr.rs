@@ -27,7 +27,8 @@ struct BaselineMetadata {
 
 #[derive(Debug, Deserialize)]
 struct PromptAssets {
-    input_ids: Vec<i64>,
+    #[serde(rename = "input_ids")]
+    _input_ids: Vec<i64>,
     images_seq_mask: Vec<u8>,
 }
 
@@ -101,10 +102,9 @@ fn metal_f16_f32_logits_diff() -> Result<()> {
         .unwrap_or(10);
     let prefill_len = output.prefill_len;
     let mut expected = output.tokens[prefill_len..].to_vec();
-    if let Some(eos) = output.eos_token_id {
-        if expected.last().copied() == Some(eos) {
-            expected.pop();
-        }
+    if let Some(eos) = output.eos_token_id
+        && expected.last().copied() == Some(eos) {
+        expected.pop();
     }
     ensure!(
         mismatch_idx < expected.len(),
@@ -118,7 +118,7 @@ fn metal_f16_f32_logits_diff() -> Result<()> {
 
     let mut mask = prompt.images_seq_mask.clone();
     if mask.len() < prefix_len {
-        mask.extend(std::iter::repeat(0u8).take(prefix_len - mask.len()));
+        mask.extend(std::iter::repeat_n(0u8, prefix_len - mask.len()));
     } else {
         mask.truncate(prefix_len);
     }
@@ -165,7 +165,7 @@ fn metal_f16_f32_logits_diff() -> Result<()> {
     let emb_f16 = model_f16.compute_image_embeddings(&[Some(vision_f16.as_ref())])?;
     let emb_f32 = model_f32.compute_image_embeddings(&[Some(vision_f32.as_ref())])?;
     let emb_f32_to_f16 = emb_f32
-        .get(0)
+        .first()
         .context("missing f32 embeddings")?
         .to_dtype(DType::F16)?;
     let emb_f32_to_f16 = vec![emb_f32_to_f16];

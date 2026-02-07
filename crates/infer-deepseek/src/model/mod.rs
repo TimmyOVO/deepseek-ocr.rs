@@ -2388,10 +2388,10 @@ impl OcrEngine for DeepseekOcrModel {
             prompt,
             &embeddings,
             &owned_inputs,
-            vision.base_size,
-            vision.image_size,
-            vision.crop_mode,
-            self.variant,
+            PromptBuildOptions {
+                vision,
+                variant: self.variant,
+            },
         )
         .with_context(|| "prompt formatting failed")?;
 
@@ -2525,15 +2525,17 @@ fn compute_image_embeddings(
     outputs
 }
 
+struct PromptBuildOptions {
+    vision: VisionSettings,
+    variant: OcrVariant,
+}
+
 fn build_prompt_tokens(
     tokenizer: &Tokenizer,
     prompt: &str,
     embeddings: &[Tensor],
     vision_inputs: &[OwnedVisionInput],
-    base_size: u32,
-    image_size: u32,
-    crop_mode: bool,
-    variant: OcrVariant,
+    options: PromptBuildOptions,
 ) -> Result<(Vec<i64>, Vec<u8>)> {
     let timer = Timer::new("prompt.build_tokens");
     let image_token_id = tokenizer
@@ -2575,10 +2577,10 @@ fn build_prompt_tokens(
                     .dims2()
                     .context("vision embedding must be 2D")?
                     .0,
-                base_size,
-                image_size,
-                crop_mode,
-                variant,
+                options.vision.base_size,
+                options.vision.image_size,
+                options.vision.crop_mode,
+                options.variant,
             )?;
             tokens.extend(&placeholders);
             mask.extend(std::iter::repeat_n(1u8, placeholders.len()));
@@ -2591,7 +2593,7 @@ fn build_prompt_tokens(
         event.add_field("tokens", total_tokens);
         event.add_field("image_tokens", image_tokens);
         event.add_field("segments", segments.len());
-        event.add_field("crop_mode", crop_mode);
+        event.add_field("crop_mode", options.vision.crop_mode);
     });
 
     Ok((tokens, mask))

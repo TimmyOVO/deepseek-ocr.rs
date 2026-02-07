@@ -539,39 +539,40 @@ mod tests {
         buf.extend_from_slice(value.as_bytes());
     }
 
-    fn build_snapshot_bytes_with_version(
-        version: u32,
+    struct SnapshotSpec<'a> {
         header_dtype: DsqTensorDType,
         record_dtype: DsqTensorDType,
         block_size: u32,
-        name: &str,
+        name: &'a str,
         out_dim: usize,
         in_dim: usize,
-        q_bytes: &[u8],
-        bias_bytes: Option<&[u8]>,
-    ) -> Vec<u8> {
+        q_bytes: &'a [u8],
+        bias_bytes: Option<&'a [u8]>,
+    }
+
+    fn build_snapshot_bytes_with_version(version: u32, spec: SnapshotSpec<'_>) -> Vec<u8> {
         let mut file = Vec::new();
         file.extend_from_slice(DSQ_MAGIC);
         file.extend_from_slice(&version.to_le_bytes());
         write_string(&mut file, "candle-test");
         write_string(&mut file, "model-id");
         write_string(&mut file, "CPU");
-        file.extend_from_slice(&(header_dtype.as_u32()).to_le_bytes());
-        file.extend_from_slice(&block_size.to_le_bytes());
+        file.extend_from_slice(&(spec.header_dtype.as_u32()).to_le_bytes());
+        file.extend_from_slice(&spec.block_size.to_le_bytes());
         file.extend_from_slice(&1u32.to_le_bytes());
-        let record_size = (4 + name.len()) + (4 * 3) + (8 * 4) + 4;
+        let record_size = (4 + spec.name.len()) + (4 * 3) + (8 * 4) + 4;
         let metadata_len = file.len() + record_size;
         let q_offset = metadata_len as u64;
-        let q_len = q_bytes.len() as u64;
-        let bias_len = bias_bytes.map(|b| b.len() as u64).unwrap_or(0);
+        let q_len = spec.q_bytes.len() as u64;
+        let bias_len = spec.bias_bytes.map(|b| b.len() as u64).unwrap_or(0);
         let bias_offset = q_offset + q_len;
-        write_string(&mut file, name);
-        file.extend_from_slice(&(out_dim as u32).to_le_bytes());
-        file.extend_from_slice(&(in_dim as u32).to_le_bytes());
-        file.extend_from_slice(&(record_dtype.as_u32()).to_le_bytes());
+        write_string(&mut file, spec.name);
+        file.extend_from_slice(&(spec.out_dim as u32).to_le_bytes());
+        file.extend_from_slice(&(spec.in_dim as u32).to_le_bytes());
+        file.extend_from_slice(&(spec.record_dtype.as_u32()).to_le_bytes());
         file.extend_from_slice(&q_offset.to_le_bytes());
         file.extend_from_slice(&q_len.to_le_bytes());
-        if let Some(_) = bias_bytes {
+        if spec.bias_bytes.is_some() {
             file.extend_from_slice(&bias_offset.to_le_bytes());
             file.extend_from_slice(&bias_len.to_le_bytes());
             file.extend_from_slice(&(DsqBiasDType::F32.as_u32()).to_le_bytes());
@@ -580,34 +581,15 @@ mod tests {
             file.extend_from_slice(&0u64.to_le_bytes());
             file.extend_from_slice(&0u32.to_le_bytes());
         }
-        file.extend_from_slice(q_bytes);
-        if let Some(bias) = bias_bytes {
+        file.extend_from_slice(spec.q_bytes);
+        if let Some(bias) = spec.bias_bytes {
             file.extend_from_slice(bias);
         }
         file
     }
 
-    fn build_snapshot_bytes(
-        header_dtype: DsqTensorDType,
-        record_dtype: DsqTensorDType,
-        block_size: u32,
-        name: &str,
-        out_dim: usize,
-        in_dim: usize,
-        q_bytes: &[u8],
-        bias_bytes: Option<&[u8]>,
-    ) -> Vec<u8> {
-        build_snapshot_bytes_with_version(
-            DSQ_VERSION,
-            header_dtype,
-            record_dtype,
-            block_size,
-            name,
-            out_dim,
-            in_dim,
-            q_bytes,
-            bias_bytes,
-        )
+    fn build_snapshot_bytes(spec: SnapshotSpec<'_>) -> Vec<u8> {
+        build_snapshot_bytes_with_version(DSQ_VERSION, spec)
     }
 
     #[test]
@@ -618,16 +600,16 @@ mod tests {
         let q_len = out_dim * blocks_per_row * (32 + 2);
         let q_bytes = vec![0xAB; q_len];
         let bias_bytes = vec![0u8; out_dim * 4];
-        let bytes = build_snapshot_bytes(
-            DsqTensorDType::Q8_0,
-            DsqTensorDType::Q8_0,
-            32,
-            "layer.q_proj.weight",
+        let bytes = build_snapshot_bytes(SnapshotSpec {
+            header_dtype: DsqTensorDType::Q8_0,
+            record_dtype: DsqTensorDType::Q8_0,
+            block_size: 32,
+            name: "layer.q_proj.weight",
             out_dim,
             in_dim,
-            &q_bytes,
-            Some(&bias_bytes),
-        );
+            q_bytes: &q_bytes,
+            bias_bytes: Some(&bias_bytes),
+        });
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();
         file.flush().unwrap();
@@ -647,20 +629,20 @@ mod tests {
 
     #[test]
     fn rejects_unaligned_q8() {
-        let out_dim = 64;
-        let in_dim = 30;
-        let q_len = out_dim * ((in_dim + 31) / 32) * (32 + 2);
+        let out_dim: usize = 64;
+        let in_dim: usize = 30;
+        let q_len = out_dim * in_dim.div_ceil(32) * (32 + 2);
         let q_bytes = vec![0xCD; q_len];
-        let bytes = build_snapshot_bytes(
-            DsqTensorDType::Q8_0,
-            DsqTensorDType::Q8_0,
-            32,
-            "bad",
+        let bytes = build_snapshot_bytes(SnapshotSpec {
+            header_dtype: DsqTensorDType::Q8_0,
+            record_dtype: DsqTensorDType::Q8_0,
+            block_size: 32,
+            name: "bad",
             out_dim,
             in_dim,
-            &q_bytes,
-            None,
-        );
+            q_bytes: &q_bytes,
+            bias_bytes: None,
+        });
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();
         file.flush().unwrap();
@@ -679,16 +661,16 @@ mod tests {
         let out_dim = 32;
         let in_dim = 512;
         let q_bytes = vec![0xEE; 4096];
-        let bytes = build_snapshot_bytes(
-            DsqTensorDType::Q4K,
-            DsqTensorDType::Q4K,
-            256,
-            "layer.o_proj.weight",
+        let bytes = build_snapshot_bytes(SnapshotSpec {
+            header_dtype: DsqTensorDType::Q4K,
+            record_dtype: DsqTensorDType::Q4K,
+            block_size: 256,
+            name: "layer.o_proj.weight",
             out_dim,
             in_dim,
-            &q_bytes,
-            None,
-        );
+            q_bytes: &q_bytes,
+            bias_bytes: None,
+        });
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();
         file.flush().unwrap();
@@ -705,16 +687,16 @@ mod tests {
         let out_dim = 32;
         let in_dim = 512;
         let q_bytes = vec![0xAA; 4096];
-        let bytes = build_snapshot_bytes(
-            DsqTensorDType::Q6K,
-            DsqTensorDType::Q6K,
-            256,
-            "layer.k_proj.weight",
+        let bytes = build_snapshot_bytes(SnapshotSpec {
+            header_dtype: DsqTensorDType::Q6K,
+            record_dtype: DsqTensorDType::Q6K,
+            block_size: 256,
+            name: "layer.k_proj.weight",
             out_dim,
             in_dim,
-            &q_bytes,
-            None,
-        );
+            q_bytes: &q_bytes,
+            bias_bytes: None,
+        });
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();
         file.flush().unwrap();
@@ -731,16 +713,16 @@ mod tests {
         let out_dim = 2;
         let in_dim = 3;
         let q_bytes = vec![0x11; out_dim * in_dim * 4];
-        let bytes = build_snapshot_bytes(
-            DsqTensorDType::Q8_0,
-            DsqTensorDType::F32,
-            32,
-            "float.weight",
+        let bytes = build_snapshot_bytes(SnapshotSpec {
+            header_dtype: DsqTensorDType::Q8_0,
+            record_dtype: DsqTensorDType::F32,
+            block_size: 32,
+            name: "float.weight",
             out_dim,
             in_dim,
-            &q_bytes,
-            None,
-        );
+            q_bytes: &q_bytes,
+            bias_bytes: None,
+        });
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();
         file.flush().unwrap();
@@ -757,16 +739,16 @@ mod tests {
         let out_dim = 2;
         let in_dim = 3;
         let q_bytes = vec![0x22; out_dim * in_dim * 4 - 1];
-        let bytes = build_snapshot_bytes(
-            DsqTensorDType::Q8_0,
-            DsqTensorDType::F32,
-            32,
-            "bad.float",
+        let bytes = build_snapshot_bytes(SnapshotSpec {
+            header_dtype: DsqTensorDType::Q8_0,
+            record_dtype: DsqTensorDType::F32,
+            block_size: 32,
+            name: "bad.float",
             out_dim,
             in_dim,
-            &q_bytes,
-            None,
-        );
+            q_bytes: &q_bytes,
+            bias_bytes: None,
+        });
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();
         file.flush().unwrap();

@@ -89,10 +89,9 @@ fn metal_f16_f32_layer_diff() -> Result<()> {
         .unwrap_or(328);
     let prefill_len = output.prefill_len;
     let mut expected = output.tokens[prefill_len..].to_vec();
-    if let Some(eos) = output.eos_token_id {
-        if expected.last().copied() == Some(eos) {
-            expected.pop();
-        }
+    if let Some(eos) = output.eos_token_id
+        && expected.last().copied() == Some(eos) {
+        expected.pop();
     }
     anyhow::ensure!(
         mismatch_idx < expected.len(),
@@ -117,7 +116,7 @@ fn metal_f16_f32_layer_diff() -> Result<()> {
 
     let mut mask = prompt.images_seq_mask.clone();
     if mask.len() < seq_len {
-        mask.extend(std::iter::repeat(0u8).take(seq_len - mask.len()));
+        mask.extend(std::iter::repeat_n(0u8, seq_len - mask.len()));
     } else {
         mask.truncate(seq_len);
     }

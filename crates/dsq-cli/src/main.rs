@@ -1209,6 +1209,14 @@ fn format_bias(record: &DsqRecord) -> String {
     }
 }
 
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1245,12 +1253,4 @@ mod tests {
         assert_eq!(QuantDTypeArg::Q4K.to_dtype(), DsqTensorDType::Q4K);
         assert_eq!(QuantDTypeArg::Q6K.to_dtype(), DsqTensorDType::Q6K);
     }
-}
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
 }

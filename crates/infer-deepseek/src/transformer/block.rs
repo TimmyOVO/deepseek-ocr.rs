@@ -141,11 +141,13 @@ impl<'a> TransformerBlock<'a> {
             &normed,
             &self.weights.attention,
             self.cfg,
-            additive_attn_bias,
-            rope,
-            past_key_value,
-            use_cache,
-            self.use_flash_attention,
+            AttentionForwardOptions {
+                additive_attn_bias,
+                rope,
+                past_key_value,
+                use_cache,
+                use_flash_attention: self.use_flash_attention,
+            },
         )
         .context("attention forward failed")?;
         let hidden_states = add_stable(residual, &attn_out).context("residual add (attention)")?;
@@ -433,29 +435,33 @@ fn attention_forward_f32_keep(
     Ok((out, present))
 }
 
+struct AttentionForwardOptions<'a> {
+    additive_attn_bias: Option<&'a Tensor>,
+    rope: Option<(&'a Tensor, &'a Tensor)>,
+    past_key_value: Option<&'a KvCacheEntry>,
+    use_cache: bool,
+    use_flash_attention: bool,
+}
+
 fn attention_forward(
     hidden_states: &Tensor,
     weights: &AttentionWeights,
     cfg: &DeepseekV2Config,
-    additive_attn_bias: Option<&Tensor>,
-    rope: Option<(&Tensor, &Tensor)>,
-    past_key_value: Option<&KvCacheEntry>,
-    use_cache: bool,
-    use_flash_attention: bool,
+    options: AttentionForwardOptions<'_>,
 ) -> Result<(Tensor, Option<KvCacheChunk>)> {
     if cfg.q_lora_rank.is_some() || cfg.kv_lora_rank.is_some() {
         bail!("LoRA attention path not yet implemented");
     }
 
-    if use_flash_attention
+    if options.use_flash_attention
         && let Some(result) = flash_attention_forward(
             hidden_states,
             weights,
             cfg,
-            rope,
-            additive_attn_bias,
-            past_key_value,
-            use_cache,
+            options.rope,
+            options.additive_attn_bias,
+            options.past_key_value,
+            options.use_cache,
         )?
     {
         return Ok(result);
@@ -482,30 +488,24 @@ fn attention_forward(
         cfg.v_head_dim.unwrap()
     };
 
-    let use_f32 = hidden_states.dtype() == DType::F32;
     let use_attn_f32 = is_low_precision(hidden_states);
+    let use_f32_projection = use_attn_f32 || hidden_states.dtype() == DType::F32;
     let use_cache_f32 = matches!(hidden_states.dtype(), DType::F16 | DType::BF16);
 
     // Query / key / value projections.
-    let mut q = if use_attn_f32 {
-        apply_linear_f32_keep(hidden_states, &weights.q_proj)?
-    } else if use_f32 {
+    let mut q = if use_f32_projection {
         apply_linear_f32_keep(hidden_states, &weights.q_proj)?
     } else {
         apply_linear(hidden_states, &weights.q_proj)?
     }
     .reshape((batch, seq_len, cfg.num_attention_heads, head_dim))?;
-    let mut k = if use_attn_f32 {
-        apply_linear_f32_keep(hidden_states, &weights.k_proj)?
-    } else if use_f32 {
+    let mut k = if use_f32_projection {
         apply_linear_f32_keep(hidden_states, &weights.k_proj)?
     } else {
         apply_linear(hidden_states, &weights.k_proj)?
     }
     .reshape((batch, seq_len, num_kv_heads, kv_head_dim))?;
-    let v = if use_attn_f32 {
-        apply_linear_f32_keep(hidden_states, &weights.v_proj)?
-    } else if use_f32 {
+    let v = if use_f32_projection {
         apply_linear_f32_keep(hidden_states, &weights.v_proj)?
     } else {
         apply_linear(hidden_states, &weights.v_proj)?
@@ -531,7 +531,9 @@ fn attention_forward(
         kv_head_dim
     );
     if rope_dim > 0 {
-        let (cos, sin) = rope.context("missing rope tensors for attention")?;
+        let (cos, sin) = options
+            .rope
+            .context("missing rope tensors for attention")?;
         ensure!(
             cos.shape().dims() == [batch, 1, seq_len, rope_dim],
             "cos shape {:?} incompatible with (batch={}, seq={}, rope_dim={})",
@@ -548,17 +550,17 @@ fn attention_forward(
             seq_len,
             rope_dim
         );
-        let cos = if use_attn_f32 || use_f32 {
+        let cos = if use_f32_projection {
             cos.to_dtype(DType::F32)?
         } else {
             cos.clone()
         };
-        let sin = if use_attn_f32 || use_f32 {
+        let sin = if use_f32_projection {
             sin.to_dtype(DType::F32)?
         } else {
             sin.clone()
         };
-        if use_attn_f32 || use_f32 {
+        if use_f32_projection {
             q = q.to_dtype(DType::F32)?;
             k = k.to_dtype(DType::F32)?;
         }
@@ -607,7 +609,7 @@ fn attention_forward(
 
     let mut cache_key_t_view: Option<Tensor> = None;
     let mut cache_value_view: Option<Tensor> = None;
-    let past_len = if let Some(cache) = past_key_value {
+    let past_len = if let Some(cache) = options.past_key_value {
         let key_view = cache.key_view()?;
         let value_view = cache.value_view()?;
         let (cache_batch, cache_heads, cache_dim, _) = key_view
@@ -675,30 +677,28 @@ fn attention_forward(
         } else {
             q_f32.matmul(&k_new_t_f32)?
         }
-    } else {
-        if let Some(cache_key_t) = cache_key_t_view.as_ref() {
-            let k_new_t_f16 = k_new_t.to_dtype(q.dtype())?;
-            let scores_new = q.matmul(&k_new_t_f16)?;
-            if past_len > 0 {
-                let cache_key_t = if q.dtype() == DType::F32 {
-                    cache_key_t.contiguous()?.to_dtype(DType::F32)?
-                } else {
-                    cache_key_t.contiguous()?.to_dtype(q.dtype())?
-                };
-                let scores_past = q.matmul(&cache_key_t)?;
-                Tensor::cat(&[scores_past, scores_new], D::Minus1)?
+    } else if let Some(cache_key_t) = cache_key_t_view.as_ref() {
+        let k_new_t_f16 = k_new_t.to_dtype(q.dtype())?;
+        let scores_new = q.matmul(&k_new_t_f16)?;
+        if past_len > 0 {
+            let cache_key_t = if q.dtype() == DType::F32 {
+                cache_key_t.contiguous()?.to_dtype(DType::F32)?
             } else {
-                scores_new
-            }
+                cache_key_t.contiguous()?.to_dtype(q.dtype())?
+            };
+            let scores_past = q.matmul(&cache_key_t)?;
+            Tensor::cat(&[scores_past, scores_new], D::Minus1)?
         } else {
-            let k_new_t_f16 = k_new_t.to_dtype(q.dtype())?;
-            q.matmul(&k_new_t_f16)?
+            scores_new
         }
+    } else {
+        let k_new_t_f16 = k_new_t.to_dtype(q.dtype())?;
+        q.matmul(&k_new_t_f16)?
     };
 
     let scale = (head_dim as f64).sqrt();
     let mut attn_scores = (attn_scores_mat / scale)?;
-    if let Some(bias) = additive_attn_bias {
+    if let Some(bias) = options.additive_attn_bias {
         let bias = if bias.dtype() != attn_scores.dtype() {
             bias.to_dtype(attn_scores.dtype())?
         } else {
@@ -775,7 +775,7 @@ fn attention_forward(
             attn_weights.matmul(&v_new)?
         }
     };
-    let present = if use_cache {
+    let present = if options.use_cache {
         let store_dtype = if use_cache_f32 || use_attn_f32 {
             DType::F32
         } else {

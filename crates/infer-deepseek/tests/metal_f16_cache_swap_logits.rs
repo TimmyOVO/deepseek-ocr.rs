@@ -129,10 +129,9 @@ fn metal_f16_cache_swap_logits() -> Result<()> {
         .unwrap_or(455);
     let prefill_len = output.prefill_len;
     let mut expected = output.tokens[prefill_len..].to_vec();
-    if let Some(eos) = output.eos_token_id {
-        if expected.last().copied() == Some(eos) {
-            expected.pop();
-        }
+    if let Some(eos) = output.eos_token_id
+        && expected.last().copied() == Some(eos) {
+        expected.pop();
     }
     ensure!(
         mismatch_idx < expected.len(),

@@ -936,7 +936,7 @@ mod tests {
             .build()
             .expect("wordlevel model");
         let mut tokenizer = Tokenizer::new(model);
-        tokenizer.with_pre_tokenizer(Some(Whitespace::default()));
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
         tokenizer
     }
 
@@ -1556,7 +1556,7 @@ mod tests {
         let fused = inject_image_embeddings(
             &base_embeddings,
             &image_mask_tensor,
-            &[projector_tensor.clone()],
+            std::slice::from_ref(&projector_tensor),
         )?
         .to_dtype(DType::F32)?;
         assert_close(
