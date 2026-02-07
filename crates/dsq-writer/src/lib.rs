@@ -617,8 +617,7 @@ pub fn quantize_q4k(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8>
         let start = row * cols;
         let row_slice = &weights[start..start + cols];
         let mut blocks = vec![<BlockQ4K as CandleGgmlType>::zeros(); blocks_per_row];
-        <BlockQ4K as CandleGgmlType>::from_float(row_slice, &mut blocks)
-            .map_err(|err| DsqWriterError::Quantization(err.to_string()))?;
+        <BlockQ4K as CandleGgmlType>::from_float(row_slice, &mut blocks);
         let bytes = unsafe {
             slice::from_raw_parts(blocks.as_ptr() as *const u8, blocks.len() * Q4K_BLOCK_BYTES)
         };
@@ -651,8 +650,7 @@ pub fn quantize_q6k(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8>
         let start = row * cols;
         let row_slice = &weights[start..start + cols];
         let mut blocks = vec![<BlockQ6K as CandleGgmlType>::zeros(); blocks_per_row];
-        <BlockQ6K as CandleGgmlType>::from_float(row_slice, &mut blocks)
-            .map_err(|err| DsqWriterError::Quantization(err.to_string()))?;
+        <BlockQ6K as CandleGgmlType>::from_float(row_slice, &mut blocks);
         let bytes = unsafe {
             slice::from_raw_parts(blocks.as_ptr() as *const u8, blocks.len() * Q6K_BLOCK_BYTES)
         };
@@ -850,7 +848,7 @@ mod tests {
                 let start = r * cols;
                 let row_slice = &weights[start..start + cols];
                 let mut blocks = vec![<BlockQ6K as CandleGgmlType>::zeros(); blocks_per_row];
-                <BlockQ6K as CandleGgmlType>::from_float(row_slice, &mut blocks).unwrap();
+                <BlockQ6K as CandleGgmlType>::from_float(row_slice, &mut blocks);
                 let bytes = unsafe {
                     slice::from_raw_parts(
                         blocks.as_ptr() as *const u8,
@@ -881,7 +879,7 @@ mod tests {
                 let start = r * cols;
                 let row_slice = &weights[start..start + cols];
                 let mut blocks = vec![<BlockQ4K as CandleGgmlType>::zeros(); blocks_per_row];
-                <BlockQ4K as CandleGgmlType>::from_float(row_slice, &mut blocks).unwrap();
+                <BlockQ4K as CandleGgmlType>::from_float(row_slice, &mut blocks);
                 let bytes = unsafe {
                     slice::from_raw_parts(
                         blocks.as_ptr() as *const u8,
