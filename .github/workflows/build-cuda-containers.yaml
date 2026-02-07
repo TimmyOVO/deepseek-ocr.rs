@@ -23,8 +23,6 @@ jobs:
     strategy:
       matrix:
         compute_cap:
-          - 70
-          - 75
           - 80
           - 86
           - 89
