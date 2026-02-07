@@ -9,7 +9,7 @@ use tokenizers::Tokenizer;
 use tracing::info;
 
 use deepseek_ocr_assets as assets;
-use deepseek_ocr_config::{AppConfig, LocalFileSystem};
+use deepseek_ocr_config::{AppConfig, InferenceOverride, InferenceSettings, LocalFileSystem};
 use deepseek_ocr_core::{DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings};
 use deepseek_ocr_infer_deepseek::load_model as load_deepseek_model;
 use deepseek_ocr_infer_dots::load_model as load_dots_model;
@@ -33,8 +33,8 @@ pub struct ModelListing {
 pub struct AppState {
     manager: ModelManager,
     current: Mutex<Option<LoadedModel>>,
-    vision: VisionSettings,
-    decode_defaults: DecodeParameters,
+    base_inference: InferenceSettings,
+    inference_overrides: InferenceOverride,
     available_models: Vec<ModelListing>,
 }
 
@@ -53,8 +53,8 @@ impl AppState {
         config: Arc<AppConfig>,
         device: Device,
         dtype: DType,
-        vision: VisionSettings,
-        decode_defaults: DecodeParameters,
+        base_inference: InferenceSettings,
+        inference_overrides: InferenceOverride,
     ) -> Result<Self> {
         let available_models = config
             .models
@@ -71,8 +71,8 @@ impl AppState {
         Ok(Self {
             manager,
             current: Mutex::new(None),
-            vision,
-            decode_defaults,
+            base_inference,
+            inference_overrides,
             available_models,
         })
     }
@@ -81,8 +81,48 @@ impl AppState {
         &self.available_models
     }
 
-    pub fn default_max_new_tokens(&self) -> usize {
-        self.decode_defaults.max_new_tokens
+    fn per_model_inference_settings(
+        &self,
+        model_id: &str,
+    ) -> Result<(VisionSettings, DecodeParameters), ApiError> {
+        let base_config = self.manager.config.as_ref();
+        let mut effective = self.base_inference.clone();
+        let Some(entry) = base_config.models.entries.get(model_id) else {
+            return Err(ApiError::BadRequest(format!(
+                "requested model `{model_id}` is not available"
+            )));
+        };
+
+        // Resolve requested model defaults first, then overlay process-level
+        // inference overrides captured at bootstrap.
+        entry.defaults.inference.apply_to(&mut effective);
+        self.inference_overrides.apply_to(&mut effective);
+
+        let model_defaults = DecodeParameters {
+            max_new_tokens: effective.max_new_tokens,
+            do_sample: effective.do_sample,
+            temperature: effective.temperature,
+            top_p: if effective.top_p < 1.0 {
+                Some(effective.top_p)
+            } else {
+                None
+            },
+            top_k: effective.top_k,
+            repetition_penalty: effective.repetition_penalty,
+            no_repeat_ngram_size: effective.no_repeat_ngram_size,
+            seed: effective.seed,
+            use_cache: effective.use_cache,
+        };
+
+        let decode = model_defaults;
+
+        let vision = VisionSettings {
+            base_size: effective.base_size,
+            image_size: effective.image_size,
+            crop_mode: effective.crop_mode,
+        };
+
+        Ok((vision, decode))
     }
 
     pub fn prepare_generation(
@@ -92,12 +132,13 @@ impl AppState {
         self.validate_model(requested_model)?;
         let (shared_model, tokenizer, model_id, kind) =
             self.ensure_model_loaded(requested_model)?;
+        let (vision, defaults) = self.per_model_inference_settings(requested_model)?;
         let inputs = GenerationInputs {
             kind,
             model: shared_model,
             tokenizer,
-            vision: self.vision,
-            defaults: self.decode_defaults.clone(),
+            vision,
+            defaults,
         };
         Ok((inputs, model_id))
     }
@@ -224,5 +265,56 @@ impl ModelManager {
             model: Arc::new(Mutex::new(model)),
             tokenizer,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_state(
+        base_inference: InferenceSettings,
+        inference_overrides: InferenceOverride,
+    ) -> AppState {
+        let fs = LocalFileSystem::new("deepseek-ocr-server-tests");
+        let config = Arc::new(AppConfig::default());
+        AppState::bootstrap(
+            fs,
+            config,
+            Device::Cpu,
+            DType::F32,
+            base_inference,
+            inference_overrides,
+        )
+        .expect("bootstrap state")
+    }
+
+    #[test]
+    fn ocr2_uses_its_model_default_image_size() {
+        let mut base = InferenceSettings::default();
+        base.image_size = 640;
+        let state = build_state(base, InferenceOverride::default());
+
+        let (vision, _) = state
+            .per_model_inference_settings("deepseek-ocr-2")
+            .expect("resolve ocr2 settings");
+        assert_eq!(vision.base_size, 1024);
+        assert_eq!(vision.image_size, 768);
+        assert!(vision.crop_mode);
+    }
+
+    #[test]
+    fn server_cli_overrides_model_defaults() {
+        let base = InferenceSettings::default();
+        let mut overrides = InferenceOverride::default();
+        overrides.image_size = Some(896);
+        overrides.base_size = Some(960);
+        let state = build_state(base, overrides);
+
+        let (vision, _) = state
+            .per_model_inference_settings("deepseek-ocr-2")
+            .expect("resolve overridden settings");
+        assert_eq!(vision.base_size, 960);
+        assert_eq!(vision.image_size, 896);
     }
 }

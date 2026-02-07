@@ -31,6 +31,7 @@ pub struct StreamContext {
 
 impl StreamContext {
     pub fn send_error(&self, message: &str) {
+        tracing::error!(error = %message, stream_kind = self.kind.label(), "stream send_error");
         match &self.kind {
             StreamKind::Responses { .. } => {
                 let _ = self.sender.send(Event::json(&json!({
@@ -76,6 +77,15 @@ pub enum StreamKind {
         model: String,
         created: i64,
     },
+}
+
+impl StreamKind {
+    fn label(&self) -> &'static str {
+        match self {
+            StreamKind::Responses { .. } => "responses",
+            StreamKind::Chat { .. } => "chat",
+        }
+    }
 }
 
 struct StreamControllerInner {

@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::SystemTime};
 
 use rocket::{Either, Route, State, serde::json::Json, tokio::sync::mpsc};
-use tracing::debug;
+use tracing::{debug, error};
 use uuid::Uuid;
 
 use deepseek_ocr_core::{DecodeParameters, ModelKind};
@@ -73,7 +73,7 @@ pub async fn responses_endpoint(
     let max_tokens = req
         .max_output_tokens
         .or(req.max_tokens)
-        .unwrap_or(state.default_max_new_tokens());
+        .unwrap_or(gen_inputs.defaults.max_new_tokens);
     let mut decode = base_decode_parameters(&gen_inputs, max_tokens);
     apply_decode_overrides(
         &mut decode,
@@ -105,14 +105,17 @@ pub async fn responses_endpoint(
         };
         let task_context = context.clone();
         rocket::tokio::spawn(async move {
-            let _ = generate_async(
+            if let Err(err) = generate_async(
                 stream_inputs,
                 prompt,
                 images,
                 decode_for_task,
                 Some(task_context),
             )
-            .await;
+            .await
+            {
+                error!(error = %err, "responses stream generation failed");
+            }
         });
         return Ok(Either::Right(stream));
     }
@@ -161,7 +164,7 @@ pub async fn chat_completions_endpoint(
         return Ok(Either::Left(Json(response)));
     }
     debug!(prompt = %prompt, "Prepared chat prompt");
-    let max_tokens = req.max_tokens.unwrap_or(state.default_max_new_tokens());
+    let max_tokens = req.max_tokens.unwrap_or(gen_inputs.defaults.max_new_tokens);
     let mut decode = base_decode_parameters(&gen_inputs, max_tokens);
     apply_decode_overrides(
         &mut decode,
@@ -191,14 +194,17 @@ pub async fn chat_completions_endpoint(
         };
         let task_context = context.clone();
         rocket::tokio::spawn(async move {
-            let _ = generate_async(
+            if let Err(err) = generate_async(
                 stream_inputs,
                 prompt,
                 images,
                 decode_for_task,
                 Some(task_context),
             )
-            .await;
+            .await
+            {
+                error!(error = %err, "chat stream generation failed");
+            }
         });
         return Ok(Either::Right(stream));
     }

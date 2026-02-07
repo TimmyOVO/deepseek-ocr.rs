@@ -515,7 +515,7 @@ pub struct InferenceOverride {
 }
 
 impl InferenceOverride {
-    fn apply_to(&self, inference: &mut InferenceSettings) {
+    pub fn apply_to(&self, inference: &mut InferenceSettings) {
         if let Some(device) = self.device {
             inference.device = device;
         }

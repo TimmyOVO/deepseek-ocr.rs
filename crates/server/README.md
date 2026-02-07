@@ -21,9 +21,9 @@ cargo run -p deepseek-ocr-server --release -- \
 | `--model-config PATH` | per-model default | Override the JSON config for the selected model. |
 | `--device` | `cpu` | Backend for inference: `cpu`, `metal`, or `cuda` (preview). |
 | `--dtype` | backend default | Numeric precision override (`f32`, `f16`, `bf16`, …). |
-| `--base-size` | `1024` | Global canvas resolution for the vision stack. |
-| `--image-size` | `640` | Local crop size when dynamic tiling is enabled (DeepSeek-OCR only). |
-| `--crop-mode` | `true` | Enables dynamic crop mode (DeepSeek-OCR only; ignored for PaddleOCR-VL). |
+| `--base-size` | model default | Global canvas resolution for the vision stack. DeepSeek OCR1 defaults to 1024, OCR2 also defaults to 1024. |
+| `--image-size` | model default | Local crop size when dynamic tiling is enabled. DeepSeek OCR1 defaults to 640, OCR2 defaults to 768. |
+| `--crop-mode` | model default (`true`) | Enables dynamic crop mode (DeepSeek backends); defaults are resolved per model entry. |
 | `--max-new-tokens` | `512` | Default decoding budget applied to incoming requests. |
 | `--host` | `0.0.0.0` | Address Rocket binds to. |
 | `--do-sample` | `false` | Enable sampling for all requests unless overridden per-call. |

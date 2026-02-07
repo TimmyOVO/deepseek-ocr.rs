@@ -6,7 +6,7 @@ use image::DynamicImage;
 use reqwest::blocking::Client;
 use rocket::tokio;
 use tokenizers::Tokenizer;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{
     error::ApiError,
@@ -16,6 +16,9 @@ use crate::{
 };
 
 type StreamCallback = Box<dyn Fn(usize, &[i64])>;
+
+const EMPTY_GENERATION_ERROR: &str =
+    "generation failed: model returned empty output (response_tokens=0 and text is empty)";
 
 #[derive(Debug)]
 pub struct GenerationResult {
@@ -57,6 +60,9 @@ pub async fn generate_async(
     match join_result {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(err)) => {
+            if stream.is_some() {
+                error!(error = %err, "stream generation failed");
+            }
             if let Some(ctx) = stream {
                 ctx.send_error(&err.to_string());
             }
@@ -64,6 +70,9 @@ pub async fn generate_async(
         }
         Err(err) => {
             let api_err = ApiError::Internal(format!("generation task failed: {err}"));
+            if stream.is_some() {
+                error!(error = %api_err, "stream generation task join failed");
+            }
             if let Some(ctx) = stream {
                 ctx.send_error(&api_err.to_string());
             }
@@ -149,6 +158,10 @@ fn generate_blocking(
             .take(120)
             .collect::<String>()
     );
+
+    if response_tokens == 0 && normalized.trim().is_empty() {
+        return Err(ApiError::Internal(EMPTY_GENERATION_ERROR.to_string()));
+    }
 
     if let Some(controller) = stream_controller.as_ref() {
         controller.flush_remaining(&generated_tokens);

@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use deepseek_ocr_config::{AppConfig, LocalFileSystem};
-use deepseek_ocr_core::{
-    DecodeParameters, VisionSettings,
-    runtime::{default_dtype_for_device, prepare_device_and_dtype},
-};
+use deepseek_ocr_config::{AppConfig, ConfigOverrides, LocalFileSystem};
+use deepseek_ocr_core::runtime::{default_dtype_for_device, prepare_device_and_dtype};
 use rocket::{Config, data::ToByteUnit};
 use tracing::info;
 
@@ -14,6 +11,7 @@ use crate::{args::Args, routes, state::AppState};
 pub async fn run(args: Args) -> Result<()> {
     let fs = LocalFileSystem::new("deepseek-ocr");
     let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.config.as_deref())?;
+    let base_inference = app_config.inference.clone();
     app_config += &args;
     app_config.normalise(&fs)?;
     info!(
@@ -26,34 +24,15 @@ pub async fn run(args: Args) -> Result<()> {
         prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
     let dtype = maybe_dtype.unwrap_or_else(|| default_dtype_for_device(&device));
 
-    let vision_settings = VisionSettings {
-        base_size: app_config.inference.base_size,
-        image_size: app_config.inference.image_size,
-        crop_mode: app_config.inference.crop_mode,
-    };
-    let decode_defaults = DecodeParameters {
-        max_new_tokens: app_config.inference.max_new_tokens,
-        do_sample: app_config.inference.do_sample,
-        temperature: app_config.inference.temperature,
-        top_p: if app_config.inference.top_p < 1.0 {
-            Some(app_config.inference.top_p)
-        } else {
-            None
-        },
-        top_k: app_config.inference.top_k,
-        repetition_penalty: app_config.inference.repetition_penalty,
-        no_repeat_ngram_size: app_config.inference.no_repeat_ngram_size,
-        seed: app_config.inference.seed,
-        use_cache: app_config.inference.use_cache,
-    };
+    let inference_overrides = ConfigOverrides::from(&args).inference;
 
     let state = AppState::bootstrap(
         fs.clone(),
         Arc::new(app_config.clone()),
         device.clone(),
         dtype,
-        vision_settings,
-        decode_defaults,
+        base_inference,
+        inference_overrides,
     )?;
 
     let figment = Config::figment()
