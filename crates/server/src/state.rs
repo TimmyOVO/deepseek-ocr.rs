@@ -13,6 +13,7 @@ use deepseek_ocr_config::{AppConfig, InferenceOverride, InferenceSettings, Local
 use deepseek_ocr_core::{DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings};
 use deepseek_ocr_infer_deepseek::load_model as load_deepseek_model;
 use deepseek_ocr_infer_dots::load_model as load_dots_model;
+use deepseek_ocr_infer_glm::load_model as load_glm_model;
 use deepseek_ocr_infer_paddleocr::load_model as load_paddle_model;
 
 use crate::{
@@ -244,6 +245,7 @@ impl ModelManager {
             ModelKind::Deepseek => load_deepseek_model(load_args)?,
             ModelKind::PaddleOcrVl => load_paddle_model(load_args)?,
             ModelKind::DotsOcr => load_dots_model(load_args)?,
+            ModelKind::GlmOcr => load_glm_model(load_args)?,
         };
         info!(
             "Model `{}` loaded in {:.2?} (kind={:?}, flash-attn: {}, weights={})",

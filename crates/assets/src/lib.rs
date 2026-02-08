@@ -87,6 +87,15 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         weights: "model.safetensors.index.json",
         preprocessor: Some("preprocessor_config.json"),
     },
+    ModelAsset {
+        id: "glm-ocr",
+        kind: ModelKind::GlmOcr,
+        repo_id: "zai-org/GLM-OCR",
+        config: "config.json",
+        tokenizer: "tokenizer.json",
+        weights: "model.safetensors",
+        preprocessor: Some("preprocessor_config.json"),
+    },
 ];
 
 pub const QUANTIZED_MODEL_ASSETS: &[QuantizedModelAsset] = &[

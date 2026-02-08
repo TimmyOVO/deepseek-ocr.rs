@@ -108,6 +108,9 @@ pub fn load_model(args: ModelLoadArgs<'_>) -> Result<Box<dyn OcrEngine>> {
         ModelKind::DotsOcr => Err(anyhow!(
             "ModelKind::DotsOcr cannot be loaded by the Deepseek engine"
         )),
+        ModelKind::GlmOcr => Err(anyhow!(
+            "ModelKind::GlmOcr cannot be loaded by the Deepseek engine"
+        )),
     }
 }
 

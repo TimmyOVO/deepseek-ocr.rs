@@ -739,6 +739,7 @@ dependencies = [
  "deepseek-ocr-core",
  "deepseek-ocr-infer-deepseek",
  "deepseek-ocr-infer-dots",
+ "deepseek-ocr-infer-glm",
  "deepseek-ocr-infer-paddleocr",
  "image",
  "serde",
@@ -886,6 +887,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepseek-ocr-infer-glm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+ "deepseek-ocr-core",
+ "image",
+ "serde",
+ "serde_json",
+ "tokenizers",
+]
+
+[[package]]
 name = "deepseek-ocr-infer-paddleocr"
 version = "0.1.0"
 dependencies = [
@@ -923,6 +938,7 @@ dependencies = [
  "deepseek-ocr-core",
  "deepseek-ocr-infer-deepseek",
  "deepseek-ocr-infer-dots",
+ "deepseek-ocr-infer-glm",
  "deepseek-ocr-infer-paddleocr",
  "image",
  "reqwest 0.12.24",

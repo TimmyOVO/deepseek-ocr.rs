@@ -13,6 +13,7 @@ members = [
     "crates/infer-deepseek",
     "crates/infer-dots",
     "crates/infer-paddleocr",
+    "crates/infer-glm",
 ]
 resolver = "2"
 

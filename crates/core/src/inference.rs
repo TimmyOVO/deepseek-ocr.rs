@@ -88,6 +88,7 @@ pub enum ModelKind {
     Deepseek,
     PaddleOcrVl,
     DotsOcr,
+    GlmOcr,
 }
 
 #[derive(Debug)]

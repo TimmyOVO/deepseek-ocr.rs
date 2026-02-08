@@ -61,6 +61,9 @@ fn ensure_default_model_entries(entries: &mut BTreeMap<String, ModelEntry>) {
             ..ModelEntry::default()
         });
     entries
+        .entry("glm-ocr".to_string())
+        .or_insert_with(glm_ocr_entry);
+    entries
         .entry("deepseek-ocr-q4k".to_string())
         .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q4_K", "deepseek-ocr"));
     entries
@@ -104,6 +107,25 @@ fn deepseek_ocr2_entry() -> ModelEntry {
     entry.defaults.inference.base_size = Some(1024);
     entry.defaults.inference.image_size = Some(768);
     entry.defaults.inference.crop_mode = Some(true);
+    entry
+}
+
+fn glm_ocr_entry() -> ModelEntry {
+    let mut entry = ModelEntry {
+        kind: ModelKind::GlmOcr,
+        ..ModelEntry::default()
+    };
+    entry.defaults.inference.template = Some("plain".to_string());
+    entry.defaults.inference.base_size = Some(336);
+    entry.defaults.inference.image_size = Some(336);
+    entry.defaults.inference.crop_mode = Some(false);
+    entry.defaults.inference.max_new_tokens = Some(8192);
+    entry.defaults.inference.do_sample = Some(false);
+    entry.defaults.inference.temperature = Some(0.0);
+    entry.defaults.inference.top_p = Some(1.0);
+    entry.defaults.inference.repetition_penalty = Some(1.0);
+    entry.defaults.inference.no_repeat_ngram_size = None;
+    entry.defaults.inference.seed = Some(0);
     entry
 }
 

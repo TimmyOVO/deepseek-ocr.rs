@@ -102,12 +102,19 @@ fn has_valid_logits(values: &[f32]) -> bool {
 }
 
 fn argmax_index(values: &[f32]) -> Option<usize> {
-    values
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| v.is_finite() && **v > f32::NEG_INFINITY)
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-        .map(|(idx, _)| idx)
+    // Match torch.argmax tie-breaking: return the first index for equal maxima.
+    let mut best: Option<(usize, f32)> = None;
+    for (idx, &value) in values.iter().enumerate() {
+        if !value.is_finite() || value <= f32::NEG_INFINITY {
+            continue;
+        }
+        match best {
+            None => best = Some((idx, value)),
+            Some((_, current)) if value > current => best = Some((idx, value)),
+            _ => {}
+        }
+    }
+    best.map(|(idx, _)| idx)
 }
 
 fn apply_repetition_penalty(scores: &mut [f32], context: &[i64], penalty: f32) {
