@@ -11,6 +11,7 @@ use deepseek_ocr_assets as assets;
 use deepseek_ocr_config::{AppConfig, LocalFileSystem};
 use deepseek_ocr_core::{
     ModelKind, ModelLoadArgs,
+    benchmark::Timer,
     inference::{DecodeOutcome, DecodeParameters, VisionSettings, render_prompt},
     runtime::{default_dtype_for_device, prepare_device_and_dtype},
     streaming::DeltaTracker,
@@ -91,6 +92,7 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
     );
 
     let load_start = Instant::now();
+    let load_timer = Timer::new("model.load");
     let load_args = ModelLoadArgs {
         kind: resources.kind,
         config_path: Some(&config_path),
@@ -106,6 +108,13 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
         ModelKind::GlmOcr => load_glm_model(load_args)?,
     };
     let load_elapsed = load_start.elapsed();
+    load_timer.finish(|event| {
+        event.add_field("model", resources.id.clone());
+        event.add_field("kind", format!("{:?}", resources.kind));
+        event.add_field("device", format!("{:?}", device));
+        event.add_field("dtype", format!("{:?}", dtype));
+        event.add_field("ms", load_elapsed.as_secs_f64() * 1e3);
+    });
     info!(
         "Model ready in {:.2?} (kind={:?}, flash-attn: {}, weights={})",
         load_elapsed,

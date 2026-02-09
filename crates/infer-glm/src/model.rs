@@ -22,6 +22,7 @@ use crate::{
 };
 
 use deepseek_ocr_core::{
+    benchmark::Timer,
     inference::{DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings},
     normalize_text,
     sampling::{init_rng, select_token_id},
@@ -182,20 +183,18 @@ impl GlmOcrModel {
             start = end;
         }
 
-        let mut position_triplets = Vec::with_capacity(input_ids.len());
+        let seq_len = input_ids.len();
+        let mut t_axis = Vec::with_capacity(seq_len);
+        let mut h_axis = Vec::with_capacity(seq_len);
+        let mut w_axis = Vec::with_capacity(seq_len);
+        let mut max_position = -1i64;
         let mut image_index = 0usize;
         let mut video_index = 0usize;
         let mut video_group_index = 0usize;
         let mut video_frame_num = 1usize;
 
         for (ty, start, end) in groups {
-            let st_idx = position_triplets
-                .iter()
-                .flat_map(|triplet: &[i64; 3]| triplet.iter())
-                .copied()
-                .max()
-                .map(|v| v + 1)
-                .unwrap_or(0);
+            let st_idx = max_position + 1;
             match ty {
                 TokenType::Image => {
                     let (t, h, w) = image_grids
@@ -208,11 +207,13 @@ impl GlmOcrModel {
                     for t_idx in 0..llm_t {
                         for h_idx in 0..llm_h {
                             for w_idx in 0..llm_w {
-                                position_triplets.push([
-                                    st_idx + t_idx as i64,
-                                    st_idx + h_idx as i64,
-                                    st_idx + w_idx as i64,
-                                ]);
+                                let t_pos = st_idx + t_idx as i64;
+                                let h_pos = st_idx + h_idx as i64;
+                                let w_pos = st_idx + w_idx as i64;
+                                t_axis.push(t_pos);
+                                h_axis.push(h_pos);
+                                w_axis.push(w_pos);
+                                max_position = max_position.max(t_pos).max(h_pos).max(w_pos);
                             }
                         }
                     }
@@ -230,11 +231,13 @@ impl GlmOcrModel {
                     for t_idx in 0..llm_t {
                         for h_idx in 0..llm_h {
                             for w_idx in 0..llm_w {
-                                position_triplets.push([
-                                    st_idx + t_idx as i64,
-                                    st_idx + h_idx as i64,
-                                    st_idx + w_idx as i64,
-                                ]);
+                                let t_pos = st_idx + t_idx as i64;
+                                let h_pos = st_idx + h_idx as i64;
+                                let w_pos = st_idx + w_idx as i64;
+                                t_axis.push(t_pos);
+                                h_axis.push(h_pos);
+                                w_axis.push(w_pos);
+                                max_position = max_position.max(t_pos).max(h_pos).max(w_pos);
                             }
                         }
                     }
@@ -249,7 +252,10 @@ impl GlmOcrModel {
                     let len = end - start;
                     for i in 0..len {
                         let val = st_idx + i as i64;
-                        position_triplets.push([val, val, val]);
+                        t_axis.push(val);
+                        h_axis.push(val);
+                        w_axis.push(val);
+                        max_position = max_position.max(val);
                     }
                     video_frame_num = 1;
                 }
@@ -257,32 +263,18 @@ impl GlmOcrModel {
         }
 
         ensure!(
-            position_triplets.len() == input_ids.len(),
+            t_axis.len() == input_ids.len(),
             "position ids length {} != input length {}",
-            position_triplets.len(),
+            t_axis.len(),
             input_ids.len()
         );
 
-        let seq_len = input_ids.len();
-        let mut t_axis = Vec::with_capacity(seq_len);
-        let mut h_axis = Vec::with_capacity(seq_len);
-        let mut w_axis = Vec::with_capacity(seq_len);
-        for triplet in &position_triplets {
-            t_axis.push(triplet[0]);
-            h_axis.push(triplet[1]);
-            w_axis.push(triplet[2]);
-        }
         let t_tensor = Tensor::from_vec(t_axis, (1, seq_len), &self.device)?;
         let h_tensor = Tensor::from_vec(h_axis, (1, seq_len), &self.device)?;
         let w_tensor = Tensor::from_vec(w_axis, (1, seq_len), &self.device)?;
         let position_ids = Tensor::stack(&[t_tensor, h_tensor, w_tensor], 0)?.to_dtype(DType::I64)?;
 
-        let max_position = position_triplets
-            .iter()
-            .flat_map(|v| v.iter())
-            .copied()
-            .max()
-            .unwrap_or(0);
+        let max_position = max_position.max(0);
         let rope_delta = max_position + 1 - seq_len as i64;
         let next_position_base = rope_delta + seq_len as i64;
         Ok((position_ids, next_position_base))
@@ -319,19 +311,43 @@ impl GlmOcrModel {
             return Ok(embeddings);
         }
 
-        let out_dtype = embeddings.dtype();
-        let mut data = embeddings.to_dtype(DType::F32)?.to_vec3::<f32>()?;
-        let vision = vision_embeds.to_dtype(DType::F32)?.to_vec2::<f32>()?;
-        for (slot, &pos) in image_positions.iter().enumerate() {
-            data[0][pos].copy_from_slice(&vision[slot]);
+        let dtype = embeddings.dtype();
+        let device = embeddings.device();
+        let row = embeddings
+            .get(0)?
+            .reshape((prompt_tokens.len(), hidden))?
+            .contiguous()?;
+        let replacements = if vision_embeds.dtype() == dtype {
+            vision_embeds.clone()
+        } else {
+            vision_embeds.to_dtype(dtype)?
+        };
+        let replacements = if replacements.device().same_device(device) {
+            replacements
+        } else {
+            replacements.to_device(device)?
+        }
+        .contiguous()?;
+
+        let mut mask_row = vec![0u8; prompt_tokens.len()];
+        let position_i64: Vec<i64> = image_positions.iter().map(|&p| p as i64).collect();
+        for &idx in &image_positions {
+            mask_row[idx] = 1;
         }
 
+        let replacements_full = Tensor::zeros((prompt_tokens.len(), hidden), dtype, device)?;
+        let idx_tensor = Tensor::from_vec(position_i64, (available,), device)?.to_dtype(DType::I64)?;
+        let idx_matrix = idx_tensor
+            .reshape((available, 1))?
+            .expand((available, hidden))?
+            .contiguous()?;
+        replacements_full.scatter_add_set(&idx_matrix, &replacements, 0)?;
 
-        let mut flat = Vec::with_capacity(prompt_tokens.len() * hidden);
-        for token in &data[0] {
-            flat.extend_from_slice(token);
-        }
-        Ok(Tensor::from_vec(flat, (1, prompt_tokens.len(), hidden), &self.device)?.to_dtype(out_dtype)?)
+        let mask = Tensor::from_vec(mask_row, (prompt_tokens.len(), 1), device)?.to_dtype(dtype)?;
+        let ones = Tensor::ones((prompt_tokens.len(), 1), dtype, device)?;
+        let keep = ones.sub(&mask)?;
+        let merged = row.broadcast_mul(&keep)?.add(&replacements_full)?;
+        Ok(merged.unsqueeze(0)?)
     }
 
     fn prepare_inputs(
@@ -341,6 +357,7 @@ impl GlmOcrModel {
         images: &[DynamicImage],
         vision: VisionSettings,
     ) -> Result<PreparedInputs> {
+        let prepare_timer = Timer::new("vision.prepare_inputs");
         let image_batch = preprocess_images(images, &self.preprocessor, &self.device, vision)
             .context("failed to preprocess GLM images")?;
 
@@ -359,10 +376,14 @@ impl GlmOcrModel {
         let vision_embeds = if image_batch.image_grid_thw.is_empty() {
             Tensor::zeros((0, self.config.vision_config.out_hidden_size), self.dtype, &self.device)?
         } else {
+            let vision_timer = Timer::new("vision.compute_embeddings");
             let vision_tokens = self
                 .vision
                 .encode(&image_batch.pixel_values, &image_batch.image_grid_thw)
                 .context("GLM vision encoder failed")?;
+            vision_timer.finish(|event| {
+                event.add_field("images", image_batch.image_grid_thw.len() as u64);
+            });
             if vision_tokens.dtype() == self.dtype {
                 vision_tokens
             } else {
@@ -379,7 +400,12 @@ impl GlmOcrModel {
             }
         }
 
+        let prompt_timer = Timer::new("prompt.build_tokens");
         let prompt_tokens = self.build_prompt_tokens(tokenizer, prompt, &image_batch.image_grid_thw)?;
+        prompt_timer.finish(|event| {
+            event.add_field("tokens", prompt_tokens.len() as u64);
+            event.add_field("images", image_batch.image_grid_thw.len() as u64);
+        });
         let prompt_len = prompt_tokens.len();
         ensure!(prompt_len > 0, "prompt must contain at least one token");
 
@@ -396,6 +422,11 @@ impl GlmOcrModel {
         let attention_mask = Tensor::ones((1, prompt_len), DType::U8, &self.device)?;
         let (position_ids, next_position_base) =
             self.build_position_ids(&prompt_tokens, &image_batch.image_grid_thw)?;
+
+        prepare_timer.finish(|event| {
+            event.add_field("prompt_tokens", prompt_len as u64);
+            event.add_field("images", image_batch.image_grid_thw.len() as u64);
+        });
 
         Ok(PreparedInputs {
             embeddings,
@@ -525,11 +556,17 @@ impl OcrEngine for GlmOcrModel {
         params: &DecodeParameters,
         stream: Option<&dyn Fn(usize, &[i64])>,
     ) -> Result<DecodeOutcome> {
+        let total_timer = Timer::new("decode.generate");
         self.validate_decode_params(params)?;
         ensure!(params.use_cache, "GLM backend currently requires use_cache=true");
 
         let prepared = self.prepare_inputs(tokenizer, prompt, images, vision)?;
         if params.max_new_tokens == 0 {
+            total_timer.finish(|event| {
+                event.add_field("prompt_tokens", prepared.prompt_len as u64);
+                event.add_field("generated_tokens", 0u64);
+                event.add_field("max_new_tokens", 0u64);
+            });
             return Ok(DecodeOutcome {
                 text: String::new(),
                 prompt_tokens: prepared.prompt_len,
@@ -542,6 +579,7 @@ impl OcrEngine for GlmOcrModel {
         let mut cache = self.decoder.new_cache();
         let mut guard = self.decoder.prompt_guard(&mut cache);
 
+        let prefill_timer = Timer::new("decode.prefill");
         let prefill = self.decoder.forward(
             None,
             Some(&prepared.embeddings),
@@ -550,6 +588,10 @@ impl OcrEngine for GlmOcrModel {
             Some(guard.cache()),
             params.use_cache,
         )?;
+        prefill_timer.finish(|event| {
+            event.add_field("prompt_tokens", prepared.prompt_len as u64);
+            event.add_field("use_cache", params.use_cache);
+        });
 
         let logits = prefill.logits.get(0)?.get(prepared.prompt_len.saturating_sub(1))?;
 
@@ -575,8 +617,18 @@ impl OcrEngine for GlmOcrModel {
         let mut rng = init_rng(params.seed);
         let mut generated = Vec::with_capacity(params.max_new_tokens);
         let mut current = select_token_id(&logits, params, &context_tokens, &mut rng)?;
+        let decode_timer = Timer::new("decode.iterative");
 
         if eos_ids.contains(&current) {
+            decode_timer.finish(|event| {
+                event.add_field("steps", 0u64);
+                event.add_field("max_new_tokens", params.max_new_tokens as u64);
+            });
+            total_timer.finish(|event| {
+                event.add_field("prompt_tokens", context_tokens.len() as u64);
+                event.add_field("generated_tokens", 0u64);
+                event.add_field("max_new_tokens", params.max_new_tokens as u64);
+            });
             return Ok(DecodeOutcome {
                 text: String::new(),
                 prompt_tokens: context_tokens.len(),
@@ -598,19 +650,17 @@ impl OcrEngine for GlmOcrModel {
                 break;
             }
 
-            let decode_ids = Tensor::from_vec(vec![current], (1, 1), &self.device)?.to_dtype(DType::I64)?;
-            let decode_embeddings = gather_token_embeddings(self.decoder.embed_tokens(), &decode_ids)?;
+            let decode_ids = Tensor::from_vec(vec![current], (1, 1), &self.device)?;
             let pos = Tensor::from_vec(
                 vec![next_position_base, next_position_base, next_position_base],
                 (3, 1, 1),
                 &self.device,
-            )?
-            .to_dtype(DType::I64)?;
+            )?;
             next_position_base += 1;
 
             let decode = self.decoder.forward(
+                Some(&decode_ids),
                 None,
-                Some(&decode_embeddings),
                 None,
                 Some(&pos),
                 Some(guard.cache()),
@@ -638,6 +688,11 @@ impl OcrEngine for GlmOcrModel {
             current = select_token_id(&next_logits, params, &context_tokens, &mut rng)?;
         }
 
+        decode_timer.finish(|event| {
+            event.add_field("steps", generated.len() as u64);
+            event.add_field("max_new_tokens", params.max_new_tokens as u64);
+        });
+
         let decoded = tokenizer
             .decode(
                 &generated
@@ -647,6 +702,12 @@ impl OcrEngine for GlmOcrModel {
                 true,
             )
             .unwrap_or_default();
+
+        total_timer.finish(|event| {
+            event.add_field("prompt_tokens", prepared.prompt_len as u64);
+            event.add_field("generated_tokens", generated.len() as u64);
+            event.add_field("max_new_tokens", params.max_new_tokens as u64);
+        });
 
         Ok(DecodeOutcome {
             text: normalize_text(&decoded),

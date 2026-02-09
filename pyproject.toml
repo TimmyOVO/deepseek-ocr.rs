@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepseek-ocr-benchsuite"
+version = "0.1.0"
+description = "Unified benchmark and strict-gate toolkit for deepseek-ocr backends"
+readme = "benchsuite/README.md"
+requires-python = ">=3.12"
+authors = [{ name = "TimmyOVO" }]
+dependencies = []
+
+[project.optional-dependencies]
+bench = [
+  "numpy>=1.24",
+  "pillow>=10.0",
+  "transformers @ git+https://github.com/huggingface/transformers.git",
+  "torch>=2.10.0",
+  "torchvision",
+  "tqdm>=4.66",
+]
+
+[project.scripts]
+benchsuite = "benchsuite.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["benchsuite*"]

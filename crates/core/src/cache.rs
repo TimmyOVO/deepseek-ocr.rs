@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, ensure};
-use candle_core::Tensor;
+use candle_core::{Tensor, shape::D};
 use std::boxed::Box;
+
+use crate::benchmark::Timer;
 
 #[cfg(feature = "memlog")]
 use crate::memlog;
@@ -56,8 +58,7 @@ impl KvCacheChunk {
 /// Growable key/value cache for a single transformer layer.
 #[derive(Debug, Clone)]
 pub struct KvCacheEntry {
-    key_t: Tensor,
-    value: Tensor,
+    chunks: Vec<KvCacheChunk>,
     len: usize,
 }
 
@@ -65,58 +66,28 @@ impl KvCacheEntry {
     pub fn from_chunk(chunk: KvCacheChunk) -> Result<Self> {
         let len = chunk.seq_len();
         Ok(Self {
-            key_t: chunk.key_t,
-            value: chunk.value,
+            chunks: vec![chunk],
             len,
         })
     }
 
-    fn dims(&self) -> Result<(usize, usize, usize, usize)> {
-        self.key_t.shape().dims4().map_err(Into::into)
+    pub fn chunks(&self) -> &[KvCacheChunk] {
+        &self.chunks
     }
 
-    fn ensure_capacity(&mut self, required: usize) -> Result<()> {
-        let (batch, heads, key_dim, capacity) = self.dims()?;
-        if required <= capacity {
-            return Ok(());
-        }
-        let value_dims = self
-            .value
-            .shape()
-            .dims4()
-            .context("value tensor must be 4D")?;
-        let dtype = self.key_t.dtype();
-        let device = self.key_t.device();
-        let mut cap = capacity.max(1);
-        while cap < required {
-            cap *= 2;
-        }
-        let new_key_shape = (batch, heads, key_dim, cap);
-        let mut new_key = Tensor::zeros(new_key_shape, dtype, device)?;
-        let (_, _, _, value_dim) = value_dims;
-        let new_value_shape = (batch, heads, cap, value_dim);
-        let mut new_value = Tensor::zeros(new_value_shape, dtype, device)?;
-        let key_ranges = [0..batch, 0..heads, 0..key_dim, 0..self.len];
-        new_key = new_key.slice_assign(&key_ranges, &self.key_t)?;
-        let value_ranges = [0..batch, 0..heads, 0..self.len, 0..value_dim];
-        new_value = new_value.slice_assign(&value_ranges, &self.value)?;
-        #[cfg(feature = "memlog")]
-        {
-            let old_bytes = memlog::tensor_bytes(&self.key_t) + memlog::tensor_bytes(&self.value);
-            memlog::sub_kv(old_bytes);
-        }
-        self.key_t = new_key;
-        self.value = new_value;
-        #[cfg(feature = "memlog")]
-        {
-            let new_bytes = memlog::tensor_bytes(&self.key_t) + memlog::tensor_bytes(&self.value);
-            memlog::add_kv(new_bytes);
-        }
-        Ok(())
+    fn first_chunk(&self) -> Option<&KvCacheChunk> {
+        self.chunks.first()
     }
 
     fn validate_chunk(&self, chunk: &KvCacheChunk) -> Result<()> {
-        let (batch, heads, key_dim, _) = self.dims()?;
+        let Some(first) = self.first_chunk() else {
+            return Ok(());
+        };
+        let (batch, heads, key_dim, _) = first
+            .key_t
+            .shape()
+            .dims4()
+            .context("cache key tensor must be 4D")?;
         let (chunk_batch, chunk_heads, chunk_key_dim, chunk_len) = chunk
             .key_t
             .shape()
@@ -141,18 +112,20 @@ impl KvCacheEntry {
             key_dim
         );
         ensure!(
-            chunk.key_t.dtype() == self.key_t.dtype(),
+            chunk.key_t.dtype() == first.key_t.dtype(),
             "chunk dtype {:?} does not match cache dtype {:?}",
             chunk.key_t.dtype(),
-            self.key_t.dtype()
+            first.key_t.dtype()
         );
         ensure!(
-            chunk.key_t.device().location() == self.key_t.device().location(),
+            chunk.key_t.device().location() == first.key_t.device().location(),
             "chunk device {:?} does not match cache device {:?}",
             chunk.key_t.device(),
-            self.key_t.device()
+            first.key_t.device()
         );
         let (_, _, _value_seq, value_dim) = self
+            .first_chunk()
+            .expect("first chunk must exist")
             .value
             .shape()
             .dims4()
@@ -187,28 +160,31 @@ impl KvCacheEntry {
             value_dim
         );
         ensure!(
-            chunk.value.dtype() == self.value.dtype(),
+            chunk.value.dtype() == first.value.dtype(),
             "chunk value dtype {:?} does not match cache value dtype {:?}",
             chunk.value.dtype(),
-            self.value.dtype()
+            first.value.dtype()
         );
         ensure!(
-            chunk.value.device().location() == self.value.device().location(),
+            chunk.value.device().location() == first.value.device().location(),
             "chunk value device {:?} does not match cache value device {:?}",
             chunk.value.device(),
-            self.value.device()
+            first.value.device()
         );
         Ok(())
     }
 
     pub fn append(&mut self, chunk: &KvCacheChunk) -> Result<()> {
-        let chunk = if chunk.key_t.dtype() != self.key_t.dtype()
-            || chunk.value.dtype() != self.value.dtype()
-        {
-            KvCacheChunk::new(
-                chunk.key_t.to_dtype(self.key_t.dtype())?,
-                chunk.value.to_dtype(self.value.dtype())?,
-            )?
+        let append_total_timer = Timer::new("cache.entry.append.total");
+        let chunk = if let Some(first) = self.first_chunk() {
+            if chunk.key_t.dtype() != first.key_t.dtype() || chunk.value.dtype() != first.value.dtype() {
+                KvCacheChunk::new(
+                    chunk.key_t.to_dtype(first.key_t.dtype())?,
+                    chunk.value.to_dtype(first.value.dtype())?,
+                )?
+            } else {
+                chunk.clone()
+            }
         } else {
             chunk.clone()
         };
@@ -217,32 +193,32 @@ impl KvCacheEntry {
         if chunk_len == 0 {
             return Ok(());
         }
-        let new_len = self.len + chunk_len;
-        self.ensure_capacity(new_len)?;
-        let (batch, heads, key_dim, _) = self.dims()?;
-        let key_ranges = [0..batch, 0..heads, 0..key_dim, self.len..new_len];
-        self.key_t = self.key_t.slice_assign(&key_ranges, &chunk.key_t)?;
-        let (_, _, _, value_dim) = self
-            .value
-            .shape()
-            .dims4()
-            .context("value tensor must be 4D")?;
-        let value_ranges = [0..batch, 0..heads, self.len..new_len, 0..value_dim];
-        self.value = self.value.slice_assign(&value_ranges, &chunk.value)?;
-        self.len = new_len;
+        self.chunks.push(chunk);
+        self.len += chunk_len;
+        append_total_timer.finish(|_| {});
         Ok(())
     }
 
     pub fn key_view(&self) -> Result<Tensor> {
-        Ok(self
-            .key_t
-            .narrow(candle_core::shape::D::Minus1, 0, self.len)?)
+        if self.chunks.is_empty() {
+            anyhow::bail!("cache entry has no key chunks")
+        }
+        if self.chunks.len() == 1 {
+            return Ok(self.chunks[0].key_t.clone());
+        }
+        let refs: Vec<&Tensor> = self.chunks.iter().map(|chunk| &chunk.key_t).collect();
+        Ok(Tensor::cat(&refs, D::Minus1)?)
     }
 
     pub fn value_view(&self) -> Result<Tensor> {
-        Ok(self
-            .value
-            .narrow(candle_core::shape::D::Minus2, 0, self.len)?)
+        if self.chunks.is_empty() {
+            anyhow::bail!("cache entry has no value chunks")
+        }
+        if self.chunks.len() == 1 {
+            return Ok(self.chunks[0].value.clone());
+        }
+        let refs: Vec<&Tensor> = self.chunks.iter().map(|chunk| &chunk.value).collect();
+        Ok(Tensor::cat(&refs, D::Minus2)?)
     }
 
     pub fn seq_len(&self) -> usize {
@@ -251,7 +227,10 @@ impl KvCacheEntry {
 
     #[cfg(feature = "memlog")]
     pub fn storage_bytes(&self) -> usize {
-        memlog::tensor_bytes(&self.key_t) + memlog::tensor_bytes(&self.value)
+        self.chunks
+            .iter()
+            .map(|chunk| memlog::tensor_bytes(&chunk.key_t) + memlog::tensor_bytes(&chunk.value))
+            .sum()
     }
 }
 

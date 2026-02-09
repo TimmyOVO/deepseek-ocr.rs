@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Tensor};
 use deepseek_ocr_core::{
+    benchmark::Timer,
     cache::{DynamicCache, PromptCacheGuard},
     tensor::gather_token_embeddings,
 };
@@ -123,15 +124,19 @@ impl GlmTextDecoder {
         let past_len = cache.as_ref().and_then(|c| c.seq_len()).unwrap_or(0);
         let total_k_len = past_len + seq_len;
 
-        let attn_bias = build_attention_bias(
-            attention_mask,
-            batch,
-            seq_len,
-            total_k_len,
-            past_len,
-            embeddings.dtype(),
-            embeddings.device(),
-        )?;
+        let attn_bias = if attention_mask.is_none() && seq_len == 1 {
+            None
+        } else {
+            Some(build_attention_bias(
+                attention_mask,
+                batch,
+                seq_len,
+                total_k_len,
+                past_len,
+                embeddings.dtype(),
+                embeddings.device(),
+            )?)
+        };
 
         let pos_ids = match position_ids {
             Some(ids) => normalize_position_ids(ids, embeddings.device(), batch, seq_len)?,
@@ -154,21 +159,25 @@ impl GlmTextDecoder {
         let mut hidden = embeddings;
         for (idx, layer) in self.layers.iter().enumerate() {
             let past = cache.as_deref().and_then(|c| c.get(idx));
+            let layer_timer = Timer::new("text.layer.forward");
             let out = decoder_layer_forward(
                 self.cfg.as_ref(),
                 layer,
                 &hidden,
-                Some(&attn_bias),
+                attn_bias.as_ref(),
                 &cos,
                 &sin,
                 past,
                 use_cache,
             )?;
+            layer_timer.finish(|_| {});
             hidden = out.hidden_states;
             if let Some(chunk) = out.present_key_value
                 && let Some(cache_mut) = cache.as_deref_mut()
             {
+                let append_timer = Timer::new("text.layer.cache_append");
                 cache_mut.append(idx, chunk)?;
+                append_timer.finish(|_| {});
             }
         }
 

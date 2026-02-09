@@ -4,9 +4,9 @@ use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Module, Tensor, shape::D};
 use candle_nn::{
     Conv2d, Conv2dConfig, LayerNorm, VarBuilder, conv2d, conv2d_no_bias, layer_norm,
-    ops::softmax,
+    ops::softmax_last_dim,
 };
-use deepseek_ocr_core::inference::VisionSettings;
+use deepseek_ocr_core::{benchmark::Timer, inference::VisionSettings};
 use image::{DynamicImage, RgbImage};
 
 use crate::{
@@ -80,7 +80,11 @@ impl GlmVisionModel {
     }
 
     pub fn encode(&self, pixel_values: &Tensor, grids: &[(usize, usize, usize)]) -> Result<Tensor> {
+        let patch_timer = Timer::new("vision.encode.patch_embed");
         let hidden = self.patch_embed.forward(pixel_values)?;
+        patch_timer.finish(|event| {
+            event.add_field("tokens", hidden.dims().first().copied().unwrap_or_default() as u64);
+        });
         let layout = VisionSequenceLayout::from_grids(grids, self.config.spatial_merge_size)?;
         let (token_count, hidden_size) = hidden.shape().dims2()?;
         ensure!(
@@ -98,9 +102,19 @@ impl GlmVisionModel {
 
         let (cos, sin) = self.rotary.build_embeddings(grids)?;
         let mut states = hidden;
-        for block in &self.blocks {
+        let blocks_timer = Timer::new("vision.encode.blocks");
+        for (idx, block) in self.blocks.iter().enumerate() {
+            let block_timer = Timer::new("vision.encode.block");
             states = block.forward(&states, &layout, &cos, &sin)?;
+            block_timer.finish(|event| {
+                event.add_field("idx", idx as u64);
+            });
         }
+        blocks_timer.finish(|event| {
+            event.add_field("count", self.blocks.len() as u64);
+        });
+
+        let tail_timer = Timer::new("vision.encode.tail");
         states = precise_rms_norm_last_dim(&states, &self.post_layernorm, self.config.rms_norm_eps)
             .context("vision post_layernorm failed")?;
 
@@ -109,7 +123,11 @@ impl GlmVisionModel {
         let downsample_input = reshaped.permute((0, 3, 1, 2))?;
         let downsampled = self.downsample.forward(&downsample_input)?;
         let merged_tokens = downsampled.reshape((layout.total_groups, self.config.out_hidden_size))?;
-        self.merger.forward(&merged_tokens)
+        let output = self.merger.forward(&merged_tokens)?;
+        tail_timer.finish(|event| {
+            event.add_field("groups", layout.total_groups as u64);
+        });
+        Ok(output)
     }
 }
 
@@ -679,18 +697,23 @@ impl GlmVisionBlock {
         cos: &Tensor,
         sin: &Tensor,
     ) -> Result<Tensor> {
+        let attn_timer = Timer::new("vision.block.attn");
         let normed = precise_rms_norm_last_dim(hidden, &self.norm1, self.eps)
             .context("vision block norm1 failed")?;
         let attn = self.attn.forward(&normed, layout, cos, sin)?;
+        attn_timer.finish(|_| {});
         let residual = hidden.add(&attn)?;
+
+        let mlp_timer = Timer::new("vision.block.mlp");
         let normed = precise_rms_norm_last_dim(&residual, &self.norm2, self.eps)
             .context("vision block norm2 failed")?;
         let mlp = self.mlp.forward(&normed)?;
+        mlp_timer.finish(|_| {});
         Ok(residual.add(&mlp)?)
     }
 }
 
-const VISION_ATTN_QUERY_CHUNK: usize = 256;
+const VISION_ATTN_QUERY_CHUNK: usize = 1024;
 
 struct GlmVisionAttention {
     qkv: LinearWeights,
@@ -759,10 +782,10 @@ impl GlmVisionAttention {
             let qf = q.narrow(0, frame.start, frame.len)?;
             let kf = k.narrow(0, frame.start, frame.len)?;
             let vf = v.narrow(0, frame.start, frame.len)?;
-            // Candle bmm requires contiguous RHS; keep transposed views contiguous
-            // before dtype fast-path to avoid non-contiguous matmul failures on CPU.
-            let qh = qf.transpose(0, 1)?.contiguous()?;
-            let kh = kf.transpose(0, 1)?.contiguous()?;
+            // Candle bmm requires contiguous RHS. Keep RHS contiguous while
+            // preserving non-contiguous lhs views to avoid extra copies.
+            let qh = qf.transpose(0, 1)?;
+            let kh = kf.transpose(0, 1)?;
             let vh = vf.transpose(0, 1)?.contiguous()?;
             let kt = kh.transpose(1, 2)?.contiguous()?;
             let compute_dtype = match qh.dtype() {
@@ -784,6 +807,7 @@ impl GlmVisionAttention {
             } else {
                 vh.to_dtype(compute_dtype)?
             };
+            let qh = (qh * (1.0f64 / self.scaling.sqrt()))?;
 
             // Softmax is row-wise over keys; chunking queries keeps numerics while
             // avoiding large [heads, q_len, k_len] score allocations on Metal/CPU.
@@ -791,9 +815,8 @@ impl GlmVisionAttention {
             for q_start in (0..frame.len).step_by(VISION_ATTN_QUERY_CHUNK) {
                 let q_chunk_len = (frame.len - q_start).min(VISION_ATTN_QUERY_CHUNK);
                 let q_chunk = qh.narrow(1, q_start, q_chunk_len)?;
-                let mut scores = q_chunk.matmul(&kt)?;
-                scores = (scores / self.scaling.sqrt())?;
-                let probs = softmax(&scores, D::Minus1)?;
+                let scores = q_chunk.matmul(&kt)?;
+                let probs = softmax_last_dim(&scores)?;
                 let mut ctx_chunk = probs.matmul(&vh)?;
                 if ctx_chunk.dtype() != hidden.dtype() {
                     ctx_chunk = ctx_chunk.to_dtype(hidden.dtype())?;

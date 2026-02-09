@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use candle_core::{DType, Tensor};
+use candle_core::{DType, Tensor, shape::D};
 use rand::{
     SeedableRng,
     distributions::{Distribution, WeightedIndex},
@@ -37,6 +37,10 @@ pub fn select_token_id<P: TokenSelectionParams>(
     context: &[i64],
     rng: &mut StdRng,
 ) -> Result<i64> {
+    if can_use_device_argmax(params) {
+        return greedy_argmax_on_device(logits);
+    }
+
     let logits = logits
         .to_dtype(DType::F32)?
         .to_vec1::<f32>()
@@ -93,6 +97,34 @@ pub fn select_token_id<P: TokenSelectionParams>(
         return Ok(best as i64);
     }
     Ok(0)
+}
+
+fn can_use_device_argmax<P: TokenSelectionParams>(params: &P) -> bool {
+    !params.do_sample()
+        && params.temperature() == 0.0
+        && params.top_p().is_none()
+        && params.top_k().is_none()
+        && (params.repetition_penalty() - 1.0).abs() <= f32::EPSILON
+        && params.no_repeat_ngram_size().is_none()
+}
+
+fn greedy_argmax_on_device(logits: &Tensor) -> Result<i64> {
+    let token = logits.argmax(D::Minus1)?;
+    if token.rank() == 0 {
+        return Ok(token.to_scalar::<u32>()? as i64);
+    }
+    if token.rank() == 1 {
+        let values = token.to_vec1::<u32>()?;
+        if let Some(&first) = values.first() {
+            return Ok(first as i64);
+        }
+    }
+    let values = token.flatten_all()?.to_vec1::<u32>()?;
+    values
+        .first()
+        .copied()
+        .map(|v| v as i64)
+        .context("argmax produced empty tensor")
 }
 
 fn has_valid_logits(values: &[f32]) -> bool {
