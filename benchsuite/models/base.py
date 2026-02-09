@@ -3,8 +3,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
+import os
 import random
 import subprocess
+import sys
 import time
 from typing import Any
 
@@ -37,6 +40,10 @@ class BaseAdapter(ABC):
     default_matrix_dir: Path
     capabilities: AdapterCapabilities = AdapterCapabilities()
     requires_snapshot: bool = False
+    python_interpreter_env_key: str | None = None
+    python_interpreter_required: bool = False
+    python_runtime_env_name: str | None = None
+    python_runtime_extras: tuple[str, ...] = ()
     required_rust_files: tuple[str, ...] = ("config.json", "tokenizer.json", "model.safetensors")
 
     supported_devices: tuple[str, ...] = ("cpu", "mps")
@@ -373,15 +380,240 @@ class BaseAdapter(ABC):
             ok, reason = self.python_support_status(model_dir=model_dir)
             if not ok:
                 return ok, reason
-
-            import transformers  # noqa: F401
-
             return True, None
         except Exception as exc:
             return False, str(exc)
 
+    def resolve_python_executable(self, *, runtime_root: Path | None = None) -> tuple[str | None, str | None]:
+        env_key = self.python_interpreter_env_key
+        if env_key:
+            raw = os.environ.get(env_key)
+            if raw:
+                return raw, None
+            if self.python_interpreter_required:
+                return None, f"missing python interpreter env: {env_key}"
+
+        global_python = os.environ.get("BENCHSUITE_PYTHON")
+        if global_python:
+            return global_python, None
+
+        if self.python_runtime_env_name:
+            runtime = runtime_paths(runtime_root=runtime_root, create_dirs=True)
+            env_dir = runtime.root / "python-envs" / self.python_runtime_env_name
+            python_exec = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            return str(python_exec), None
+
+        return sys.executable, None
+
+    def _python_interpreter_overridden(self) -> bool:
+        if self.python_interpreter_env_key and os.environ.get(self.python_interpreter_env_key):
+            return True
+        if os.environ.get("BENCHSUITE_PYTHON"):
+            return True
+        return False
+
+    def _runtime_env_fingerprint(self, *, repo_root: Path) -> str:
+        if not self.python_runtime_extras:
+            return ""
+        payload = "|".join(self.python_runtime_extras)
+        pyproject = repo_root / "pyproject.toml"
+        if pyproject.exists():
+            payload += "|" + pyproject.read_text(encoding="utf-8")
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _bootstrap_runtime_python_env(
+        self,
+        *,
+        target_exec: Path,
+        repo_root: Path,
+    ) -> None:
+        if not self.python_runtime_extras:
+            raise RuntimeError(f"python interpreter not found: {target_exec}")
+
+        parent_name = target_exec.parent.name
+        if parent_name in {"bin", "Scripts"}:
+            env_dir = target_exec.parent.parent
+        else:
+            env_dir = target_exec.parent
+
+        print(
+            f"[python-env] bootstrap model={self.model_id} env={env_dir} extras={','.join(self.python_runtime_extras)}",
+            flush=True,
+        )
+        subprocess.run([sys.executable, "-m", "venv", str(env_dir)], check=True)
+
+        if not target_exec.exists():
+            raise RuntimeError(f"failed to create python env executable: {target_exec}")
+
+        subprocess.run(
+            [str(target_exec), "-m", "pip", "install", "-e", f".[{','.join(self.python_runtime_extras)}]"],
+            check=True,
+            cwd=str(repo_root),
+        )
+
+    def _ensure_runtime_python_env(
+        self,
+        *,
+        target_exec: Path,
+        repo_root: Path,
+    ) -> None:
+        if not self.python_runtime_extras:
+            return
+
+        if not target_exec.exists():
+            self._bootstrap_runtime_python_env(target_exec=target_exec, repo_root=repo_root)
+
+        parent_name = target_exec.parent.name
+        if parent_name in {"bin", "Scripts"}:
+            env_dir = target_exec.parent.parent
+        else:
+            env_dir = target_exec.parent
+
+        stamp_dir = env_dir / ".benchsuite"
+        stamp_dir.mkdir(parents=True, exist_ok=True)
+        stamp_file = stamp_dir / f"{self.model_id}.fingerprint"
+
+        current_fp = self._runtime_env_fingerprint(repo_root=repo_root)
+        existing_fp = stamp_file.read_text(encoding="utf-8").strip() if stamp_file.exists() else ""
+
+        if existing_fp == current_fp:
+            return
+
+        print(
+            f"[python-env] sync model={self.model_id} env={env_dir} extras={','.join(self.python_runtime_extras)}",
+            flush=True,
+        )
+        subprocess.run(
+            [str(target_exec), "-m", "pip", "install", "-e", f".[{','.join(self.python_runtime_extras)}]"],
+            check=True,
+            cwd=str(repo_root),
+        )
+        stamp_file.write_text(current_fp + "\n", encoding="utf-8")
+
+    def _maybe_delegate_python_bench(
+        self,
+        *,
+        model_dir: Path,
+        image: Path,
+        prompt: str,
+        max_new_tokens: int,
+        py_device: str,
+        py_dtype: str,
+        output: Path,
+        repo_root: Path,
+        runtime_root: Path | None,
+    ) -> dict[str, Any] | None:
+        if os.environ.get("BENCHSUITE_INTERNAL_PY_BENCH") == "1":
+            return None
+
+        python_exec, python_reason = self.resolve_python_executable(runtime_root=runtime_root)
+        if python_exec is None:
+            raise RuntimeError(python_reason or f"python interpreter unavailable for {self.model_id}")
+
+        try:
+            current_exec = Path(sys.executable).resolve()
+            target_exec = Path(python_exec).expanduser().resolve()
+        except Exception:
+            current_exec = Path(sys.executable)
+            target_exec = Path(python_exec)
+
+        if self.python_runtime_env_name and self.python_runtime_extras and not self._python_interpreter_overridden():
+            self._ensure_runtime_python_env(target_exec=target_exec, repo_root=repo_root)
+        elif not target_exec.exists():
+            raise RuntimeError(f"python interpreter not found: {target_exec}")
+
+        if target_exec == current_exec:
+            return None
+
+        cmd = [
+            str(target_exec),
+            "-m",
+            "benchsuite.cli",
+            "bench-python",
+            "--model",
+            self.model_id,
+            "--model-dir",
+            str(model_dir),
+            "--image",
+            str(image),
+            "--prompt",
+            prompt,
+            "--device",
+            py_device,
+            "--dtype",
+            py_dtype,
+            "--max-new-tokens",
+            str(max_new_tokens),
+            "--output",
+            str(output),
+        ]
+
+        env = os.environ.copy()
+        env["BENCHSUITE_INTERNAL_PY_BENCH"] = "1"
+        if runtime_root is not None:
+            env["BENCHSUITE_RUNTIME_ROOT"] = str(runtime_root)
+
+        py_path = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = str(repo_root) if not py_path else f"{repo_root}{os.pathsep}{py_path}"
+
+        print(
+            f"[python-bench] model={self.model_id} py={target_exec} device={py_device} dtype={py_dtype} max_new={max_new_tokens}",
+            flush=True,
+        )
+        subprocess.run(cmd, check=True, env=env, cwd=str(repo_root))
+        return read_json(output)
+
+    def python_pair_status(
+        self,
+        *,
+        model_dir: Path,
+        py_device: str,
+        py_dtype: str,
+        runtime_root: Path | None = None,
+    ) -> tuple[bool, str | None]:
+        _ = py_device
+        _ = py_dtype
+
+        py_ok, py_reason = self.python_baseline_status(model_dir=model_dir)
+        if not py_ok:
+            return py_ok, py_reason
+
+        python_exec, python_reason = self.resolve_python_executable(runtime_root=runtime_root)
+        if python_exec is None:
+            return False, python_reason or "python interpreter unavailable"
+
+        python_path = Path(python_exec).expanduser()
+        if not python_path.exists():
+            if self._python_interpreter_overridden():
+                return False, f"python interpreter not found: {python_exec}"
+            if self.python_runtime_env_name and self.python_runtime_extras:
+                return True, None
+            return False, f"python interpreter not found: {python_exec}"
+
+        return True, None
+
     def strict_status(self, *, model_dir: Path) -> tuple[bool, str | None]:
         py_ok, py_reason = self.python_baseline_status(model_dir=model_dir)
+        if not py_ok:
+            return False, py_reason or self.strict_skip_reason() or "python baseline unavailable"
+        if not self.strict_compare_enabled():
+            return False, self.strict_skip_reason() or "strict compare is disabled"
+        return True, None
+
+    def strict_pair_status(
+        self,
+        *,
+        model_dir: Path,
+        py_device: str,
+        py_dtype: str,
+        runtime_root: Path | None = None,
+    ) -> tuple[bool, str | None]:
+        py_ok, py_reason = self.python_pair_status(
+            model_dir=model_dir,
+            py_device=py_device,
+            py_dtype=py_dtype,
+            runtime_root=runtime_root,
+        )
         if not py_ok:
             return False, py_reason or self.strict_skip_reason() or "python baseline unavailable"
         if not self.strict_compare_enabled():
@@ -437,6 +669,20 @@ class BaseAdapter(ABC):
             reason = self.python_skip_reason() or f"python baseline is disabled for model {self.model_id}"
             raise RuntimeError(reason)
 
+        delegated = self._maybe_delegate_python_bench(
+            model_dir=model_dir,
+            image=image,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            py_device=py_device,
+            py_dtype=py_dtype,
+            output=output,
+            repo_root=repo_root,
+            runtime_root=runtime_root,
+        )
+        if delegated is not None:
+            return delegated
+
         import numpy as np
         import torch
         import os
@@ -445,6 +691,7 @@ class BaseAdapter(ABC):
         for key in [
             "HF_HOME",
             "TRANSFORMERS_CACHE",
+            "HF_HUB_CACHE",
             "HUGGINGFACE_HUB_CACHE",
             "DEEPSEEK_OCR_CONFIG_DIR",
             "DEEPSEEK_OCR_CACHE_DIR",

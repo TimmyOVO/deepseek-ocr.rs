@@ -7,6 +7,9 @@ from benchsuite.models.base import AdapterCapabilities, BaseAdapter
 
 
 class GlmAdapter(BaseAdapter):
+    python_interpreter_env_key = "BENCHSUITE_PY_GLM"
+    python_runtime_env_name = "glm"
+    python_runtime_extras = ("bench", "bench-glm")
     model_id = "glm-ocr"
     suite_name = "glm"
     hf_repo_id = "zai-org/GLM-OCR"

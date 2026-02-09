@@ -75,6 +75,7 @@ def runtime_env(*, runtime_root: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["HF_HOME"] = str(paths.hf_home)
     env["TRANSFORMERS_CACHE"] = str(paths.hf_transformers_cache)
+    env["HF_HUB_CACHE"] = str(paths.hf_hub_cache)
     env["HUGGINGFACE_HUB_CACHE"] = str(paths.hf_hub_cache)
     env["DEEPSEEK_OCR_CONFIG_DIR"] = str(paths.cli_config_dir)
     env["DEEPSEEK_OCR_CACHE_DIR"] = str(paths.cli_cache_dir)

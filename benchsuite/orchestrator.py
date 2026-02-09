@@ -447,6 +447,43 @@ class BenchOrchestrator:
         }
 
     @staticmethod
+    def _pair_capability_payload(
+        adapter: Any,
+        *,
+        model_dir: Path,
+        root: Path,
+        py_device: str,
+        py_dtype: str,
+        runtime_root: Path | None = None,
+    ) -> dict[str, Any]:
+        base = BenchOrchestrator._capability_payload(adapter, model_dir=model_dir, root=root)
+        py_enabled, py_reason = adapter.python_pair_status(
+            model_dir=model_dir,
+            py_device=py_device,
+            py_dtype=py_dtype,
+            runtime_root=runtime_root,
+        )
+        strict_enabled, strict_reason = adapter.strict_pair_status(
+            model_dir=model_dir,
+            py_device=py_device,
+            py_dtype=py_dtype,
+            runtime_root=runtime_root,
+        )
+        base.update(
+            {
+                "python_enabled": py_enabled,
+                "python_skip_reason": py_reason,
+                "strict_enabled": strict_enabled,
+                "strict_skip_reason": strict_reason,
+                "pair": {
+                    "python_device": py_device,
+                    "python_dtype": py_dtype,
+                },
+            }
+        )
+        return base
+
+    @staticmethod
     def _model_skip_row(
         *,
         run: str,
@@ -549,10 +586,23 @@ class BenchOrchestrator:
             if not pair_defs:
                 raise SystemExit("no runnable device/precision pairs after filtering")
 
-            model_capabilities = self._capability_payload(adapter, model_dir=model_dir, root=root)
+            pair_entries: list[tuple[dict[str, str], dict[str, Any]]] = []
+            for pair in pair_defs:
+                pair_entries.append(
+                    (
+                        pair,
+                        self._pair_capability_payload(
+                            adapter,
+                            model_dir=model_dir,
+                            root=root,
+                            py_device=pair["py_device"],
+                            py_dtype=pair["py_dtype"],
+                            runtime_root=runtime.root,
+                        ),
+                    )
+                )
 
-            task_per_pair = 1 + (1 if model_capabilities["python_enabled"] else 0)
-            task_total = len(case_rows) * len(pair_defs) * task_per_pair
+            task_total = len(case_rows) * sum(1 + (1 if cap["python_enabled"] else 0) for _, cap in pair_entries)
             task_bar = tqdm(total=task_total, desc=f"perf:{model_name}", unit="task") if tqdm is not None else None
 
             for case in case_rows:
@@ -563,8 +613,9 @@ class BenchOrchestrator:
                 rendered_prompt = case.get("rendered_prompt")
                 baseline_json = case.get("baseline_json")
 
-                for idx, pair in enumerate(pair_defs, 1):
+                for idx, (pair, pair_capabilities) in enumerate(pair_entries, 1):
                     pair_name = f"{pair['py_device']}_{pair['py_dtype']}"
+                    pair_steps = 1 + (1 if pair_capabilities["python_enabled"] else 0)
                     if task_bar is None:
                         print(f"[{idx}/{len(pair_defs)}] {model_name}:{case_name}:{pair_name}")
                     else:
@@ -575,20 +626,20 @@ class BenchOrchestrator:
                     rs_out = pair_root / "rust" / "bench.json"
                     compare_out = pair_root / "compare.json"
 
-                    if not model_capabilities["rust_enabled"]:
+                    if not pair_capabilities["rust_enabled"]:
                         skipped = self._model_skip_row(
                             run=run,
                             model=model_name,
                             suite=suite,
                             case=case_name,
                             pair=pair_name,
-                            reason=model_capabilities["rust_skip_reason"] or "rust path disabled",
-                            capabilities=model_capabilities,
+                            reason=pair_capabilities["rust_skip_reason"] or "rust path disabled",
+                            capabilities=pair_capabilities,
                         )
                         overall_skipped.append(skipped)
                         write_json(compare_out, skipped)
                         if task_bar is not None:
-                            task_bar.update(task_per_pair)
+                            task_bar.update(pair_steps)
                         continue
 
                     rendered_for_rust = rendered_prompt
@@ -632,7 +683,7 @@ class BenchOrchestrator:
                             "prompt": prompt,
                             "max_new_tokens": max_new,
                             "baseline_json": baseline_json,
-                            "capabilities": model_capabilities,
+                            "capabilities": pair_capabilities,
                             "python_metrics": None,
                             "rust_metrics": None,
                             "strict_status": "error",
@@ -647,13 +698,13 @@ class BenchOrchestrator:
                         overall_pairs.append(row)
                         write_json(compare_out, row)
                         if task_bar is not None:
-                            task_bar.update(task_per_pair)
+                            task_bar.update(pair_steps)
                         continue
 
                     if task_bar is not None:
                         task_bar.update(1)
 
-                    if model_capabilities["python_enabled"]:
+                    if pair_capabilities["python_enabled"]:
                         if task_bar is not None:
                             task_bar.set_postfix_str(f"{case_name}:{pair_name}:py")
                         try:
@@ -692,7 +743,7 @@ class BenchOrchestrator:
                                 "prompt": prompt,
                                 "max_new_tokens": max_new,
                                 "baseline_json": baseline_json,
-                                "capabilities": model_capabilities,
+                                "capabilities": pair_capabilities,
                                 "python_metrics": None,
                                 "rust_metrics": rs_metrics,
                                 "strict_status": "error",
@@ -712,7 +763,6 @@ class BenchOrchestrator:
 
                         if task_bar is not None:
                             task_bar.update(1)
-
                     row = {
                         "schema_version": 1,
                         "run": run,
@@ -728,12 +778,12 @@ class BenchOrchestrator:
                         "prompt": prompt,
                         "max_new_tokens": max_new,
                         "baseline_json": baseline_json,
-                        "capabilities": model_capabilities,
+                        "capabilities": pair_capabilities,
                         "python_metrics": py_metrics,
                         "rust_metrics": rs_metrics,
                     }
 
-                    if model_capabilities["strict_enabled"] and py_metrics is not None:
+                    if pair_capabilities["strict_enabled"] and py_metrics is not None:
                         strict = self._strict_compare(py_metrics, rs_metrics)
                         row.update(
                             {
@@ -745,7 +795,7 @@ class BenchOrchestrator:
                                 "prompt_diff": strict["prompt_diff"],
                             }
                         )
-                    elif model_capabilities["strict_enabled"] and py_metrics is None:
+                    elif pair_capabilities["strict_enabled"] and py_metrics is None:
                         error_reason = "python bench output missing for strict compare"
                         row.update(
                             {
@@ -768,8 +818,8 @@ class BenchOrchestrator:
                                 "all_match": None,
                                 "token_diff": None,
                                 "prompt_diff": None,
-                                "skip_reason": model_capabilities["strict_skip_reason"]
-                                or model_capabilities["python_skip_reason"]
+                                "skip_reason": pair_capabilities["strict_skip_reason"]
+                                or pair_capabilities["python_skip_reason"]
                                 or "strict compare unavailable",
                             }
                         )
@@ -978,9 +1028,23 @@ class BenchOrchestrator:
             if not pair_defs:
                 raise SystemExit("no runnable device/precision pairs after filtering")
 
-            model_capabilities = self._capability_payload(adapter, model_dir=model_dir, root=root)
+            pair_entries: list[tuple[dict[str, str], dict[str, Any]]] = []
+            for pair in pair_defs:
+                pair_entries.append(
+                    (
+                        pair,
+                        self._pair_capability_payload(
+                            adapter,
+                            model_dir=model_dir,
+                            root=root,
+                            py_device=pair["py_device"],
+                            py_dtype=pair["py_dtype"],
+                            runtime_root=runtime.root,
+                        ),
+                    )
+                )
 
-            total = len(local_payloads) * len(pair_defs)
+            total = len(local_payloads) * len(pair_entries)
             pbar = tqdm(total=total, desc=f"matrix:{model_name}", unit="case") if tqdm is not None else None
 
             for case in local_payloads:
@@ -997,7 +1061,7 @@ class BenchOrchestrator:
                     tokens = case.get("generated_tokens")
                     max_new = len(tokens) if isinstance(tokens, list) and tokens else 64
 
-                for pair in pair_defs:
+                for pair, pair_capabilities in pair_entries:
                     pair_name = f"{pair['py_device']}_{pair['py_dtype']}"
                     if pbar is None:
                         print(f"[{model_name}] {case_name} {pair_name}")
@@ -1009,7 +1073,7 @@ class BenchOrchestrator:
                     rust_output = out_case / "rust_output.json"
                     compare_output = out_case / "compare.json"
 
-                    if not model_capabilities["strict_enabled"]:
+                    if not pair_capabilities["strict_enabled"]:
                         result = {
                             "run": run,
                             "model": model_name,
@@ -1020,10 +1084,10 @@ class BenchOrchestrator:
                             "all_match": None,
                             "prompt_match": None,
                             "token_match": None,
-                            "skip_reason": model_capabilities["strict_skip_reason"]
-                            or model_capabilities["python_skip_reason"]
+                            "skip_reason": pair_capabilities["strict_skip_reason"]
+                            or pair_capabilities["python_skip_reason"]
                             or "strict compare unavailable",
-                            "capabilities": model_capabilities,
+                            "capabilities": pair_capabilities,
                         }
                         write_json(compare_output, result)
                         all_results.append(result)
@@ -1032,6 +1096,19 @@ class BenchOrchestrator:
                         continue
 
                     try:
+                        rs_metrics = adapter.run_rust_infer(
+                            cli=args.cli,
+                            image=image,
+                            prompt=prompt,
+                            rendered_prompt=None,
+                            max_new_tokens=int(max_new),
+                            rs_device=pair["rs_device"],
+                            rs_dtype=pair["rs_dtype"],
+                            output=rust_output,
+                            repo_root=root,
+                            runtime_root=runtime.root,
+                        )
+
                         py_metrics = adapter.run_python_bench(
                             model_dir=model_dir,
                             image=image,
@@ -1040,19 +1117,6 @@ class BenchOrchestrator:
                             py_device=pair["py_device"],
                             py_dtype=pair["py_dtype"],
                             output=py_output,
-                            repo_root=root,
-                            runtime_root=runtime.root,
-                        )
-
-                        rs_metrics = adapter.run_rust_infer(
-                            cli=args.cli,
-                            image=image,
-                            prompt=prompt,
-                            rendered_prompt=py_metrics.get("rendered_prompt"),
-                            max_new_tokens=int(max_new),
-                            rs_device=pair["rs_device"],
-                            rs_dtype=pair["rs_dtype"],
-                            output=rust_output,
                             repo_root=root,
                             runtime_root=runtime.root,
                         )
@@ -1066,7 +1130,7 @@ class BenchOrchestrator:
                             "strict_status": "error",
                             "all_match": False,
                             "error": str(exc),
-                            "capabilities": model_capabilities,
+                            "capabilities": pair_capabilities,
                         }
                         all_results.append(result)
                         all_errors.append(result)
@@ -1098,7 +1162,7 @@ class BenchOrchestrator:
                         "rust_tokens": len(rs_metrics.get("tokens", [])) if isinstance(rs_metrics.get("tokens"), list) else None,
                         "earliest_divergence": strict.get("token_diff"),
                         "prompt_diff": strict.get("prompt_diff"),
-                        "capabilities": model_capabilities,
+                        "capabilities": pair_capabilities,
                     }
                     write_json(compare_output, result)
                     all_results.append(result)
