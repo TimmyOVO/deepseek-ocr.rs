@@ -574,7 +574,7 @@ class BaseAdapter(ABC):
         _ = py_device
         _ = py_dtype
 
-        py_ok, py_reason = self.python_baseline_status(model_dir=model_dir)
+        py_ok, py_reason = self.python_support_status(model_dir=model_dir)
         if not py_ok:
             return py_ok, py_reason
 

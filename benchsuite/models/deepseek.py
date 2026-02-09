@@ -5,7 +5,6 @@ from importlib import metadata as importlib_metadata
 import os
 import random
 import tempfile
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -46,18 +45,17 @@ class _DeepseekFamilyAdapter(BaseAdapter):
         py_dtype: str,
         runtime_root: Path | None = None,
     ) -> tuple[bool, str | None]:
-        pair_ok, pair_reason = super().python_pair_status(
+        _ = py_dtype
+
+        if py_device != "cpu":
+            return False, "deepseek python baseline currently supports cpu only"
+
+        return super().python_pair_status(
             model_dir=model_dir,
             py_device=py_device,
             py_dtype=py_dtype,
             runtime_root=runtime_root,
         )
-        if not pair_ok:
-            return False, pair_reason
-
-        if py_device != "cpu":
-            return False, "deepseek python baseline currently supports cpu only"
-        return True, None
 
     def python_baseline_status(self, *, model_dir: Path) -> tuple[bool, str | None]:
         _ = model_dir
@@ -65,19 +63,8 @@ class _DeepseekFamilyAdapter(BaseAdapter):
         if not ok:
             return ok, reason
 
-        python_exec, python_reason = self.resolve_python_executable()
-        if python_exec is None:
-            return False, python_reason or "python interpreter unavailable"
-
         if os.environ.get("BENCHSUITE_INTERNAL_PY_BENCH") != "1":
-            try:
-                current_exec = Path(sys.executable).resolve()
-                target_exec = Path(python_exec).expanduser().resolve()
-            except Exception:
-                current_exec = Path(sys.executable)
-                target_exec = Path(python_exec)
-            if target_exec != current_exec:
-                return True, None
+            return True, None
 
         try:
             version = importlib_metadata.version("transformers")
@@ -192,7 +179,14 @@ class _DeepseekFamilyAdapter(BaseAdapter):
         load_start = time.perf_counter()
         tokenizer = self.python_load_processor(model_dir)
         model = self.python_load_model(model_dir, dtype=torch.float32, cfg_raw={})
-        model = model.eval().to(torch.float32).to(torch.device("cpu"))
+        model = model.to(torch.float32)
+        try:
+            vision_model = getattr(model, "vision_model", None)
+            if vision_model is not None:
+                vision_model.to(torch.bfloat16)
+        except Exception:
+            pass
+        model = model.eval().to(torch.device("cpu"))
         load_time_s = time.perf_counter() - load_start
 
         normalized_prompt = self.normalize_prompt(prompt)
@@ -219,6 +213,7 @@ class _DeepseekFamilyAdapter(BaseAdapter):
         original_tensor_cuda = torch.Tensor.cuda
         original_module_cuda = torch.nn.Module.cuda
         original_autocast = torch.autocast
+        original_bfloat16 = torch.bfloat16
 
         def _tensor_cuda_noop(self: Any, *args: Any, **kwargs: Any) -> Any:
             _ = args
@@ -239,6 +234,7 @@ class _DeepseekFamilyAdapter(BaseAdapter):
         torch.Tensor.cuda = _tensor_cuda_noop  # type: ignore[assignment]
         torch.nn.Module.cuda = _module_cuda_noop  # type: ignore[assignment]
         torch.autocast = _autocast_noop  # type: ignore[assignment]
+        torch.bfloat16 = torch.float32  # type: ignore[assignment]
 
         infer_start = time.perf_counter()
         try:
@@ -258,6 +254,7 @@ class _DeepseekFamilyAdapter(BaseAdapter):
             torch.Tensor.cuda = original_tensor_cuda  # type: ignore[assignment]
             torch.nn.Module.cuda = original_module_cuda  # type: ignore[assignment]
             torch.autocast = original_autocast  # type: ignore[assignment]
+            torch.bfloat16 = original_bfloat16  # type: ignore[assignment]
             model.generate = origin_generate  # type: ignore[assignment]
 
         output_ids = capture.get("output_ids")
