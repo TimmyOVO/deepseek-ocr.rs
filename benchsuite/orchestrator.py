@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Any
 
-from benchsuite.common import earliest_divergence, has_mps, read_json, repo_root, write_json
+from benchsuite.common import earliest_divergence, has_mps, read_json, repo_root, runtime_paths, write_json
 from benchsuite.registry import get_adapter, list_default_models
 
 try:
@@ -35,8 +36,106 @@ class BenchOrchestrator:
     def _pairs_rows(pairs: list[dict[str, Any]]) -> list[list[str]]:
         rows: list[list[str]] = []
         for pair in pairs:
-            py = pair["python_metrics"]
-            rs = pair["rust_metrics"]
+            py = pair.get("python_metrics")
+            rs = pair.get("rust_metrics")
+            strict_status = str(pair.get("strict_status") or "")
+
+            rs_prefill_s = "-"
+            rs_total_s = "-"
+            rs_decode_s = "-"
+            if isinstance(rs, dict):
+                try:
+                    rs_prefill_s = f"{float(rs.get('prefill_time_s', 0.0)):.3f}"
+                except Exception:
+                    rs_prefill_s = "-"
+                try:
+                    rs_total_s = f"{float(rs.get('total_time_s', 0.0)):.3f}"
+                except Exception:
+                    rs_total_s = "-"
+                try:
+                    rs_decode_s = f"{float(rs.get('tok_per_s', {}).get('decode', 0.0)):.3f}"
+                except Exception:
+                    rs_decode_s = "-"
+
+            if strict_status == "skipped":
+                reason = str(pair.get("skip_reason") or "skip")
+                rows.append(
+                    [
+                        pair["pair"],
+                        "skip",
+                        "-",
+                        rs_prefill_s,
+                        "-",
+                        "-",
+                        rs_total_s,
+                        "-",
+                        "-",
+                        rs_decode_s,
+                        reason,
+                    ]
+                )
+                continue
+
+            if strict_status == "error":
+                reason = str(pair.get("error") or pair.get("skip_reason") or "error")
+                rows.append(
+                    [
+                        pair["pair"],
+                        "error",
+                        "-",
+                        rs_prefill_s,
+                        "-",
+                        "-",
+                        rs_total_s,
+                        "-",
+                        "-",
+                        rs_decode_s,
+                        reason,
+                    ]
+                )
+                continue
+
+            if strict_status == "compared" and pair.get("all_match") is False:
+                detail = str(pair.get("error") or "strict mismatch")
+                if pair.get("token_diff"):
+                    detail = f"token_diff={pair['token_diff']}"
+                elif pair.get("prompt_diff"):
+                    detail = f"prompt_diff={pair['prompt_diff']}"
+                rows.append(
+                    [
+                        pair["pair"],
+                        "fail",
+                        "-",
+                        rs_prefill_s,
+                        "-",
+                        "-",
+                        rs_total_s,
+                        "-",
+                        "-",
+                        rs_decode_s,
+                        detail,
+                    ]
+                )
+                continue
+
+            if not isinstance(py, dict) or not isinstance(rs, dict):
+                rows.append(
+                    [
+                        pair["pair"],
+                        strict_status or "skip",
+                        "-",
+                        rs_prefill_s,
+                        "-",
+                        "-",
+                        rs_total_s,
+                        "-",
+                        "-",
+                        rs_decode_s,
+                        str(pair.get("skip_reason") or "-"),
+                    ]
+                )
+                continue
+
             py_total = float(py["total_time_s"])
             rs_total = float(rs["total_time_s"])
             py_prefill = float(py["prefill_time_s"])
@@ -46,7 +145,7 @@ class BenchOrchestrator:
             rows.append(
                 [
                     pair["pair"],
-                    "ok" if pair["token_match"] and pair["prompt_match"] else "fail",
+                    "ok" if pair.get("all_match") is True else "fail",
                     f"{py_prefill:.3f}",
                     f"{rs_prefill:.3f}",
                     f"{(py_prefill / rs_prefill) if rs_prefill > 0 else 0.0:.3f}x",
@@ -74,7 +173,7 @@ class BenchOrchestrator:
                 "py/rs_total",
                 "py_decode_tps",
                 "rs_decode_tps",
-                "rs/py_tps",
+                "rs/py_tps_or_reason",
             ],
             self._pairs_rows(pairs),
         )
@@ -289,6 +388,9 @@ class BenchOrchestrator:
 
         rows: list[dict[str, Any]] = []
         for row in current_pairs:
+            if not isinstance(row.get("rust_metrics"), dict):
+                continue
+
             key = (
                 row["model"],
                 row["python_device"],
@@ -328,8 +430,54 @@ class BenchOrchestrator:
             "rows": rows,
         }
 
+    @staticmethod
+    def _capability_payload(adapter: Any, *, model_dir: Path, root: Path) -> dict[str, Any]:
+        python_enabled, python_reason = adapter.python_baseline_status(model_dir=model_dir)
+        rust_enabled, rust_reason = adapter.rust_support_status(root=root)
+        strict_enabled, strict_reason = adapter.strict_status(model_dir=model_dir)
+
+        return {
+            "python_enabled": python_enabled,
+            "python_skip_reason": python_reason,
+            "rust_enabled": rust_enabled,
+            "rust_skip_reason": rust_reason,
+            "strict_enabled": strict_enabled,
+            "strict_skip_reason": strict_reason,
+            "declared": adapter.describe_capabilities(),
+        }
+
+    @staticmethod
+    def _model_skip_row(
+        *,
+        run: str,
+        model: str,
+        suite: str,
+        case: str,
+        pair: str,
+        reason: str,
+        capabilities: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "run": run,
+            "model": model,
+            "suite": suite,
+            "case": case,
+            "pair": pair,
+            "all_match": False,
+            "token_match": False,
+            "prompt_match": False,
+            "strict_status": "skipped",
+            "skip_reason": reason,
+            "capabilities": capabilities,
+            "python_metrics": None,
+            "rust_metrics": None,
+        }
+
     def run_perf(self, args: Any) -> int:
         root = repo_root()
+        runtime = runtime_paths(runtime_root=getattr(args, "runtime_root", None), create_dirs=True)
+
         models = self._default_models(args)
         include_devices = self._default_devices(args)
         include_precision = self._default_precisions(args)
@@ -343,10 +491,10 @@ class BenchOrchestrator:
             adapter = get_adapter(model_name)
             suite = getattr(adapter, "suite_name", model_name.replace("-", "_"))
 
-            model_dir = (
-                Path(args.model_dir)
-                if args.model_dir is not None
-                else Path(getattr(adapter, "default_model_dir", ".cli-cache/models"))
+            model_dir = adapter.resolve_model_dir(
+                root=root,
+                override=args.model_dir,
+                runtime_root=runtime.root,
             )
             run_root.mkdir(parents=True, exist_ok=True)
 
@@ -401,7 +549,10 @@ class BenchOrchestrator:
             if not pair_defs:
                 raise SystemExit("no runnable device/precision pairs after filtering")
 
-            task_total = len(case_rows) * len(pair_defs) * 2
+            model_capabilities = self._capability_payload(adapter, model_dir=model_dir, root=root)
+
+            task_per_pair = 1 + (1 if model_capabilities["python_enabled"] else 0)
+            task_total = len(case_rows) * len(pair_defs) * task_per_pair
             task_bar = tqdm(total=task_total, desc=f"perf:{model_name}", unit="task") if tqdm is not None else None
 
             for case in case_rows:
@@ -417,32 +568,36 @@ class BenchOrchestrator:
                     if task_bar is None:
                         print(f"[{idx}/{len(pair_defs)}] {model_name}:{case_name}:{pair_name}")
                     else:
-                        task_bar.set_postfix_str(f"{case_name}:{pair_name}:py")
+                        task_bar.set_postfix_str(f"{case_name}:{pair_name}:rs")
 
                     pair_root = run_root / "perf" / model_name / case_name / pair_name
                     py_out = pair_root / "python" / "bench.json"
                     rs_out = pair_root / "rust" / "bench.json"
                     compare_out = pair_root / "compare.json"
 
-                    try:
-                        py_metrics = adapter.run_python_bench(
-                            model_dir=model_dir,
-                            image=image,
-                            prompt=prompt,
-                            max_new_tokens=max_new,
-                            py_device=pair["py_device"],
-                            py_dtype=pair["py_dtype"],
-                            output=py_out,
-                            repo_root=root,
+                    if not model_capabilities["rust_enabled"]:
+                        skipped = self._model_skip_row(
+                            run=run,
+                            model=model_name,
+                            suite=suite,
+                            case=case_name,
+                            pair=pair_name,
+                            reason=model_capabilities["rust_skip_reason"] or "rust path disabled",
+                            capabilities=model_capabilities,
                         )
+                        overall_skipped.append(skipped)
+                        write_json(compare_out, skipped)
                         if task_bar is not None:
-                            task_bar.update(1)
-                            task_bar.set_postfix_str(f"{case_name}:{pair_name}:rs")
+                            task_bar.update(task_per_pair)
+                        continue
 
-                        rendered_for_rust = rendered_prompt
-                        if rendered_for_rust is None:
-                            rendered_for_rust = py_metrics.get("rendered_prompt")
+                    rendered_for_rust = rendered_prompt
+                    py_metrics: dict[str, Any] | None = None
+                    rs_metrics: dict[str, Any] | None = None
 
+                    if task_bar is not None:
+                        task_bar.set_postfix_str(f"{case_name}:{pair_name}:rs")
+                    try:
                         rs_metrics = adapter.run_rust_bench(
                             cli=args.cli,
                             image=image,
@@ -453,21 +608,111 @@ class BenchOrchestrator:
                             rs_dtype=pair["rs_dtype"],
                             output=rs_out,
                             repo_root=root,
+                            runtime_root=runtime.root,
                         )
-                        if task_bar is not None:
-                            task_bar.update(1)
                     except Exception as exc:
-                        overall_skipped.append(
-                            {
-                                "model": model_name,
-                                "case": case_name,
-                                "pair": pair_name,
-                                "reason": str(exc),
-                            }
+                        error_reason = f"rust bench failed: {exc}"
+                        print(
+                            f"[perf][error] model={model_name} case={case_name} pair={pair_name} stage=rust error={exc}",
+                            file=sys.stderr,
+                            flush=True,
                         )
+                        row = {
+                            "schema_version": 1,
+                            "run": run,
+                            "model": model_name,
+                            "suite": suite,
+                            "case": case_name,
+                            "pair": pair_name,
+                            "python_device": pair["py_device"],
+                            "python_dtype": pair["py_dtype"],
+                            "rust_device": pair["rs_device"],
+                            "rust_dtype": pair["rs_dtype"],
+                            "image": str(image),
+                            "prompt": prompt,
+                            "max_new_tokens": max_new,
+                            "baseline_json": baseline_json,
+                            "capabilities": model_capabilities,
+                            "python_metrics": None,
+                            "rust_metrics": None,
+                            "strict_status": "error",
+                            "all_match": False,
+                            "token_match": None,
+                            "prompt_match": None,
+                            "token_diff": None,
+                            "prompt_diff": None,
+                            "error": error_reason,
+                            "skip_reason": error_reason,
+                        }
+                        overall_pairs.append(row)
+                        write_json(compare_out, row)
+                        if task_bar is not None:
+                            task_bar.update(task_per_pair)
                         continue
 
-                    strict = self._strict_compare(py_metrics, rs_metrics)
+                    if task_bar is not None:
+                        task_bar.update(1)
+
+                    if model_capabilities["python_enabled"]:
+                        if task_bar is not None:
+                            task_bar.set_postfix_str(f"{case_name}:{pair_name}:py")
+                        try:
+                            py_metrics = adapter.run_python_bench(
+                                model_dir=model_dir,
+                                image=image,
+                                prompt=prompt,
+                                max_new_tokens=max_new,
+                                py_device=pair["py_device"],
+                                py_dtype=pair["py_dtype"],
+                                output=py_out,
+                                repo_root=root,
+                                runtime_root=runtime.root,
+                            )
+                            if rendered_for_rust is None:
+                                rendered_for_rust = py_metrics.get("rendered_prompt")
+                        except Exception as exc:
+                            error_reason = f"python bench failed: {exc}"
+                            print(
+                                f"[perf][error] model={model_name} case={case_name} pair={pair_name} stage=python error={exc}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            row = {
+                                "schema_version": 1,
+                                "run": run,
+                                "model": model_name,
+                                "suite": suite,
+                                "case": case_name,
+                                "pair": pair_name,
+                                "python_device": pair["py_device"],
+                                "python_dtype": pair["py_dtype"],
+                                "rust_device": pair["rs_device"],
+                                "rust_dtype": pair["rs_dtype"],
+                                "image": str(image),
+                                "prompt": prompt,
+                                "max_new_tokens": max_new,
+                                "baseline_json": baseline_json,
+                                "capabilities": model_capabilities,
+                                "python_metrics": None,
+                                "rust_metrics": rs_metrics,
+                                "strict_status": "error",
+                                "all_match": False,
+                                "token_match": None,
+                                "prompt_match": None,
+                                "token_diff": None,
+                                "prompt_diff": None,
+                                "error": error_reason,
+                                "skip_reason": error_reason,
+                            }
+                            overall_pairs.append(row)
+                            write_json(compare_out, row)
+                            if task_bar is not None:
+                                task_bar.update(1)
+                            continue
+
+                        if task_bar is not None:
+                            task_bar.update(1)
+
                     row = {
                         "schema_version": 1,
                         "run": run,
@@ -483,22 +728,60 @@ class BenchOrchestrator:
                         "prompt": prompt,
                         "max_new_tokens": max_new,
                         "baseline_json": baseline_json,
-                        "token_match": strict["token_match"],
-                        "prompt_match": strict["prompt_match"],
-                        "all_match": bool(strict["token_match"] and strict["prompt_match"]),
-                        "token_diff": strict["token_diff"],
-                        "prompt_diff": strict["prompt_diff"],
+                        "capabilities": model_capabilities,
                         "python_metrics": py_metrics,
                         "rust_metrics": rs_metrics,
                     }
+
+                    if model_capabilities["strict_enabled"] and py_metrics is not None:
+                        strict = self._strict_compare(py_metrics, rs_metrics)
+                        row.update(
+                            {
+                                "strict_status": "compared",
+                                "token_match": strict["token_match"],
+                                "prompt_match": strict["prompt_match"],
+                                "all_match": bool(strict["token_match"] and strict["prompt_match"]),
+                                "token_diff": strict["token_diff"],
+                                "prompt_diff": strict["prompt_diff"],
+                            }
+                        )
+                    elif model_capabilities["strict_enabled"] and py_metrics is None:
+                        error_reason = "python bench output missing for strict compare"
+                        row.update(
+                            {
+                                "strict_status": "error",
+                                "token_match": None,
+                                "prompt_match": None,
+                                "all_match": False,
+                                "token_diff": None,
+                                "prompt_diff": None,
+                                "error": error_reason,
+                                "skip_reason": error_reason,
+                            }
+                        )
+                    else:
+                        row.update(
+                            {
+                                "strict_status": "skipped",
+                                "token_match": None,
+                                "prompt_match": None,
+                                "all_match": None,
+                                "token_diff": None,
+                                "prompt_diff": None,
+                                "skip_reason": model_capabilities["strict_skip_reason"]
+                                or model_capabilities["python_skip_reason"]
+                                or "strict compare unavailable",
+                            }
+                        )
+
                     overall_pairs.append(row)
                     write_json(compare_out, row)
 
             if task_bar is not None:
                 task_bar.close()
 
-        if not overall_pairs:
-            raise SystemExit("no successful perf pair produced")
+        if not overall_pairs and not overall_skipped:
+            raise SystemExit("no perf result produced")
 
         grouped_root = run_root / "perf"
         grouped_root.mkdir(parents=True, exist_ok=True)
@@ -514,9 +797,19 @@ class BenchOrchestrator:
 
         prev_compare = self._build_prev_compare(current_pairs=overall_pairs, prev_summary=prev_summary)
 
+        strict_required = [
+            row
+            for row in overall_pairs
+            if isinstance(row.get("capabilities"), dict) and bool(row["capabilities"].get("strict_enabled"))
+        ]
+        compared_pairs = [row for row in strict_required if row.get("strict_status") == "compared"]
+        strict_missing = [row for row in strict_required if row.get("strict_status") != "compared"]
+        all_match = (not strict_missing) and all(bool(row.get("all_match")) for row in compared_pairs)
+
         summary = {
-            "schema_version": 2,
+            "schema_version": 3,
             "run": run,
+            "runtime_root": str(runtime.root),
             "include": {
                 "models": models,
                 "devices": include_devices,
@@ -524,7 +817,12 @@ class BenchOrchestrator:
             },
             "pairs": overall_pairs,
             "skipped": overall_skipped,
-            "all_match": all(bool(row["all_match"]) for row in overall_pairs),
+            "all_match": all_match,
+            "strict_compared": len(compared_pairs),
+            "strict_required": len(strict_required),
+            "strict_errors": len([row for row in overall_pairs if row.get("strict_status") == "error"]),
+            "strict_skipped": len([row for row in overall_pairs if row.get("strict_status") == "skipped"])
+            + len(overall_skipped),
             "paths": {
                 "summary": str(summary_path),
                 "report": str(report_path),
@@ -544,19 +842,31 @@ class BenchOrchestrator:
             "py/rs_total",
             "py_decode_tps",
             "rs_decode_tps",
-            "rs/py_tps",
+            "rs/py_tps_or_reason",
         ]
 
-        rows = self._pairs_rows(overall_pairs)
+        display_rows = overall_pairs + overall_skipped
+        rows = self._pairs_rows(display_rows)
         report_lines = [
             f"run: {run}",
+            f"runtime_root: {runtime.root}",
             f"all_match: {summary['all_match']}",
+            f"strict_required: {summary['strict_required']}",
+            f"strict_compared: {summary['strict_compared']}",
+            f"strict_errors: {summary['strict_errors']}",
+            f"strict_skipped: {summary['strict_skipped']}",
             f"include_models: {','.join(models)}",
             f"include_devices: {','.join(include_devices)}",
             f"include_precision: {','.join(include_precision)}",
             "",
             self._format_table(header, rows),
         ]
+
+        if overall_skipped:
+            report_lines.append("")
+            report_lines.append("skip reasons:")
+            for row in overall_skipped:
+                report_lines.append(f"- {row['model']}:{row['case']}:{row['pair']} -> {row['skip_reason']}")
 
         if prev_compare and prev_compare.get("rows"):
             report_lines.append("")
@@ -580,15 +890,18 @@ class BenchOrchestrator:
 
         report_path.write_text("\n".join(report_lines) + "\n")
 
-        self._print_perf_report(overall_pairs)
+        self._print_perf_report(display_rows)
         if prev_compare and prev_compare.get("rows"):
             print(f"\nprevious_run: {prev_compare.get('previous_run')}")
+        print(f"runtime_root: {runtime.root}")
         print(f"summary: {summary_path}")
         print(f"report:  {report_path}")
         return 0 if summary["all_match"] else 1
 
     def run_matrix_gate(self, args: Any) -> int:
         root = repo_root()
+        runtime = runtime_paths(runtime_root=getattr(args, "runtime_root", None), create_dirs=True)
+
         models = self._default_models(args)
         include_devices = self._default_devices(args)
         include_precision = self._default_precisions(args)
@@ -609,10 +922,10 @@ class BenchOrchestrator:
         for model_name in models:
             adapter = get_adapter(model_name)
             suite = getattr(adapter, "suite_name", model_name.replace("-", "_"))
-            model_dir = (
-                Path(args.model_dir)
-                if args.model_dir is not None
-                else Path(getattr(adapter, "default_model_dir", ".cli-cache/models"))
+            model_dir = adapter.resolve_model_dir(
+                root=root,
+                override=args.model_dir,
+                runtime_root=runtime.root,
             )
             source_matrix = (
                 Path(args.source_matrix)
@@ -665,6 +978,8 @@ class BenchOrchestrator:
             if not pair_defs:
                 raise SystemExit("no runnable device/precision pairs after filtering")
 
+            model_capabilities = self._capability_payload(adapter, model_dir=model_dir, root=root)
+
             total = len(local_payloads) * len(pair_defs)
             pbar = tqdm(total=total, desc=f"matrix:{model_name}", unit="case") if tqdm is not None else None
 
@@ -694,6 +1009,28 @@ class BenchOrchestrator:
                     rust_output = out_case / "rust_output.json"
                     compare_output = out_case / "compare.json"
 
+                    if not model_capabilities["strict_enabled"]:
+                        result = {
+                            "run": run,
+                            "model": model_name,
+                            "suite": suite,
+                            "case": case_name,
+                            "pair": pair_name,
+                            "strict_status": "skipped",
+                            "all_match": None,
+                            "prompt_match": None,
+                            "token_match": None,
+                            "skip_reason": model_capabilities["strict_skip_reason"]
+                            or model_capabilities["python_skip_reason"]
+                            or "strict compare unavailable",
+                            "capabilities": model_capabilities,
+                        }
+                        write_json(compare_output, result)
+                        all_results.append(result)
+                        if pbar is not None:
+                            pbar.update(1)
+                        continue
+
                     try:
                         py_metrics = adapter.run_python_bench(
                             model_dir=model_dir,
@@ -704,6 +1041,7 @@ class BenchOrchestrator:
                             py_dtype=pair["py_dtype"],
                             output=py_output,
                             repo_root=root,
+                            runtime_root=runtime.root,
                         )
 
                         rs_metrics = adapter.run_rust_infer(
@@ -716,6 +1054,7 @@ class BenchOrchestrator:
                             rs_dtype=pair["rs_dtype"],
                             output=rust_output,
                             repo_root=root,
+                            runtime_root=runtime.root,
                         )
                     except Exception as exc:
                         result = {
@@ -724,8 +1063,10 @@ class BenchOrchestrator:
                             "suite": suite,
                             "case": case_name,
                             "pair": pair_name,
-                            "match": False,
+                            "strict_status": "error",
+                            "all_match": False,
                             "error": str(exc),
+                            "capabilities": model_capabilities,
                         }
                         all_results.append(result)
                         all_errors.append(result)
@@ -749,6 +1090,7 @@ class BenchOrchestrator:
                         "pair": pair_name,
                         "device": pair["rs_device"],
                         "dtype": pair["rs_dtype"],
+                        "strict_status": "compared",
                         "prompt_match": bool(strict["prompt_match"]),
                         "token_match": bool(strict["token_match"]),
                         "all_match": bool(strict["prompt_match"] and strict["token_match"]),
@@ -756,6 +1098,7 @@ class BenchOrchestrator:
                         "rust_tokens": len(rs_metrics.get("tokens", [])) if isinstance(rs_metrics.get("tokens"), list) else None,
                         "earliest_divergence": strict.get("token_diff"),
                         "prompt_diff": strict.get("prompt_diff"),
+                        "capabilities": model_capabilities,
                     }
                     write_json(compare_output, result)
                     all_results.append(result)
@@ -775,7 +1118,8 @@ class BenchOrchestrator:
 
         earliest = None
         earliest_idx: int | None = None
-        for row in all_results:
+        compared_rows = [row for row in all_results if row.get("strict_status") == "compared"]
+        for row in compared_rows:
             if row.get("all_match"):
                 continue
             divergence = row.get("earliest_divergence")
@@ -797,16 +1141,21 @@ class BenchOrchestrator:
                     "detail": row.get("error", "unknown mismatch"),
                 }
 
-        mismatches = sum(1 for row in all_results if not bool(row.get("all_match")))
+        mismatches = sum(1 for row in compared_rows if row.get("all_match") is False)
+        skipped = len([row for row in all_results if row.get("strict_status") == "skipped"])
+
         summary = {
-            "schema_version": 2,
+            "schema_version": 3,
             "run": run,
+            "runtime_root": str(runtime.root),
             "include": {
                 "models": models,
                 "devices": include_devices,
                 "precision": include_precision,
             },
             "cases": len(all_results),
+            "strict_compared": len(compared_rows),
+            "strict_skipped": skipped,
             "mismatches": mismatches,
             "all_match": mismatches == 0,
             "earliest_divergence": earliest,
@@ -821,6 +1170,20 @@ class BenchOrchestrator:
 
         rows = []
         for row in all_results:
+            status = row.get("strict_status")
+            if status == "skipped":
+                detail = row.get("skip_reason", "skip")
+                rows.append(
+                    [
+                        f"{row['model']}:{row['case']}:{row['pair']}",
+                        "skip",
+                        "-",
+                        "-",
+                        detail,
+                    ]
+                )
+                continue
+
             detail = "-"
             if not row.get("all_match"):
                 if row.get("earliest_divergence"):
@@ -843,7 +1206,10 @@ class BenchOrchestrator:
 
         lines = [
             f"run: {run}",
+            f"runtime_root: {runtime.root}",
             f"all_match: {summary['all_match']}",
+            f"strict_compared: {summary['strict_compared']}",
+            f"strict_skipped: {summary['strict_skipped']}",
             f"mismatches: {mismatches}",
             f"include_models: {','.join(models)}",
             f"include_devices: {','.join(include_devices)}",
@@ -855,6 +1221,7 @@ class BenchOrchestrator:
 
         print("\n=== Matrix Strict Gate ===")
         print(self._format_table(["case", "strict", "prompt", "tokens", "detail"], rows))
+        print(f"runtime_root: {runtime.root}")
         print(f"summary: {report_json}")
         print(f"report:  {report_txt}")
         return 0 if mismatches == 0 else 1

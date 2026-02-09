@@ -149,6 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cases", nargs="*")
     p.add_argument("--limit", type=int)
     p.add_argument("--output-root", type=Path)
+    p.add_argument("--runtime-root", type=Path, help="shared runtime root for hf/transformers/cli caches")
     p.set_defaults(func=_run_perf)
 
     p = sub.add_parser("matrix-gate", help="one-command strict matrix gate run")
@@ -167,6 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-new-tokens", type=int)
     p.add_argument("--cases", nargs="*")
     p.add_argument("--limit", type=int)
+    p.add_argument("--runtime-root", type=Path, help="shared runtime root for hf/transformers/cli caches")
     p.set_defaults(func=_run_matrix_gate)
 
     return parser

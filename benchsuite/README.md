@@ -1,10 +1,8 @@
 # Benchsuite
 
-`benchsuite` 是仓库内统一的 **性能对比 + 严格门禁** 子项目
+`benchsuite` 是仓库内统一的 **性能对比 + 严格门禁** 子项目。
 
----
-
-## 安装与运行入口
+## 安装与入口
 
 在仓库根目录执行：
 
@@ -12,160 +10,139 @@
 python -m pip install -e '.[bench]'
 ```
 
-安装后可用两种入口：
+统一入口：
 
 ```bash
-benchsuite --help
 python -m benchsuite.cli --help
 ```
 
----
+## 支持模型（仅 Rust infer 已支持的 baseline）
 
-## 矩阵语义（同设备同精度）
+当前 benchsuite 默认接入与 Rust infer 一致的 5 个 baseline 模型：
 
-`perf` 和 `matrix-gate` 都支持：
+- `deepseek-ocr`
+- `deepseek-ocr-2`
+- `paddleocr-vl`
+- `dots-ocr`
+- `glm-ocr`
 
-- `--include-models`（数组）
-- `--include-devices`（数组，当前支持 `cpu`/`mps`）
-- `--include-precision`（数组，当前支持 `f32`/`f16`）
+> 量化模型（`*-q4k/q6k/q8k`）不参与 benchsuite 对比：
+> 量化不是同精度路径，无法做 strict 一致性验证，且没有对等 Python baseline。
 
-默认行为（不传时）：
+## 能力矩阵（python / rust / strict）
 
-- 模型：来自 `registry.list_default_models()`（当前为 `glm-ocr`）
-- 设备：`cpu mps`
-- 精度：`f32 f16`
-
-当前过滤规则（`BaseAdapter`）：
-
-- `mps` 不可用时自动跳过；
-- `cpu + f16` 默认禁用；
-- Python 设备 `mps` 会映射到 Rust 设备 `metal`。
-
----
-
-## 子命令说明
-
-### `gate`
-
-用途：对比 baseline 与 Rust 输出的 token 严格一致性。
-
-```bash
-python -m benchsuite.cli gate \
-  --model glm-ocr \
-  --baseline baselines/glm/matrix_v20/formula__image__n8/baseline.json \
-  --rust baselines/glm/matrix_v33/formula__image__n8/rust_output.json \
-  --output baselines/glm/matrix_v33/formula__image__n8/compare.json
-```
+| model_id | python baseline | rust bench/infer | strict compare |
+| --- | --- | --- | --- |
+| `glm-ocr` | ✅ | ✅ | ✅ |
+| `deepseek-ocr` | ❌ | ✅ | ❌ |
+| `deepseek-ocr-2` | ❌ | ✅ | ❌ |
+| `paddleocr-vl` | ❌ | ✅ | ❌ |
+| `dots-ocr` | ❌ | ✅ | ❌ |
 
 说明：
 
-- `gate` 走 adapter 的 `compare_tokens`，聚焦 token 严格一致。
-- 退出码：`match=true` 返回 0，否则返回 1。
+- strict compare 只在“同设备同精度 + 有对等 Python baseline”时执行。
+- 无法 strict 时会在 `summary.json` / `report.txt` 中结构化记录 `strict_status=skipped` 与 `skip_reason`。
 
-### `bench-python`
+## 统一运行时目录（不硬编码仓库隐藏目录）
 
-用途：单条 case 跑 Python baseline 并输出结构化指标。
+benchsuite 不再写死 `.hf-cache/.cli-cache/.cli-config`。
 
-```bash
-python -m benchsuite.cli bench-python \
-  --model glm-ocr \
-  --model-dir .cli-cache/models/glm-ocr \
-  --image baselines/sample/images/test.png \
-  --prompt "Formula Recognition:" \
-  --device cpu \
-  --dtype f32 \
-  --max-new-tokens 8 \
-  --output /tmp/py_bench.json
-```
+它会使用统一 runtime root（默认：`/tmp/deepseek-ocr-benchsuite`）并在其下创建：
 
-### `bench-rust`
+- `huggingface/`（`HF_HOME` / `TRANSFORMERS_CACHE` / `HUGGINGFACE_HUB_CACHE`）
+- `deepseek-ocr-config/`（`DEEPSEEK_OCR_CONFIG_DIR`）
+- `deepseek-ocr-cache/`（`DEEPSEEK_OCR_CACHE_DIR`）
 
-用途：单条 case 跑 Rust CLI benchmark 并输出结构化指标。
+可通过以下方式覆盖：
 
-```bash
-python -m benchsuite.cli bench-rust \
-  --model glm-ocr \
-  --cli target/release/deepseek-ocr-cli \
-  --image baselines/sample/images/test.png \
-  --prompt "Formula Recognition:" \
-  --device cpu \
-  --dtype f32 \
-  --max-new-tokens 8 \
-  --output /tmp/rs_bench.json
-```
+- CLI 参数：`--runtime-root /path/to/runtime`
+- 环境变量：`BENCHSUITE_RUNTIME_ROOT` 或 `DEEPSEEK_OCR_RUNTIME_ROOT`
+
+## 矩阵语义（同设备同精度）
+
+`perf` / `matrix-gate` 继续支持：
+
+- `--include-models`
+- `--include-devices`（`cpu` / `mps`）
+- `--include-precision`（`f32` / `f16`）
+
+默认行为（不传时）：
+
+- 模型：5 个 baseline 全量
+- 设备：`cpu mps`
+- 精度：`f32 f16`
+
+过滤规则：
+
+- `mps` 不可用时自动跳过；
+- `cpu + f16` 默认跳过；
+- Python 设备 `mps` 会映射到 Rust 设备 `metal`。
+
+## 子命令
 
 ### `perf`
 
-用途：自动跑 Python + Rust，做 strict 对比并输出性能表。
-
-最小示例：
-
-```bash
-python -m benchsuite.cli perf --run v1
-```
-
-常用筛选：
+自动运行（按能力自动决定 compare/skip）：
 
 ```bash
 python -m benchsuite.cli perf \
-  --run smoke \
+  --run smoke_models_perf_v1 \
   --include-models glm-ocr \
   --include-devices cpu \
   --include-precision f32 \
   --limit 1
 ```
 
-ad-hoc 输入（不走默认 case matrix）：
+多模型：
 
 ```bash
 python -m benchsuite.cli perf \
-  --run adhoc \
+  --run smoke_models_perf_v1 \
+  --include-models deepseek-ocr deepseek-ocr-2 paddleocr-vl dots-ocr glm-ocr \
+  --include-devices cpu \
+  --include-precision f32 \
+  --limit 1
+```
+
+指定 runtime root：
+
+```bash
+python -m benchsuite.cli perf \
+  --run smoke_models_perf_v1 \
+  --runtime-root /tmp/deepseek-ocr-bench-runtime \
   --include-models glm-ocr \
   --include-devices cpu \
   --include-precision f32 \
-  --image baselines/sample/images/test.png \
-  --prompt "Formula Recognition:" \
-  --max-new-tokens 64
+  --limit 1
 ```
-
-case 来源优先级：
-
-1. `--image + --prompt`（ad-hoc）
-2. `--baseline-json` 或 `--case-name`
-3. adapter 默认 case matrix（支持 `--cases` / `--limit`）
 
 ### `matrix-gate`
 
-用途：按矩阵批量执行严格门禁（prompt + token）。
-
-最小示例：
-
-```bash
-python -m benchsuite.cli matrix-gate --run gate_v1
-```
-
-快速迭代：
+严格门禁（仅可比模型会执行 strict）：
 
 ```bash
 python -m benchsuite.cli matrix-gate \
-  --run gate_smoke \
-  --include-models glm-ocr \
+  --run smoke_models_gate_v1 \
+  --include-models deepseek-ocr deepseek-ocr-2 paddleocr-vl dots-ocr glm-ocr \
   --include-devices cpu \
   --include-precision f32 \
   --limit 1
 ```
 
-ad-hoc 输入：
+## 常见失败与排查
 
-```bash
-python -m benchsuite.cli matrix-gate \
-  --run adhoc_gate \
-  --include-models glm-ocr \
-  --include-devices cpu \
-  --include-precision f32 \
-  --image baselines/sample/images/test.png \
-  --prompt "Formula Recognition:" \
-  --max-new-tokens 8
-```
+- `strict_status=skipped`
+  - 这是能力分层行为，不是 silent skip。
+  - 查看 `skip_reason`：通常是无 Python baseline 或无同精度可比路径。
 
+- `python baseline import/config error`
+  - 多见于模型在 Transformers 端没有可用等价 baseline 或依赖不满足。
+  - 此时 `perf` 仍可输出 Rust 指标，strict 会被结构化跳过。
 
+- `rust cli 下载/加载失败`
+  - 确认 runtime root 可写；
+  - 确认网络可访问模型源（若你主动设置了 offline 变量则需本地已有缓存）。
+
+- `mps/f16 对不齐`
+  - benchsuite 仅比较同设备同精度；无可运行 pair 会直接报错，避免错误比较。

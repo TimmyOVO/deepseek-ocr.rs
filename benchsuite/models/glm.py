@@ -3,14 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from benchsuite.models.base import BaseAdapter
+from benchsuite.models.base import AdapterCapabilities, BaseAdapter
 
 
 class GlmAdapter(BaseAdapter):
     model_id = "glm-ocr"
     suite_name = "glm"
-    default_model_dir = Path(".cli-cache/models/glm-ocr")
+    hf_repo_id = "zai-org/GLM-OCR"
+    default_model_dir = None
     default_matrix_dir = Path("baselines/glm/matrix_v20")
+    capabilities = AdapterCapabilities(
+        python_baseline=True,
+        strict_compare=True,
+        rust_infer=True,
+    )
+
     default_prompts = {
         "text": "Text Recognition:",
         "formula": "Formula Recognition:",
@@ -25,22 +32,12 @@ class GlmAdapter(BaseAdapter):
     default_max_new_tokens = (8, 64)
 
     def default_case_matrix(self, *, root: Path | None = None) -> list[dict[str, Any]]:
-        root = root or Path(".")
-        rows: list[dict[str, Any]] = []
-        for prompt_key, prompt in self.default_prompts.items():
-            for image_key, image_rel in self.default_images.items():
-                image_path = Path(image_rel)
-                abs_image = image_path if image_path.is_absolute() else root / image_path
-                for max_new in self.default_max_new_tokens:
-                    rows.append(
-                        {
-                            "case": f"{prompt_key}__{image_key}__n{max_new}",
-                            "image": str(abs_image),
-                            "prompt": prompt,
-                            "max_new_tokens": int(max_new),
-                        }
-                    )
-        return rows
+        return self.build_static_case_matrix(
+            root=root,
+            prompts=self.default_prompts,
+            images=self.default_images,
+            max_new_tokens=self.default_max_new_tokens,
+        )
 
     @staticmethod
     def infer_max_new_from_case(case_name: str, fallback: int = 64) -> int:
@@ -58,9 +55,34 @@ class GlmAdapter(BaseAdapter):
     def python_load_processor(self, model_dir: Path) -> Any:
         from transformers import AutoProcessor
 
-        try:
-            from transformers.models.glm46v.processing_glm46v import Glm46VProcessor
+        _ = model_dir
+        return AutoProcessor.from_pretrained(self.hf_repo_id, use_fast=False)
 
-            return Glm46VProcessor.from_pretrained(model_dir, local_files_only=True, use_fast=False)
-        except Exception:
-            return AutoProcessor.from_pretrained(model_dir, local_files_only=True, use_fast=False)
+    def python_prepare_inputs(self, processor: Any, *, image: Path, prompt: str, device: Any) -> tuple[str, dict[str, Any]]:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "url": str(image),
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    },
+                ],
+            }
+        ]
+
+        inputs = processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        inputs = inputs.to(device)
+        inputs.pop("token_type_ids", None)
+        rendered = self.normalize_prompt(prompt)
+        return rendered, dict(inputs)

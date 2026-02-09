@@ -1,21 +1,43 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 import random
 import subprocess
 import time
 from typing import Any
 
-from benchsuite.common import earliest_divergence, offline_env, read_json, write_json
+from benchsuite.common import earliest_divergence, offline_env, read_json, runtime_paths, write_json
 from benchsuite.schemas import BaselineTokens, RustDecodeOutput, StageTotals, TokenDiff
+
+
+@dataclass(frozen=True)
+class AdapterCapabilities:
+    python_baseline: bool = True
+    strict_compare: bool = True
+    rust_infer: bool = True
+    python_skip_reason: str | None = None
+    strict_skip_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "python_baseline": self.python_baseline,
+            "strict_compare": self.strict_compare,
+            "rust_infer": self.rust_infer,
+            "python_skip_reason": self.python_skip_reason,
+            "strict_skip_reason": self.strict_skip_reason,
+        }
 
 
 class BaseAdapter(ABC):
     model_id: str
     suite_name: str
-    default_model_dir: Path
+    default_model_dir: Path | None = None
     default_matrix_dir: Path
+    capabilities: AdapterCapabilities = AdapterCapabilities()
+    requires_snapshot: bool = False
+    required_rust_files: tuple[str, ...] = ("config.json", "tokenizer.json", "model.safetensors")
 
     supported_devices: tuple[str, ...] = ("cpu", "mps")
     supported_precisions: tuple[str, ...] = ("f32", "f16")
@@ -32,6 +54,84 @@ class BaseAdapter(ABC):
     bench_stage_prefill: tuple[str, ...] = ("prompt.render", "vision.prepare_inputs", "decode.prefill")
     bench_stage_decode: str = "decode.iterative"
     bench_stage_total: str = "decode.generate"
+
+    def describe_capabilities(self) -> dict[str, Any]:
+        payload = self.capabilities.to_dict()
+        payload["strict_compare"] = self.strict_compare_enabled()
+        return payload
+
+    def python_baseline_enabled(self) -> bool:
+        return bool(self.capabilities.python_baseline)
+
+    def strict_compare_enabled(self) -> bool:
+        return bool(self.capabilities.strict_compare and self.python_baseline_enabled())
+
+    def python_skip_reason(self) -> str | None:
+        return self.capabilities.python_skip_reason
+
+    def strict_skip_reason(self) -> str | None:
+        if not self.python_baseline_enabled():
+            return self.python_skip_reason() or "python baseline is disabled"
+        if not self.capabilities.strict_compare:
+            return self.capabilities.strict_skip_reason or "strict compare is disabled"
+        return None
+
+    def python_support_status(self, *, model_dir: Path) -> tuple[bool, str | None]:
+        if not self.python_baseline_enabled():
+            return False, self.python_skip_reason() or "python baseline is disabled"
+        return True, None
+
+    def resolve_rust_model_dir(self, *, root: Path, runtime_root: Path | None = None) -> Path:
+        _ = root
+        return runtime_paths(runtime_root=runtime_root, create_dirs=True).cli_models_dir / self.model_id
+
+    def rust_support_status(self, *, root: Path) -> tuple[bool, str | None]:
+        if not self.capabilities.rust_infer:
+            return False, "rust infer is disabled"
+        return True, None
+
+    def resolve_model_dir(
+        self,
+        *,
+        root: Path,
+        override: Path | None = None,
+        runtime_root: Path | None = None,
+    ) -> Path:
+        if override is not None:
+            raw = Path(override)
+            return raw if raw.is_absolute() else root / raw
+
+        if self.default_model_dir is not None:
+            raw = Path(self.default_model_dir)
+            return raw if raw.is_absolute() else root / raw
+
+        raw = runtime_paths(runtime_root=runtime_root, create_dirs=True).cli_models_dir / self.model_id
+        return raw if raw.is_absolute() else root / raw
+
+    def build_static_case_matrix(
+        self,
+        *,
+        root: Path | None,
+        prompts: dict[str, str],
+        images: dict[str, str],
+        max_new_tokens: tuple[int, ...],
+    ) -> list[dict[str, Any]]:
+        base = root or Path(".")
+        rows: list[dict[str, Any]] = []
+        for prompt_key, prompt in prompts.items():
+            for image_key, image_rel in images.items():
+                image_path = Path(image_rel)
+                abs_image = image_path if image_path.is_absolute() else base / image_path
+                for max_new in max_new_tokens:
+                    rows.append(
+                        {
+                            "case": f"{prompt_key}__{image_key}__n{int(max_new)}",
+                            "image": str(abs_image),
+                            "prompt": prompt,
+                            "max_new_tokens": int(max_new),
+                        }
+                    )
+        return rows
 
     def build_device_precision_matrix(
         self,
@@ -114,9 +214,10 @@ class BaseAdapter(ABC):
         rs_dtype: str,
         output: Path,
         repo_root: Path,
+        runtime_root: Path | None = None,
         rendered_prompt: str | None = None,
     ) -> dict[str, Any]:
-        env = offline_env(repo_root)
+        env = offline_env(repo_root, runtime_root=runtime_root)
         output.parent.mkdir(parents=True, exist_ok=True)
         _ = rendered_prompt
 
@@ -134,10 +235,13 @@ class BaseAdapter(ABC):
             str(max_new_tokens),
             "--output-json",
             str(output),
-            "--quiet",
             "--prompt",
             self.normalize_prompt(prompt),
         ]
+        print(
+            f"[rust-infer] model={self.model_id} device={rs_device} dtype={rs_dtype} max_new={max_new_tokens}",
+            flush=True,
+        )
         subprocess.run(cmd, check=True, env=env)
         return read_json(output)
 
@@ -152,9 +256,10 @@ class BaseAdapter(ABC):
         rs_dtype: str,
         output: Path,
         repo_root: Path,
+        runtime_root: Path | None = None,
         rendered_prompt: str | None = None,
     ) -> dict[str, Any]:
-        env = offline_env(repo_root)
+        env = offline_env(repo_root, runtime_root=runtime_root)
         raw_dir = output.parent
         raw_dir.mkdir(parents=True, exist_ok=True)
         bench_raw = raw_dir / "bench_raw.json"
@@ -178,10 +283,13 @@ class BaseAdapter(ABC):
             str(bench_raw),
             "--output-json",
             str(rust_output),
-            "--quiet",
             "--prompt",
             self.normalize_prompt(prompt),
         ]
+        print(
+            f"[rust-bench] model={self.model_id} device={rs_device} dtype={rs_dtype} max_new={max_new_tokens}",
+            flush=True,
+        )
         subprocess.run(cmd, check=True, env=env)
 
         bench_payload = read_json(bench_raw)
@@ -247,19 +355,38 @@ class BaseAdapter(ABC):
     def python_load_processor(self, model_dir: Path) -> Any:
         from transformers import AutoProcessor
 
-        return AutoProcessor.from_pretrained(model_dir, local_files_only=True, use_fast=False)
+        return AutoProcessor.from_pretrained(model_dir, use_fast=False)
 
     def python_load_model(self, model_dir: Path, *, dtype: Any, cfg_raw: dict[str, Any]) -> Any:
         from transformers import AutoModelForImageTextToText
 
         kwargs: dict[str, Any] = {
-            "local_files_only": True,
             "torch_dtype": dtype,
         }
         model_config = self.python_build_model_config(cfg_raw)
         if model_config is not None:
             kwargs["config"] = model_config
         return AutoModelForImageTextToText.from_pretrained(model_dir, **kwargs)
+
+    def python_baseline_status(self, *, model_dir: Path) -> tuple[bool, str | None]:
+        try:
+            ok, reason = self.python_support_status(model_dir=model_dir)
+            if not ok:
+                return ok, reason
+
+            import transformers  # noqa: F401
+
+            return True, None
+        except Exception as exc:
+            return False, str(exc)
+
+    def strict_status(self, *, model_dir: Path) -> tuple[bool, str | None]:
+        py_ok, py_reason = self.python_baseline_status(model_dir=model_dir)
+        if not py_ok:
+            return False, py_reason or self.strict_skip_reason() or "python baseline unavailable"
+        if not self.strict_compare_enabled():
+            return False, self.strict_skip_reason() or "strict compare is disabled"
+        return True, None
 
     def python_build_messages(self, prompt: str) -> list[dict[str, Any]]:
         return [
@@ -277,6 +404,7 @@ class BaseAdapter(ABC):
 
         messages = self.python_build_messages(prompt)
         rendered = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
         pil_image = Image.open(image).convert("RGB")
         inputs = processor(images=[pil_image], text=[rendered], return_tensors="pt")
         inputs.pop("token_type_ids", None)
@@ -303,14 +431,26 @@ class BaseAdapter(ABC):
         py_dtype: str,
         output: Path,
         repo_root: Path,
+        runtime_root: Path | None = None,
     ) -> dict[str, Any]:
+        if not self.python_baseline_enabled():
+            reason = self.python_skip_reason() or f"python baseline is disabled for model {self.model_id}"
+            raise RuntimeError(reason)
+
         import numpy as np
         import torch
         import os
 
-        env = offline_env(repo_root)
-        for key in ["HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HOME", "TRANSFORMERS_CACHE"]:
-            os.environ[key] = env[key]
+        env = offline_env(repo_root, runtime_root=runtime_root)
+        for key in [
+            "HF_HOME",
+            "TRANSFORMERS_CACHE",
+            "HUGGINGFACE_HUB_CACHE",
+            "DEEPSEEK_OCR_CONFIG_DIR",
+            "DEEPSEEK_OCR_CACHE_DIR",
+        ]:
+            if key in env:
+                os.environ[key] = env[key]
 
         random.seed(0)
         np.random.seed(0)

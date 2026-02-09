@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+from benchsuite.models.deepseek import DeepseekOcr2Adapter, DeepseekOcrAdapter
+from benchsuite.models.dots import DotsOcrAdapter
 from benchsuite.models.glm import GlmAdapter
+from benchsuite.models.paddle import PaddleOcrVlAdapter
 
 
 _REGISTRY = {
+    "deepseek-ocr": DeepseekOcrAdapter(),
+    "deepseek-ocr-2": DeepseekOcr2Adapter(),
+    "paddleocr-vl": PaddleOcrVlAdapter(),
+    "dots-ocr": DotsOcrAdapter(),
     "glm-ocr": GlmAdapter(),
+}
+
+_ALIASES = {
+    "deepseek-ocr2": "deepseek-ocr-2",
 }
 
 
@@ -26,7 +37,8 @@ def list_default_models() -> list[str]:
 
 def get_adapter(name: str):
     key = name.strip().lower()
+    key = _ALIASES.get(key, key)
     if key not in _REGISTRY:
-        supported = ", ".join(sorted(_REGISTRY.keys()))
+        supported = ", ".join(sorted(list(_REGISTRY.keys()) + list(_ALIASES.keys())))
         raise SystemExit(f"unsupported model adapter: {name}. supported: {supported}")
     return _REGISTRY[key]
