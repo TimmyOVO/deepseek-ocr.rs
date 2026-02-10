@@ -511,8 +511,8 @@ class BaseAdapter(ABC):
             raise RuntimeError(python_reason or f"python interpreter unavailable for {self.model_id}")
 
         try:
-            current_exec = Path(sys.executable).resolve()
-            target_exec = Path(python_exec).expanduser().resolve()
+            current_exec = Path(sys.executable).expanduser().absolute()
+            target_exec = Path(python_exec).expanduser().absolute()
         except Exception:
             current_exec = Path(sys.executable)
             target_exec = Path(python_exec)

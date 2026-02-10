@@ -138,6 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-models", nargs="*", default=[])
     p.add_argument("--include-devices", nargs="*", default=[])
     p.add_argument("--include-precision", nargs="*", default=[])
+    p.add_argument(
+        "--include-runtime-features",
+        nargs="*",
+        default=[],
+        help="runtime feature matrix, e.g. auto none metal accelerate cuda",
+    )
     p.add_argument("--cli", default=Path("target/release/deepseek-ocr-cli"), type=Path)
     p.add_argument("--model-dir", type=Path)
     p.add_argument("--case-name")
@@ -158,6 +164,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-models", nargs="*", default=[])
     p.add_argument("--include-devices", nargs="*", default=[])
     p.add_argument("--include-precision", nargs="*", default=[])
+    p.add_argument(
+        "--include-runtime-features",
+        nargs="*",
+        default=[],
+        help="runtime feature matrix, e.g. auto none metal accelerate cuda",
+    )
     p.add_argument("--cli", default=Path("target/release/deepseek-ocr-cli"), type=Path)
     p.add_argument("--model-dir", type=Path)
     p.add_argument("--source-matrix", type=Path)
