@@ -226,7 +226,7 @@ class BaseAdapter(ABC):
     ) -> dict[str, Any]:
         env = offline_env(repo_root, runtime_root=runtime_root)
         output.parent.mkdir(parents=True, exist_ok=True)
-        _ = rendered_prompt
+        prompt_for_rust = rendered_prompt if isinstance(rendered_prompt, str) else self.normalize_prompt(prompt)
 
         cmd = [
             str(cli),
@@ -243,10 +243,11 @@ class BaseAdapter(ABC):
             "--output-json",
             str(output),
             "--prompt",
-            self.normalize_prompt(prompt),
+            prompt_for_rust,
         ]
+        prompt_source = "python-ref" if isinstance(rendered_prompt, str) else "adapter-normalized"
         print(
-            f"[rust-infer] model={self.model_id} device={rs_device} dtype={rs_dtype} max_new={max_new_tokens}",
+            f"[rust-infer] model={self.model_id} device={rs_device} dtype={rs_dtype} max_new={max_new_tokens} prompt_src={prompt_source}",
             flush=True,
         )
         subprocess.run(cmd, check=True, env=env)
@@ -271,7 +272,7 @@ class BaseAdapter(ABC):
         raw_dir.mkdir(parents=True, exist_ok=True)
         bench_raw = raw_dir / "bench_raw.json"
         rust_output = raw_dir / "rust_output.json"
-        _ = rendered_prompt
+        prompt_for_rust = rendered_prompt if isinstance(rendered_prompt, str) else self.normalize_prompt(prompt)
 
         cmd = [
             str(cli),
@@ -291,10 +292,11 @@ class BaseAdapter(ABC):
             "--output-json",
             str(rust_output),
             "--prompt",
-            self.normalize_prompt(prompt),
+            prompt_for_rust,
         ]
+        prompt_source = "python-ref" if isinstance(rendered_prompt, str) else "adapter-normalized"
         print(
-            f"[rust-bench] model={self.model_id} device={rs_device} dtype={rs_dtype} max_new={max_new_tokens}",
+            f"[rust-bench] model={self.model_id} device={rs_device} dtype={rs_dtype} max_new={max_new_tokens} prompt_src={prompt_source}",
             flush=True,
         )
         subprocess.run(cmd, check=True, env=env)

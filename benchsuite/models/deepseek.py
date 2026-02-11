@@ -80,9 +80,10 @@ class _DeepseekFamilyAdapter(BaseAdapter):
         return True, None
 
     def normalize_prompt(self, prompt: str) -> str:
-        if "<image>" in prompt:
-            return prompt
-        canonical = prompt if prompt.startswith("\n") else f"\n{prompt}"
+        canonical_prompt = prompt.rstrip()
+        if "<image>" in canonical_prompt:
+            return canonical_prompt
+        canonical = canonical_prompt if canonical_prompt.startswith("\n") else f"\n{canonical_prompt}"
         return f"<image>{canonical}"
 
     def python_load_processor(self, model_dir: Path) -> Any:
