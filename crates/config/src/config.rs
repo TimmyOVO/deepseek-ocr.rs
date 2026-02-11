@@ -586,18 +586,10 @@ impl InferenceOverride {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ModelDefaults {
     pub inference: InferenceOverride,
-}
-
-impl Default for ModelDefaults {
-    fn default() -> Self {
-        Self {
-            inference: InferenceOverride::default(),
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone)]

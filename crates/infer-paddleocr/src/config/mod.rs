@@ -219,21 +219,3 @@ fn apply_generation_overrides(cfg: &mut PaddleOcrVlConfig, overrides: &Generatio
         cfg.pad_token_id = overrides.pad_token_id;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn load_config_populates_eos_from_generation_config() -> Result<()> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("crate directory has parent")
-            .parent()
-            .expect("workspace root");
-        let config_path = root.join("PaddleOCR-VL/config.json");
-        let loaded = load_config(Some(&config_path))?;
-        assert_eq!(loaded.value.eos_token_id, Some(2));
-        Ok(())
-    }
-}

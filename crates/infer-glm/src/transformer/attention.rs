@@ -16,16 +16,30 @@ pub struct TextAttentionContext {
     pub scaling: f64,
 }
 
+pub struct AttentionForwardArgs<'a> {
+    pub hidden_states: &'a Tensor,
+    pub weights: &'a GlmTextAttentionWeights,
+    pub cos: &'a Tensor,
+    pub sin: &'a Tensor,
+    pub attn_bias: Option<&'a Tensor>,
+    pub past_key_value: Option<&'a KvCacheEntry>,
+    pub use_cache: bool,
+}
+
 pub fn attention_forward(
     ctx: &TextAttentionContext,
-    hidden_states: &Tensor,
-    weights: &GlmTextAttentionWeights,
-    cos: &Tensor,
-    sin: &Tensor,
-    attn_bias: Option<&Tensor>,
-    past_key_value: Option<&KvCacheEntry>,
-    use_cache: bool,
+    args: AttentionForwardArgs<'_>,
 ) -> Result<(Tensor, Option<KvCacheChunk>)> {
+    let AttentionForwardArgs {
+        hidden_states,
+        weights,
+        cos,
+        sin,
+        attn_bias,
+        past_key_value,
+        use_cache,
+    } = args;
+
     let (batch, seq_len, _hidden_size) = hidden_states.shape().dims3()?;
 
     let qkv_timer = Timer::new("text.attn.qkv_proj");

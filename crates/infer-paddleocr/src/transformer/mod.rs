@@ -1,7 +1,7 @@
 mod attention;
 mod block;
 mod cache;
-mod model;
+pub mod model;
 mod ops;
 mod rope;
 mod weights;

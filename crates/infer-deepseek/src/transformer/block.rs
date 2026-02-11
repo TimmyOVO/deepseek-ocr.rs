@@ -841,11 +841,11 @@ fn flash_attention_forward(
             _ => return Ok(None),
         }
         let head_dim = hidden_size / cfg.num_attention_heads;
-        if head_dim % 8 != 0 || head_dim > 256 {
+        if !head_dim.is_multiple_of(8) || head_dim > 256 {
             return Ok(None);
         }
         let num_kv_heads = cfg.num_key_value_heads.unwrap_or(cfg.num_attention_heads);
-        if cfg.num_attention_heads % num_kv_heads != 0 {
+        if !cfg.num_attention_heads.is_multiple_of(num_kv_heads) {
             return Ok(None);
         }
 

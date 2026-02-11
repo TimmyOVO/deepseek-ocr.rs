@@ -82,7 +82,7 @@ impl AppState {
         &self.available_models
     }
 
-    fn per_model_inference_settings(
+    pub fn per_model_inference_settings(
         &self,
         model_id: &str,
     ) -> Result<(VisionSettings, DecodeParameters), ApiError> {
@@ -267,56 +267,5 @@ impl ModelManager {
             model: Arc::new(Mutex::new(model)),
             tokenizer,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn build_state(
-        base_inference: InferenceSettings,
-        inference_overrides: InferenceOverride,
-    ) -> AppState {
-        let fs = LocalFileSystem::new("deepseek-ocr-server-tests");
-        let config = Arc::new(AppConfig::default());
-        AppState::bootstrap(
-            fs,
-            config,
-            Device::Cpu,
-            DType::F32,
-            base_inference,
-            inference_overrides,
-        )
-        .expect("bootstrap state")
-    }
-
-    #[test]
-    fn ocr2_uses_its_model_default_image_size() {
-        let mut base = InferenceSettings::default();
-        base.image_size = 640;
-        let state = build_state(base, InferenceOverride::default());
-
-        let (vision, _) = state
-            .per_model_inference_settings("deepseek-ocr-2")
-            .expect("resolve ocr2 settings");
-        assert_eq!(vision.base_size, 1024);
-        assert_eq!(vision.image_size, 768);
-        assert!(vision.crop_mode);
-    }
-
-    #[test]
-    fn server_cli_overrides_model_defaults() {
-        let base = InferenceSettings::default();
-        let mut overrides = InferenceOverride::default();
-        overrides.image_size = Some(896);
-        overrides.base_size = Some(960);
-        let state = build_state(base, overrides);
-
-        let (vision, _) = state
-            .per_model_inference_settings("deepseek-ocr-2")
-            .expect("resolve overridden settings");
-        assert_eq!(vision.base_size, 960);
-        assert_eq!(vision.image_size, 896);
     }
 }

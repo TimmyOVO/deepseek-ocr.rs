@@ -105,8 +105,7 @@ impl SiglipVisionModel {
         Ok((normalized, squeezed))
     }
 
-    #[cfg(test)]
-    pub(crate) fn debug_layer_outputs(
+    pub fn debug_layer_outputs(
         &self,
         input: &Tensor,
         patches: &SiglipImagePatches,
@@ -850,8 +849,7 @@ fn gather_rows(table: &Tensor, ids: &[i64], device: &Device) -> Result<Tensor> {
     Ok(table.index_select(&idx, 0)?)
 }
 
-#[cfg(test)]
-pub(crate) struct LayerDebug {
+pub struct LayerDebug {
     pub norm1: Tensor,
     pub attn_out: Tensor,
     pub after_attn: Tensor,

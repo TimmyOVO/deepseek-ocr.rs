@@ -185,14 +185,12 @@ fn preprocess_single_image(
         resize_rgb_image(&rgb, resized_w as u32, resized_h as u32)?
     };
 
-    let resized_h = resized_h;
-    let resized_w = resized_w;
     let mut chw = vec![0f32; 3 * resized_h * resized_w];
     for y in 0..resized_h {
         for x in 0..resized_w {
             let pixel = resized.get_pixel(x as u32, y as u32).0;
-            for c in 0..3 {
-                let mut value = pixel[c] as f32;
+            for (c, &channel) in pixel.iter().enumerate().take(3) {
+                let mut value = channel as f32;
                 if preprocessor.do_rescale {
                     // Match HF `rescale` exactly: multiply in float64 then downcast.
                     value = ((value as f64) * preprocessor.rescale_factor) as f32;
@@ -210,7 +208,7 @@ fn preprocess_single_image(
     let merge = preprocessor.spatial_merge_size;
     let grid_h = resized_h / patch;
     let grid_w = resized_w / patch;
-    ensure!(grid_h % merge == 0 && grid_w % merge == 0, "grid not divisible by merge size");
+    ensure!(grid_h.is_multiple_of(merge) && grid_w.is_multiple_of(merge), "grid not divisible by merge size");
 
     let patch_vec_len = 3 * temporal * patch * patch;
     let mut flatten = Vec::with_capacity(grid_h * grid_w * patch_vec_len);
@@ -275,8 +273,8 @@ fn smart_resize(
         w_bar = factor.max(((w as f64 / beta).floor() as usize / factor) * factor);
     } else if t_bar * h_bar * w_bar < min_pixels {
         let beta = (min_pixels as f64 / (num_frames * h * w) as f64).sqrt();
-        h_bar = (((h as f64 * beta).ceil() as usize + factor - 1) / factor) * factor;
-        w_bar = (((w as f64 * beta).ceil() as usize + factor - 1) / factor) * factor;
+        h_bar = ((h as f64 * beta).ceil() as usize).div_ceil(factor) * factor;
+        w_bar = ((w as f64 * beta).ceil() as usize).div_ceil(factor) * factor;
     }
 
     Ok((h_bar.max(factor), w_bar.max(factor)))
@@ -339,10 +337,10 @@ fn precompute_pillow_coeffs(in_size: usize, out_size: usize) -> PillowResampleCo
         let count = (xmax - xmin).max(0) as usize;
         let mut norm = 0.0f64;
         let mut row_weights = vec![0.0f64; count];
-        for x in 0..count {
-            let w = pillow_bicubic_filter((x as f64 + xmin as f64 - center + 0.5) * ss);
-            row_weights[x] = w;
-            norm += w;
+        for (x, row_weight) in row_weights.iter_mut().enumerate().take(count) {
+            let weight = pillow_bicubic_filter((x as f64 + xmin as f64 - center + 0.5) * ss);
+            *row_weight = weight;
+            norm += weight;
         }
 
         let row = &mut coeffs[xx * ksize..(xx + 1) * ksize];
@@ -399,8 +397,8 @@ fn resize_rgb_image(image: &RgbImage, width: u32, height: u32) -> Result<RgbImag
             let mut s1 = rounding;
             let mut s2 = rounding;
 
-            for tap in 0..count {
-                let coeff = i64::from(k[tap]);
+            for (tap, &coeff_i32) in k.iter().enumerate().take(count) {
+                let coeff = i64::from(coeff_i32);
                 let src_idx = (y * src_w + xmin + tap) * 3;
                 s0 += i64::from(src[src_idx]) * coeff;
                 s1 += i64::from(src[src_idx + 1]) * coeff;
@@ -424,8 +422,8 @@ fn resize_rgb_image(image: &RgbImage, width: u32, height: u32) -> Result<RgbImag
             let mut s1 = rounding;
             let mut s2 = rounding;
 
-            for tap in 0..count {
-                let coeff = i64::from(k[tap]);
+            for (tap, &coeff_i32) in k.iter().enumerate().take(count) {
+                let coeff = i64::from(coeff_i32);
                 let src_idx = ((ymin + tap) * dst_w + x) * 3;
                 s0 += i64::from(temp[src_idx]) * coeff;
                 s1 += i64::from(temp[src_idx + 1]) * coeff;

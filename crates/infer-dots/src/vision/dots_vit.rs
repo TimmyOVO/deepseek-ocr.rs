@@ -100,16 +100,16 @@ struct FrameLayout {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-struct SequenceLayout {
+pub struct SequenceLayout {
     frames: Vec<FrameLayout>,
-    total_tokens: usize,
-    merge_groups: usize,
+    pub total_tokens: usize,
+    pub merge_groups: usize,
     group_size: usize,
     positions: Vec<[u32; 2]>,
 }
 
 impl SequenceLayout {
-    fn from_grid(grid_thw: &[[u32; 3]], merge: usize) -> Result<Self> {
+    pub fn from_grid(grid_thw: &[[u32; 3]], merge: usize) -> Result<Self> {
         let mut total = 0usize;
         let mut groups = 0usize;
         let mut frames = Vec::new();
@@ -170,7 +170,7 @@ impl SequenceLayout {
         &self.frames
     }
 
-    fn positions(&self) -> &[[u32; 2]] {
+    pub fn positions(&self) -> &[[u32; 2]] {
         &self.positions
     }
 
@@ -593,30 +593,6 @@ fn maybe_cast(tensor: &Tensor, dtype: DType) -> Result<Tensor> {
         Ok(tensor.clone())
     } else {
         Ok(tensor.to_dtype(dtype)?)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn layout_positions_follow_merge_groups() -> Result<()> {
-        let layout = SequenceLayout::from_grid(&[[1, 4, 4]], 2)?;
-        assert_eq!(layout.total_tokens, 16);
-        assert_eq!(layout.merge_groups, 4);
-        let expected = [
-            [0u32, 0u32],
-            [0, 1],
-            [1, 0],
-            [1, 1],
-            [0, 2],
-            [0, 3],
-            [1, 2],
-            [1, 3],
-        ];
-        assert_eq!(&layout.positions()[..8], &expected);
-        Ok(())
     }
 }
 

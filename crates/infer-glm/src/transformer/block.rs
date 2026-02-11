@@ -4,7 +4,7 @@ use candle_core::Tensor;
 use crate::config::GlmOcrTextConfig;
 
 use super::{
-    attention::{TextAttentionContext, attention_forward},
+    attention::{AttentionForwardArgs, TextAttentionContext, attention_forward},
     weights::{GlmTextLayerWeights, GlmTextMlpWeights},
 };
 
@@ -36,13 +36,15 @@ pub fn decoder_layer_forward(
     };
     let (attn_out, present) = attention_forward(
         &attn_ctx,
-        &normed,
-        &layer.attention,
-        cos,
-        sin,
-        attn_bias,
-        past,
-        use_cache,
+        AttentionForwardArgs {
+            hidden_states: &normed,
+            weights: &layer.attention,
+            cos,
+            sin,
+            attn_bias,
+            past_key_value: past,
+            use_cache,
+        },
     )?;
     let attn_out = rms_norm_precise(&attn_out, &layer.post_self_attn_layernorm, cfg.rms_norm_eps)
         .context("post-self-attn rms norm failed")?;

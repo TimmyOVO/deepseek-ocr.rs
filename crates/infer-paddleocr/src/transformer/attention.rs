@@ -28,10 +28,12 @@ pub fn supports_flash_attention(cfg: &PaddleOcrVlConfig, device: &Device, dtype:
             return false;
         }
         matches!(dtype, DType::F16 | DType::BF16)
-            && cfg.head_dim % 8 == 0
+            && cfg.head_dim.is_multiple_of(8)
             && cfg.head_dim <= 256
             && cfg.hidden_size == cfg.num_attention_heads * cfg.head_dim
-            && cfg.num_attention_heads % cfg.resolved_num_key_value_heads() == 0
+            && cfg
+                .num_attention_heads
+                .is_multiple_of(cfg.resolved_num_key_value_heads())
     }
     #[cfg(not(feature = "flash-attn"))]
     {

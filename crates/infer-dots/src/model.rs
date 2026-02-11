@@ -470,7 +470,7 @@ fn parse_index_bytes(index_path: &Path, bytes: Vec<u8>) -> Result<Vec<PathBuf>> 
     Ok(shards.into_iter().collect())
 }
 
-fn vision_token_count(grid: [u32; 3], merge: usize) -> Result<usize> {
+pub fn vision_token_count(grid: [u32; 3], merge: usize) -> Result<usize> {
     ensure!(merge > 0, "spatial merge size must be positive");
     let t = grid[0] as usize;
     let h = grid[1] as usize;
@@ -485,7 +485,7 @@ fn vision_token_count(grid: [u32; 3], merge: usize) -> Result<usize> {
     Ok(t * (h / merge) * (w / merge))
 }
 
-fn build_prompt_inputs(
+pub fn build_prompt_inputs(
     tokenizer: &Tokenizer,
     prompt: &str,
     per_image_tokens: &[usize],
@@ -522,7 +522,7 @@ fn build_prompt_inputs(
     Ok((tokens, mask))
 }
 
-fn flatten_vision_embeddings(mut per_image: Vec<Tensor>) -> Result<Option<Tensor>> {
+pub fn flatten_vision_embeddings(mut per_image: Vec<Tensor>) -> Result<Option<Tensor>> {
     if per_image.is_empty() {
         return Ok(None);
     }
@@ -533,7 +533,7 @@ fn flatten_vision_embeddings(mut per_image: Vec<Tensor>) -> Result<Option<Tensor
     Ok(Some(Tensor::cat(&refs, 0)?))
 }
 
-fn inject_image_embeddings(
+pub fn inject_image_embeddings(
     embeddings: &Tensor,
     mask: &Tensor,
     per_batch: &[Tensor],
@@ -601,51 +601,12 @@ fn inject_image_embeddings(
     Ok(Tensor::stack(&refs, 0)?)
 }
 
-fn resolve_eos_token_id(tokenizer: &Tokenizer) -> Option<i64> {
+pub fn resolve_eos_token_id(tokenizer: &Tokenizer) -> Option<i64> {
     tokenizer
         .token_to_id(FALLBACK_EOS_TOKEN)
         .map(|id| id as i64)
 }
 
-fn single_token_tensor(token: i64, device: &Device) -> Result<Tensor> {
+pub fn single_token_tensor(token: i64, device: &Device) -> Result<Tensor> {
     Ok(Tensor::from_vec(vec![token], (1, 1), device)?.to_dtype(DType::I64)?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tokenizer_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../dots.ocr/tokenizer.json")
-    }
-
-    #[test]
-    fn prompt_builder_inserts_image_tokens() -> Result<()> {
-        let tokenizer =
-            Tokenizer::from_file(tokenizer_path()).expect("dots.ocr tokenizer should load");
-        let cfg = Arc::new(load_dots_config(None)?);
-        let tokens = DotsImageTokens::resolve(&tokenizer, &cfg)?;
-        let counts = vec![4usize];
-        let (ids, mask) =
-            build_prompt_inputs(&tokenizer, "User: <image> Answer:", &counts, &tokens)?;
-        assert_eq!(mask.len(), ids.len());
-        let pad_id = tokens.pad as i64;
-        let pad_positions: Vec<_> = ids
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, &id)| (id == pad_id).then_some(idx))
-            .collect();
-        assert_eq!(pad_positions.len(), 4);
-        for idx in pad_positions {
-            assert_eq!(mask[idx], 1);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn vision_token_count_respects_merge() -> Result<()> {
-        let tokens = vision_token_count([1, 4, 4], 2)?;
-        assert_eq!(tokens, 4);
-        Ok(())
-    }
 }

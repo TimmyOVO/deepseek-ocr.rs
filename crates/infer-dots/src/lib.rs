@@ -3,7 +3,7 @@ use deepseek_ocr_core::{ModelKind, ModelLoadArgs, OcrEngine};
 
 pub mod config;
 pub mod model;
-mod quant;
+pub mod quant;
 mod snapshot;
 pub mod tokenizer;
 pub mod transformer;

@@ -1,25 +1,8 @@
-#![allow(clippy::too_many_arguments)]
-
-#[macro_use]
-extern crate rocket;
-
-mod app;
-mod args;
-mod cors;
-mod error;
-mod generation;
-mod logging;
-mod models;
-mod resources;
-mod routes;
-mod state;
-mod stream;
-
 use anyhow::Result;
 use clap::Parser;
 use tracing::error;
 
-use crate::args::Args;
+use deepseek_ocr_server::{app, args::Args, logging};
 
 #[rocket::main]
 async fn main() -> Result<()> {

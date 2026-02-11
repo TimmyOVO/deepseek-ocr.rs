@@ -52,8 +52,8 @@ impl GlmTextRotaryEmbedding {
         let head_dim = half * 2;
 
         let mut freqs = Vec::with_capacity(batch * seq_len * half);
-        for b in 0..batch {
-            for s in 0..seq_len {
+        for (b, batch_ids) in ids_host[0].iter().enumerate().take(batch) {
+            for (s, _) in batch_ids.iter().enumerate().take(seq_len) {
                 let mut offset = 0usize;
                 for (chunk_idx, width) in self.mrope_sections.iter().copied().enumerate() {
                     let axis = chunk_idx % 3;

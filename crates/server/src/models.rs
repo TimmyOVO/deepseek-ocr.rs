@@ -70,17 +70,24 @@ pub struct ModelInfo {
     pub owned_by: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ResponsesRequest {
-    pub model: String,
-    #[serde(default)]
-    pub input: Vec<ApiMessage>,
-    #[serde(default)]
-    pub max_output_tokens: Option<usize>,
-    #[serde(default)]
-    pub max_tokens: Option<usize>,
-    #[serde(default)]
-    pub stream: Option<bool>,
+#[derive(Debug, Clone, Copy)]
+pub struct DecodeOverrides {
+    pub do_sample: Option<bool>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<usize>,
+    pub repetition_penalty: Option<f32>,
+    pub no_repeat_ngram_size: Option<usize>,
+    pub seed: Option<u64>,
+    pub use_cache: Option<bool>,
+}
+
+pub trait HasDecodeOverrides {
+    fn decode_overrides(&self) -> DecodeOverrides;
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct DecodeOverrideFields {
     #[serde(default)]
     pub temperature: Option<f64>,
     #[serde(default)]
@@ -99,6 +106,42 @@ pub struct ResponsesRequest {
     pub use_cache: Option<bool>,
 }
 
+impl From<&DecodeOverrideFields> for DecodeOverrides {
+    fn from(value: &DecodeOverrideFields) -> Self {
+        Self {
+            do_sample: value.do_sample,
+            temperature: value.temperature,
+            top_p: value.top_p,
+            top_k: value.top_k,
+            repetition_penalty: value.repetition_penalty,
+            no_repeat_ngram_size: value.no_repeat_ngram_size,
+            seed: value.seed,
+            use_cache: value.use_cache,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResponsesRequest {
+    pub model: String,
+    #[serde(default)]
+    pub input: Vec<ApiMessage>,
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(flatten)]
+    pub decode: DecodeOverrideFields,
+}
+
+impl HasDecodeOverrides for ResponsesRequest {
+    fn decode_overrides(&self) -> DecodeOverrides {
+        (&self.decode).into()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
@@ -108,22 +151,14 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub stream: Option<bool>,
-    #[serde(default)]
-    pub temperature: Option<f64>,
-    #[serde(default)]
-    pub top_p: Option<f64>,
-    #[serde(default)]
-    pub top_k: Option<usize>,
-    #[serde(default)]
-    pub repetition_penalty: Option<f32>,
-    #[serde(default)]
-    pub no_repeat_ngram_size: Option<usize>,
-    #[serde(default)]
-    pub do_sample: Option<bool>,
-    #[serde(default)]
-    pub seed: Option<u64>,
-    #[serde(default)]
-    pub use_cache: Option<bool>,
+    #[serde(flatten)]
+    pub decode: DecodeOverrideFields,
+}
+
+impl HasDecodeOverrides for ChatCompletionRequest {
+    fn decode_overrides(&self) -> DecodeOverrides {
+        (&self.decode).into()
+    }
 }
 
 #[derive(Debug, Deserialize)]
