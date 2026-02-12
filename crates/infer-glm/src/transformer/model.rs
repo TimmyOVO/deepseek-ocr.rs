@@ -58,12 +58,8 @@ impl GlmTextDecoder {
             .get(cfg.hidden_size, "weight")
             .context("missing model.language_model.norm.weight")?
             .contiguous()?;
-        let lm_head = LinearWeights::load(
-            vb.pp("lm_head"),
-            cfg.vocab_size,
-            cfg.hidden_size,
-            false,
-        )?;
+        let lm_head =
+            LinearWeights::load(vb.pp("lm_head"), cfg.vocab_size, cfg.hidden_size, false)?;
         let rotary = GlmTextRotaryEmbedding::new(Arc::clone(&cfg))?;
 
         Ok(Self {
@@ -189,9 +185,7 @@ impl GlmTextDecoder {
             .matmul_2d(&flat)?
             .reshape((batch, seq, self.cfg.vocab_size))?;
 
-        Ok(DecoderOutput {
-            logits,
-        })
+        Ok(DecoderOutput { logits })
     }
 }
 
@@ -225,13 +219,19 @@ fn normalize_position_ids(
     match ids.rank() {
         3 => {
             let (axes, b, s) = ids.shape().dims3()?;
-            ensure!(axes == 3 && b == batch && s == seq_len, "position_ids shape mismatch");
+            ensure!(
+                axes == 3 && b == batch && s == seq_len,
+                "position_ids shape mismatch"
+            );
             Ok(ids.to_dtype(DType::I64)?)
         }
         2 => {
             let (b, s) = ids.shape().dims2()?;
             ensure!(b == batch && s == seq_len, "position_ids shape mismatch");
-            let expanded = ids.unsqueeze(0)?.expand((3, batch, seq_len))?.contiguous()?;
+            let expanded = ids
+                .unsqueeze(0)?
+                .expand((3, batch, seq_len))?
+                .contiguous()?;
             Ok(expanded.to_dtype(DType::I64)?)
         }
         other => anyhow::bail!("position_ids rank must be 2 or 3, got {other}"),
@@ -242,8 +242,7 @@ fn rms_norm_precise(input: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor>
     let dtype = input.dtype();
     let x = input.to_dtype(DType::F32)?;
     let hidden = x.dim(candle_core::shape::D::Minus1)?;
-    let variance =
-        (x.sqr()?.sum_keepdim(candle_core::shape::D::Minus1)? / hidden as f64)?;
+    let variance = (x.sqr()?.sum_keepdim(candle_core::shape::D::Minus1)? / hidden as f64)?;
     let inv = (variance + eps)?.sqrt()?.recip()?;
     let normed = x.broadcast_mul(&inv)?;
     let weight = if weight.dtype() == DType::F32 {

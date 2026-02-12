@@ -15,7 +15,10 @@ impl GlmTextRotaryEmbedding {
         let rope_theta = cfg.rope_parameters.rope_theta.unwrap_or(10_000.0) as f32;
         let partial = cfg.rope_parameters.partial_rotary_factor.unwrap_or(1.0);
         let rope_dim = ((cfg.head_dim as f64) * partial).round() as usize;
-        ensure!(rope_dim.is_multiple_of(2), "rope dim must be even, got {rope_dim}");
+        ensure!(
+            rope_dim.is_multiple_of(2),
+            "rope dim must be even, got {rope_dim}"
+        );
         let half = rope_dim / 2;
         let mut inv_freq = Vec::with_capacity(half);
         for i in 0..half {

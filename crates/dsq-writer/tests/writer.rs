@@ -3,7 +3,7 @@ use std::slice;
 use candle_core::quantized::k_quants::{BlockQ4K, BlockQ6K, GgmlType as CandleGgmlType};
 use deepseek_ocr_dsq::{DsqReader, DsqTensorDType};
 use deepseek_ocr_dsq_writer::{
-    DsqWriter, SnapshotMetadata, quantize_q4k, quantize_q6k, slice_as_bytes_public,
+    quantize_q4k, quantize_q6k, slice_as_bytes_public, DsqWriter, SnapshotMetadata,
 };
 use half::{bf16, f16};
 use tempfile::tempdir;
@@ -130,7 +130,9 @@ fn q6k_bytes_match_candle_from_float() {
     let shapes = [(1usize, 256usize), (2usize, 256usize)];
     for (rows, cols) in shapes {
         let total = rows * cols;
-        let weights: Vec<f32> = (0..total).map(|idx| ((idx as f32) * 0.0375) - 2.0).collect();
+        let weights: Vec<f32> = (0..total)
+            .map(|idx| ((idx as f32) * 0.0375) - 2.0)
+            .collect();
         let dsq_bytes = quantize_q6k(&weights, rows, cols).expect("quantize_q6k");
 
         let blocks_per_row = cols / Q6K_BLOCK;
@@ -141,14 +143,14 @@ fn q6k_bytes_match_candle_from_float() {
             let mut blocks = vec![<BlockQ6K as CandleGgmlType>::zeros(); blocks_per_row];
             <BlockQ6K as CandleGgmlType>::from_float(row_slice, &mut blocks);
             let bytes = unsafe {
-                slice::from_raw_parts(
-                    blocks.as_ptr() as *const u8,
-                    blocks.len() * Q6K_BLOCK_BYTES,
-                )
+                slice::from_raw_parts(blocks.as_ptr() as *const u8, blocks.len() * Q6K_BLOCK_BYTES)
             };
             reference.extend_from_slice(bytes);
         }
-        assert_eq!(dsq_bytes, reference, "Q6_K bytes mismatch for {rows}x{cols}");
+        assert_eq!(
+            dsq_bytes, reference,
+            "Q6_K bytes mismatch for {rows}x{cols}"
+        );
     }
 }
 
@@ -157,7 +159,9 @@ fn q4k_bytes_match_candle_from_float() {
     let shapes = [(1usize, 256usize), (2usize, 256usize)];
     for (rows, cols) in shapes {
         let total = rows * cols;
-        let weights: Vec<f32> = (0..total).map(|idx| ((idx as f32) * 0.051) - 1.25).collect();
+        let weights: Vec<f32> = (0..total)
+            .map(|idx| ((idx as f32) * 0.051) - 1.25)
+            .collect();
         let dsq_bytes = quantize_q4k(&weights, rows, cols).expect("quantize_q4k");
 
         let blocks_per_row = cols / Q4K_BLOCK;
@@ -168,14 +172,14 @@ fn q4k_bytes_match_candle_from_float() {
             let mut blocks = vec![<BlockQ4K as CandleGgmlType>::zeros(); blocks_per_row];
             <BlockQ4K as CandleGgmlType>::from_float(row_slice, &mut blocks);
             let bytes = unsafe {
-                slice::from_raw_parts(
-                    blocks.as_ptr() as *const u8,
-                    blocks.len() * Q4K_BLOCK_BYTES,
-                )
+                slice::from_raw_parts(blocks.as_ptr() as *const u8, blocks.len() * Q4K_BLOCK_BYTES)
             };
             reference.extend_from_slice(bytes);
         }
-        assert_eq!(dsq_bytes, reference, "Q4_K bytes mismatch for {rows}x{cols}");
+        assert_eq!(
+            dsq_bytes, reference,
+            "Q4_K bytes mismatch for {rows}x{cols}"
+        );
     }
 }
 

@@ -8,7 +8,6 @@ pub mod error;
 pub mod generation;
 pub mod logging;
 pub mod models;
-pub mod resources;
 pub mod routes;
 pub mod state;
 pub mod stream;

@@ -4,7 +4,10 @@ use candle_core::{DType, Device};
 use deepseek_ocr_config::{AppConfig, InferenceOverride, InferenceSettings, LocalFileSystem};
 use deepseek_ocr_server::state::AppState;
 
-fn build_state(base_inference: InferenceSettings, inference_overrides: InferenceOverride) -> AppState {
+fn build_state(
+    base_inference: InferenceSettings,
+    inference_overrides: InferenceOverride,
+) -> AppState {
     let fs = LocalFileSystem::new("deepseek-ocr-server-tests");
     let config = Arc::new(AppConfig::default());
     AppState::bootstrap(

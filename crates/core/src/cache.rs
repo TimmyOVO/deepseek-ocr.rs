@@ -177,7 +177,9 @@ impl KvCacheEntry {
     pub fn append(&mut self, chunk: &KvCacheChunk) -> Result<()> {
         let append_total_timer = Timer::new("cache.entry.append.total");
         let chunk = if let Some(first) = self.first_chunk() {
-            if chunk.key_t.dtype() != first.key_t.dtype() || chunk.value.dtype() != first.value.dtype() {
+            if chunk.key_t.dtype() != first.key_t.dtype()
+                || chunk.value.dtype() != first.value.dtype()
+            {
                 KvCacheChunk::new(
                     chunk.key_t.to_dtype(first.key_t.dtype())?,
                     chunk.value.to_dtype(first.value.dtype())?,

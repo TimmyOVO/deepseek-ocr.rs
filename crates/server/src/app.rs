@@ -10,9 +10,10 @@ use crate::{args::Args, routes, state::AppState};
 
 pub async fn run(args: Args) -> Result<()> {
     let fs = LocalFileSystem::new("deepseek-ocr");
-    let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.config.as_deref())?;
+    let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.model.config.as_deref())?;
     let base_inference = app_config.inference.clone();
-    app_config += &args;
+    let overrides = ConfigOverrides::from(&args);
+    app_config.apply_overrides(&overrides);
     app_config.normalise(&fs)?;
     info!(
         "Using configuration {} (active model `{}`)",
@@ -24,7 +25,7 @@ pub async fn run(args: Args) -> Result<()> {
         prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
     let dtype = maybe_dtype.unwrap_or_else(|| default_dtype_for_device(&device));
 
-    let inference_overrides = ConfigOverrides::from(&args).inference;
+    let inference_overrides = overrides.inference.clone();
 
     let state = AppState::bootstrap(
         fs.clone(),

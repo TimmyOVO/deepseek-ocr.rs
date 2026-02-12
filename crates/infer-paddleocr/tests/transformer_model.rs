@@ -53,9 +53,16 @@ fn linear(out_dim: usize, in_dim: usize, device: &Device) -> anyhow::Result<Line
     })
 }
 
-fn layer_weights(cfg: &PaddleOcrVlConfig, device: &Device) -> anyhow::Result<ErnieDecoderLayerWeights> {
+fn layer_weights(
+    cfg: &PaddleOcrVlConfig,
+    device: &Device,
+) -> anyhow::Result<ErnieDecoderLayerWeights> {
     let attn = ErnieAttentionWeights {
-        q_proj: linear(cfg.num_attention_heads * cfg.head_dim, cfg.hidden_size, device)?,
+        q_proj: linear(
+            cfg.num_attention_heads * cfg.head_dim,
+            cfg.hidden_size,
+            device,
+        )?,
         k_proj: linear(
             cfg.resolved_num_key_value_heads() * cfg.head_dim,
             cfg.hidden_size,
@@ -66,7 +73,11 @@ fn layer_weights(cfg: &PaddleOcrVlConfig, device: &Device) -> anyhow::Result<Ern
             cfg.hidden_size,
             device,
         )?,
-        o_proj: linear(cfg.hidden_size, cfg.num_attention_heads * cfg.head_dim, device)?,
+        o_proj: linear(
+            cfg.hidden_size,
+            cfg.num_attention_heads * cfg.head_dim,
+            device,
+        )?,
     };
     let mlp = ErnieMlpWeights {
         gate_proj: linear(cfg.intermediate_size, cfg.hidden_size, device)?,

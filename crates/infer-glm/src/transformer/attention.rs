@@ -210,9 +210,11 @@ pub fn attention_forward(
         None
     };
 
-    let context = attn_output
-        .permute((0, 2, 1, 3))?
-        .reshape((batch, seq_len, ctx.num_heads * ctx.head_dim))?;
+    let context = attn_output.permute((0, 2, 1, 3))?.reshape((
+        batch,
+        seq_len,
+        ctx.num_heads * ctx.head_dim,
+    ))?;
     let output = weights.o_proj.forward_3d(&context)?;
     Ok((output, present))
 }
@@ -279,7 +281,12 @@ pub fn build_attention_bias(
     Ok(bias)
 }
 
-fn apply_rotary_pos_emb(q: &Tensor, k: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<(Tensor, Tensor)> {
+fn apply_rotary_pos_emb(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+) -> Result<(Tensor, Tensor)> {
     let q_heads = q.dim(1)?;
     let k_heads = k.dim(1)?;
     let cos_q = expand_interleaved(cos, q_heads)?;
@@ -298,7 +305,10 @@ fn apply_rotary_pos_emb(q: &Tensor, k: &Tensor, cos: &Tensor, sin: &Tensor) -> R
     let (cos_k, sin_k) = if k_heads == q_heads {
         (cos_q, sin_q)
     } else {
-        (expand_interleaved(cos, k_heads)?, expand_interleaved(sin, k_heads)?)
+        (
+            expand_interleaved(cos, k_heads)?,
+            expand_interleaved(sin, k_heads)?,
+        )
     };
     let k_embed = k_rot
         .broadcast_mul(&cos_k)?
@@ -321,7 +331,9 @@ fn expand_interleaved(base: &Tensor, heads: usize) -> Result<Tensor> {
         .expand((batch, seq, half, 2))?
         .reshape((batch, seq, head_dim))?;
 
-    Ok(interleaved.unsqueeze(1)?.expand((batch, heads, seq, head_dim))?)
+    Ok(interleaved
+        .unsqueeze(1)?
+        .expand((batch, heads, seq, head_dim))?)
 }
 
 fn validate_cache_chunk_shapes(

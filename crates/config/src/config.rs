@@ -1,13 +1,12 @@
 use std::{
     collections::BTreeMap,
     fs,
-    ops::AddAssign,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, anyhow};
 use deepseek_ocr_core::{
-    ModelKind,
+    DecodeParameters, DecodeParametersPatch, ModelKind,
     runtime::{DeviceKind, Precision},
 };
 use serde::{Deserialize, Serialize};
@@ -119,13 +118,13 @@ fn glm_ocr_entry() -> ModelEntry {
     entry.defaults.inference.base_size = Some(336);
     entry.defaults.inference.image_size = Some(336);
     entry.defaults.inference.crop_mode = Some(false);
-    entry.defaults.inference.max_new_tokens = Some(8192);
-    entry.defaults.inference.do_sample = Some(false);
-    entry.defaults.inference.temperature = Some(0.0);
-    entry.defaults.inference.top_p = Some(1.0);
-    entry.defaults.inference.repetition_penalty = Some(1.0);
-    entry.defaults.inference.no_repeat_ngram_size = None;
-    entry.defaults.inference.seed = Some(0);
+    entry.defaults.inference.decode.max_new_tokens = Some(8192);
+    entry.defaults.inference.decode.do_sample = Some(false);
+    entry.defaults.inference.decode.temperature = Some(0.0);
+    entry.defaults.inference.decode.top_p = Some(1.0);
+    entry.defaults.inference.decode.repetition_penalty = Some(1.0);
+    entry.defaults.inference.decode.no_repeat_ngram_size = None;
+    entry.defaults.inference.decode.seed = Some(0);
     entry
 }
 
@@ -203,15 +202,8 @@ pub struct InferenceSettings {
     pub base_size: u32,
     pub image_size: u32,
     pub crop_mode: bool,
-    pub max_new_tokens: usize,
-    pub use_cache: bool,
-    pub do_sample: bool,
-    pub temperature: f64,
-    pub top_p: f64,
-    pub top_k: Option<usize>,
-    pub repetition_penalty: f32,
-    pub no_repeat_ngram_size: Option<usize>,
-    pub seed: Option<u64>,
+    #[serde(flatten)]
+    pub decode: DecodeParameters,
 }
 
 impl Default for InferenceSettings {
@@ -223,15 +215,7 @@ impl Default for InferenceSettings {
             base_size: 1024,
             image_size: 640,
             crop_mode: true,
-            max_new_tokens: 512,
-            use_cache: true,
-            do_sample: false,
-            temperature: 0.0,
-            top_p: 1.0,
-            top_k: None,
-            repetition_penalty: 1.0,
-            no_repeat_ngram_size: Some(20),
-            seed: None,
+            decode: DecodeParameters::default(),
         }
     }
 }
@@ -306,7 +290,7 @@ impl AppConfig {
     ) -> Result<(Self, ConfigDescriptor, ModelResources)> {
         let config_path_override = overrides.config_path.clone();
         let (mut config, descriptor) = Self::load_or_init(fs, config_path_override.as_deref())?;
-        config += overrides;
+        config.apply_overrides(&overrides);
         config.normalise(fs)?;
         let resources = config.active_model_resources(fs)?;
         Ok((config, descriptor, resources))
@@ -361,10 +345,10 @@ impl AppConfig {
             }
 
             // Per-model inference defaults apply before CLI/runtime overrides.
-            entry.defaults.inference.apply_to(&mut self.inference);
+            self.inference += &entry.defaults.inference;
         }
 
-        overrides.inference.apply_to(&mut self.inference);
+        self.inference += &overrides.inference;
 
         if let Some(host) = overrides.server.host.as_ref() {
             self.server.host = host.clone();
@@ -372,6 +356,23 @@ impl AppConfig {
         if let Some(port) = overrides.server.port {
             self.server.port = port;
         }
+    }
+
+    pub fn effective_inference_for_model(
+        &self,
+        model_id: &str,
+        base_inference: &InferenceSettings,
+        runtime_overrides: &InferenceOverride,
+    ) -> Result<InferenceSettings> {
+        let Some(entry) = self.models.entries.get(model_id) else {
+            return Err(anyhow!("requested model `{model_id}` is not available"));
+        };
+
+        let mut effective = base_inference.clone();
+        // Priority: config baseline -> model defaults -> runtime args.
+        effective += &entry.defaults.inference;
+        effective += runtime_overrides;
+        Ok(effective)
     }
 }
 
@@ -525,63 +526,41 @@ pub struct InferenceOverride {
     pub base_size: Option<u32>,
     pub image_size: Option<u32>,
     pub crop_mode: Option<bool>,
-    pub max_new_tokens: Option<usize>,
-    pub use_cache: Option<bool>,
-    pub do_sample: Option<bool>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub top_k: Option<usize>,
-    pub repetition_penalty: Option<f32>,
-    pub no_repeat_ngram_size: Option<usize>,
-    pub seed: Option<u64>,
+    #[serde(flatten)]
+    pub decode: DecodeParametersPatch,
 }
 
-impl InferenceOverride {
-    pub fn apply_to(&self, inference: &mut InferenceSettings) {
-        if let Some(device) = self.device {
-            inference.device = device;
+impl std::ops::AddAssign<&InferenceOverride> for InferenceSettings {
+    fn add_assign(&mut self, rhs: &InferenceOverride) {
+        if let Some(device) = rhs.device {
+            self.device = device;
         }
-        if self.precision.is_some() {
-            inference.precision = self.precision;
+        if rhs.precision.is_some() {
+            self.precision = rhs.precision;
         }
-        if let Some(template) = self.template.as_ref() {
-            inference.template = template.clone();
+        if let Some(template) = rhs.template.as_ref() {
+            self.template = template.clone();
         }
-        if let Some(base_size) = self.base_size {
-            inference.base_size = base_size;
+        if let Some(base_size) = rhs.base_size {
+            self.base_size = base_size;
         }
-        if let Some(image_size) = self.image_size {
-            inference.image_size = image_size;
+        if let Some(image_size) = rhs.image_size {
+            self.image_size = image_size;
         }
-        if let Some(crop_mode) = self.crop_mode {
-            inference.crop_mode = crop_mode;
+        if let Some(crop_mode) = rhs.crop_mode {
+            self.crop_mode = crop_mode;
         }
-        if let Some(max_new_tokens) = self.max_new_tokens {
-            inference.max_new_tokens = max_new_tokens;
-        }
-        if let Some(use_cache) = self.use_cache {
-            inference.use_cache = use_cache;
-        }
-        if let Some(do_sample) = self.do_sample {
-            inference.do_sample = do_sample;
-        }
-        if let Some(temperature) = self.temperature {
-            inference.temperature = temperature;
-        }
-        if let Some(top_p) = self.top_p {
-            inference.top_p = top_p;
-        }
-        if let Some(top_k) = self.top_k {
-            inference.top_k = Some(top_k);
-        }
-        if let Some(repetition_penalty) = self.repetition_penalty {
-            inference.repetition_penalty = repetition_penalty;
-        }
-        if let Some(no_repeat) = self.no_repeat_ngram_size {
-            inference.no_repeat_ngram_size = Some(no_repeat);
-        }
-        if self.seed.is_some() {
-            inference.seed = self.seed;
+
+        self.decode += &rhs.decode;
+    }
+}
+
+impl InferenceSettings {
+    pub fn to_vision_settings(&self) -> deepseek_ocr_core::VisionSettings {
+        deepseek_ocr_core::VisionSettings {
+            base_size: self.base_size,
+            image_size: self.image_size,
+            crop_mode: self.crop_mode,
         }
     }
 }
@@ -596,28 +575,6 @@ pub struct ModelDefaults {
 pub struct ServerOverride {
     pub host: Option<String>,
     pub port: Option<u16>,
-}
-
-pub trait ConfigOverride {
-    fn apply(self, config: &mut AppConfig);
-}
-
-impl ConfigOverride for ConfigOverrides {
-    fn apply(self, config: &mut AppConfig) {
-        config.apply_overrides(&self);
-    }
-}
-
-impl ConfigOverride for &ConfigOverrides {
-    fn apply(self, config: &mut AppConfig) {
-        config.apply_overrides(self);
-    }
-}
-
-impl<O: ConfigOverride> AddAssign<O> for AppConfig {
-    fn add_assign(&mut self, rhs: O) {
-        rhs.apply(self);
-    }
 }
 
 pub fn save_config(

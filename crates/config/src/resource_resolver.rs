@@ -2,12 +2,43 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use deepseek_ocr_assets as assets;
-use deepseek_ocr_config::{
-    LocalFileSystem, ResourceLocation, SnapshotResources, VirtualFileSystem, VirtualPath,
-};
 
-pub fn ensure_config_file(
-    fs: &LocalFileSystem,
+use crate::{ResourceLocation, SnapshotResources, VirtualFileSystem, VirtualPath};
+
+#[derive(Debug, Clone)]
+pub struct PreparedModelPaths {
+    pub config: PathBuf,
+    pub tokenizer: PathBuf,
+    pub weights: PathBuf,
+    pub snapshot: Option<PathBuf>,
+    pub preprocessor: Option<PathBuf>,
+}
+
+pub fn prepare_model_paths(
+    fs: &impl VirtualFileSystem,
+    model_id: &str,
+    config_location: &ResourceLocation,
+    tokenizer_location: &ResourceLocation,
+    weights_location: &ResourceLocation,
+    snapshot: Option<&SnapshotResources>,
+) -> Result<PreparedModelPaths> {
+    let config = ensure_config_file(fs, model_id, config_location)?;
+    let tokenizer = ensure_tokenizer_file(fs, model_id, tokenizer_location)?;
+    let weights = prepare_weights_path(fs, model_id, weights_location)?;
+    let snapshot = prepare_snapshot_path(fs, model_id, snapshot)?;
+    let preprocessor = ensure_model_preprocessor_file(model_id, &config)?;
+
+    Ok(PreparedModelPaths {
+        config,
+        tokenizer,
+        weights,
+        snapshot,
+        preprocessor,
+    })
+}
+
+fn ensure_config_file(
+    fs: &impl VirtualFileSystem,
     model_id: &str,
     location: &ResourceLocation,
 ) -> Result<PathBuf> {
@@ -29,8 +60,8 @@ pub fn ensure_config_file(
     }
 }
 
-pub fn ensure_tokenizer_file(
-    fs: &LocalFileSystem,
+fn ensure_tokenizer_file(
+    fs: &impl VirtualFileSystem,
     model_id: &str,
     location: &ResourceLocation,
 ) -> Result<PathBuf> {
@@ -52,8 +83,8 @@ pub fn ensure_tokenizer_file(
     }
 }
 
-pub fn prepare_weights_path(
-    fs: &LocalFileSystem,
+fn prepare_weights_path(
+    fs: &impl VirtualFileSystem,
     model_id: &str,
     location: &ResourceLocation,
 ) -> Result<PathBuf> {
@@ -70,8 +101,8 @@ pub fn prepare_weights_path(
     }
 }
 
-pub fn prepare_snapshot_path(
-    fs: &LocalFileSystem,
+fn prepare_snapshot_path(
+    fs: &impl VirtualFileSystem,
     model_id: &str,
     snapshot: Option<&SnapshotResources>,
 ) -> Result<Option<PathBuf>> {
@@ -94,8 +125,12 @@ pub fn prepare_snapshot_path(
     .map(Some)
 }
 
+fn ensure_model_preprocessor_file(model_id: &str, config_path: &Path) -> Result<Option<PathBuf>> {
+    assets::ensure_model_preprocessor_for(model_id, config_path)
+}
+
 fn ensure_resource<F>(
-    fs: &LocalFileSystem,
+    fs: &impl VirtualFileSystem,
     location: &ResourceLocation,
     ensure_fn: F,
 ) -> Result<PathBuf>

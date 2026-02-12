@@ -8,8 +8,8 @@ pub mod streaming;
 pub mod tensor;
 
 pub use inference::{
-    DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
-    normalize_text, render_prompt,
+    DecodeOutcome, DecodeParameters, DecodeParametersPatch, ModelKind, ModelLoadArgs, OcrEngine,
+    VisionSettings, normalize_text, render_prompt,
 };
 
 // #[cfg(feature = "mkl")]

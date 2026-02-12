@@ -754,6 +754,8 @@ name = "deepseek-ocr-config"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
+ "deepseek-ocr-assets",
  "deepseek-ocr-core",
  "dirs 5.0.1",
  "serde",

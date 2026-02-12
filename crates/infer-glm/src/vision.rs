@@ -83,7 +83,10 @@ impl GlmVisionModel {
         let patch_timer = Timer::new("vision.encode.patch_embed");
         let hidden = self.patch_embed.forward(pixel_values)?;
         patch_timer.finish(|event| {
-            event.add_field("tokens", hidden.dims().first().copied().unwrap_or_default() as u64);
+            event.add_field(
+                "tokens",
+                hidden.dims().first().copied().unwrap_or_default() as u64,
+            );
         });
         let layout = VisionSequenceLayout::from_grids(grids, self.config.spatial_merge_size)?;
         let (token_count, hidden_size) = hidden.shape().dims2()?;
@@ -119,10 +122,12 @@ impl GlmVisionModel {
             .context("vision post_layernorm failed")?;
 
         let merge = self.config.spatial_merge_size;
-        let reshaped = states.reshape((layout.total_groups, merge, merge, self.config.hidden_size))?;
+        let reshaped =
+            states.reshape((layout.total_groups, merge, merge, self.config.hidden_size))?;
         let downsample_input = reshaped.permute((0, 3, 1, 2))?;
         let downsampled = self.downsample.forward(&downsample_input)?;
-        let merged_tokens = downsampled.reshape((layout.total_groups, self.config.out_hidden_size))?;
+        let merged_tokens =
+            downsampled.reshape((layout.total_groups, self.config.out_hidden_size))?;
         let output = self.merger.forward(&merged_tokens)?;
         tail_timer.finish(|event| {
             event.add_field("groups", layout.total_groups as u64);
@@ -144,8 +149,12 @@ pub fn preprocess_images(
         grids.push(processed.grid_thw);
         all_patches.extend_from_slice(&processed.flatten_patches);
     }
-    let rows = all_patches.len() / (3 * preprocessor.temporal_patch_size * preprocessor.patch_size * preprocessor.patch_size);
-    let cols = 3 * preprocessor.temporal_patch_size * preprocessor.patch_size * preprocessor.patch_size;
+    let rows = all_patches.len()
+        / (3 * preprocessor.temporal_patch_size
+            * preprocessor.patch_size
+            * preprocessor.patch_size);
+    let cols =
+        3 * preprocessor.temporal_patch_size * preprocessor.patch_size * preprocessor.patch_size;
     let pixel_values = if rows == 0 {
         Tensor::zeros((0, cols), DType::F32, device)?
     } else {
@@ -203,12 +212,15 @@ fn preprocess_single_image(
     }
 
     let temporal = preprocessor.temporal_patch_size.max(1);
-    
+
     let patch = preprocessor.patch_size;
     let merge = preprocessor.spatial_merge_size;
     let grid_h = resized_h / patch;
     let grid_w = resized_w / patch;
-    ensure!(grid_h.is_multiple_of(merge) && grid_w.is_multiple_of(merge), "grid not divisible by merge size");
+    ensure!(
+        grid_h.is_multiple_of(merge) && grid_w.is_multiple_of(merge),
+        "grid not divisible by merge size"
+    );
 
     let patch_vec_len = 3 * temporal * patch * patch;
     let mut flatten = Vec::with_capacity(grid_h * grid_w * patch_vec_len);
@@ -220,7 +232,6 @@ fn preprocess_single_image(
                     for mw in 0..merge {
                         for c in 0..3 {
                             for _tp in 0..temporal {
-                                
                                 for py in 0..patch {
                                     for px in 0..patch {
                                         let y = (gh * merge + mh) * patch + py;
@@ -252,7 +263,10 @@ fn smart_resize(
     min_pixels: usize,
     max_pixels: usize,
 ) -> Result<(usize, usize)> {
-    ensure!(num_frames >= temporal_factor, "t:{num_frames} must be >= temporal_factor:{temporal_factor}");
+    ensure!(
+        num_frames >= temporal_factor,
+        "t:{num_frames} must be >= temporal_factor:{temporal_factor}"
+    );
     let mut h = height.max(1);
     let mut w = width.max(1);
     if h < factor || w < factor {
@@ -261,7 +275,10 @@ fn smart_resize(
         w = (w as f64 * scale) as usize;
     }
     let aspect = h.max(w) as f64 / h.min(w) as f64;
-    ensure!(aspect <= 200.0, "absolute aspect ratio must be <= 200, got {aspect}");
+    ensure!(
+        aspect <= 200.0,
+        "absolute aspect ratio must be <= 200, got {aspect}"
+    );
 
     let mut h_bar = round_to_multiple(h, factor);
     let mut w_bar = round_to_multiple(w, factor);
@@ -371,7 +388,10 @@ fn clip8(value: i64) -> u8 {
 }
 
 fn resize_rgb_image(image: &RgbImage, width: u32, height: u32) -> Result<RgbImage> {
-    ensure!(width > 0 && height > 0, "target dimensions must be positive");
+    ensure!(
+        width > 0 && height > 0,
+        "target dimensions must be positive"
+    );
     if image.width() == width && image.height() == height {
         return Ok(image.clone());
     }
@@ -496,7 +516,10 @@ struct VisionRotaryEmbedding {
 impl VisionRotaryEmbedding {
     fn new(cfg: &GlmOcrVisionConfig, device: &Device) -> Result<Self> {
         let head_dim = cfg.hidden_size / cfg.num_heads;
-        ensure!(head_dim.is_multiple_of(4), "vision head dim must be divisible by 4");
+        ensure!(
+            head_dim.is_multiple_of(4),
+            "vision head dim must be divisible by 4"
+        );
 
         // HF reference constructs `GlmOcrVisionRotaryEmbedding(head_dim // 2)`,
         // then uses frequencies over even indices only.
@@ -523,7 +546,10 @@ impl VisionRotaryEmbedding {
             max_grid = max_grid.max(h.max(w));
             let h_ids = grouped_axis_ids(h, w, self.merge_size, 0);
             let w_ids = grouped_axis_ids(h, w, self.merge_size, 1);
-            ensure!(h_ids.len() == h * w && w_ids.len() == h * w, "axis id size mismatch");
+            ensure!(
+                h_ids.len() == h * w && w_ids.len() == h * w,
+                "axis id size mismatch"
+            );
             for _ in 0..t {
                 for idx in 0..(h * w) {
                     pos_ids.push((h_ids[idx], w_ids[idx]));
@@ -765,11 +791,20 @@ impl GlmVisionAttention {
     ) -> Result<Tensor> {
         let qkv = self.qkv.forward_2d(hidden)?;
         let (tokens, width) = qkv.shape().dims2()?;
-        ensure!(width == self.num_heads * self.head_dim * 3, "unexpected qkv width");
+        ensure!(
+            width == self.num_heads * self.head_dim * 3,
+            "unexpected qkv width"
+        );
         let reshaped = qkv.reshape((tokens, 3, self.num_heads, self.head_dim))?;
-        let q = reshaped.narrow(1, 0, 1)?.reshape((tokens, self.num_heads, self.head_dim))?;
-        let k = reshaped.narrow(1, 1, 1)?.reshape((tokens, self.num_heads, self.head_dim))?;
-        let v = reshaped.narrow(1, 2, 1)?.reshape((tokens, self.num_heads, self.head_dim))?;
+        let q = reshaped
+            .narrow(1, 0, 1)?
+            .reshape((tokens, self.num_heads, self.head_dim))?;
+        let k = reshaped
+            .narrow(1, 1, 1)?
+            .reshape((tokens, self.num_heads, self.head_dim))?;
+        let v = reshaped
+            .narrow(1, 2, 1)?
+            .reshape((tokens, self.num_heads, self.head_dim))?;
 
         let q = precise_rms_norm_last_dim(&q, &self.q_norm, 1e-5)?;
         let k = precise_rms_norm_last_dim(&k, &self.k_norm, 1e-5)?;
@@ -828,7 +863,9 @@ impl GlmVisionAttention {
                 let chunk_refs: Vec<&Tensor> = ctx_chunks.iter().collect();
                 Tensor::cat(&chunk_refs, 1)?
             };
-            let ctx = ctx.transpose(0, 1)?.reshape((frame.len, self.num_heads * self.head_dim))?;
+            let ctx = ctx
+                .transpose(0, 1)?
+                .reshape((frame.len, self.num_heads * self.head_dim))?;
             outputs.push(ctx);
         }
         let refs: Vec<&Tensor> = outputs.iter().collect();
@@ -837,7 +874,12 @@ impl GlmVisionAttention {
     }
 }
 
-fn apply_vision_rotary(q: &Tensor, k: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<(Tensor, Tensor)> {
+fn apply_vision_rotary(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+) -> Result<(Tensor, Tensor)> {
     let q_dtype = q.dtype();
     let k_dtype = k.dtype();
     let qf = q.to_dtype(DType::F32)?;

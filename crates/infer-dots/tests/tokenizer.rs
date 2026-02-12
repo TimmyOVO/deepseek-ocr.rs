@@ -23,7 +23,10 @@ fn resolve_tokens_from_repo_tokenizer() {
         tokenizer.id_to_token(tokens.start),
         Some(IMAGE_START_TOKEN.into())
     );
-    assert_eq!(tokenizer.id_to_token(tokens.end), Some(IMAGE_END_TOKEN.into()));
+    assert_eq!(
+        tokenizer.id_to_token(tokens.end),
+        Some(IMAGE_END_TOKEN.into())
+    );
 }
 
 #[test]

@@ -41,5 +41,8 @@ fn preprocess_constant_image() {
         .expect("scalar");
     let avg = val / (4.0 * 3.0 * 196.0);
     let expected = ((128.0 / 255.0) - 0.5) / 0.5;
-    assert!((avg - expected).abs() < 1e-6, "avg={avg} expected={expected}");
+    assert!(
+        (avg - expected).abs() < 1e-6,
+        "avg={avg} expected={expected}"
+    );
 }

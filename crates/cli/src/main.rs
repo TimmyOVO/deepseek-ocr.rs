@@ -4,7 +4,6 @@ mod bench;
 mod debug;
 mod logging;
 mod prompt;
-mod resources;
 
 use crate::args::{Cli, CliCommand};
 use anyhow::Result;

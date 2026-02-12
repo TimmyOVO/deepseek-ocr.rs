@@ -1,9 +1,9 @@
 mod model_internal_tests {
-    use anyhow::{Context, Result, ensure};
     use ahash::AHashMap;
+    use anyhow::{Context, Result, ensure};
     use candle_core::{DType, Device, Tensor};
-    use deepseek_ocr_core::{ModelKind, ModelLoadArgs, OcrEngine};
     use deepseek_ocr_core::tensor::gather_token_embeddings;
+    use deepseek_ocr_core::{ModelKind, ModelLoadArgs, OcrEngine};
     use deepseek_ocr_infer_paddleocr::{
         PaddleOcrModel,
         config::load_config,
@@ -804,5 +804,4 @@ mod model_internal_tests {
         );
         Ok(())
     }
-
 }

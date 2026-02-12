@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
-use deepseek_ocr_config::{AppConfig, ConfigOverride, ConfigOverrides, InferenceOverride};
-use deepseek_ocr_core::runtime::{DeviceKind, Precision};
+use deepseek_ocr_config::{
+    CommonInferenceArgs, CommonModelArgs, ConfigOverrides, build_config_overrides,
+};
 
 use crate::debug::DebugArgs;
 
@@ -59,17 +60,11 @@ pub struct SnapshotArgs {
 
 #[derive(ClapArgs, Debug)]
 pub struct InferArgs {
-    /// Optional path to a configuration file (defaults to platform config dir).
-    #[arg(long, value_name = "PATH", help_heading = "Application")]
-    pub config: Option<PathBuf>,
+    #[command(flatten)]
+    pub model: CommonModelArgs,
 
-    /// Select which model entry to load from the configuration.
-    #[arg(long, value_name = "ID", help_heading = "Application")]
-    pub model: Option<String>,
-
-    /// Override the model configuration JSON path.
-    #[arg(long, value_name = "PATH", help_heading = "Application")]
-    pub model_config: Option<PathBuf>,
+    #[command(flatten)]
+    pub inference: CommonInferenceArgs,
 
     /// Prompt text. Use `<image>` tokens to denote image slots.
     #[arg(long, conflicts_with = "prompt_file")]
@@ -82,77 +77,9 @@ pub struct InferArgs {
     #[command(flatten)]
     pub debug: DebugArgs,
 
-    /// Conversation template name (plain/deepseek/deepseekv2/alignment).
-    #[arg(long, help_heading = "Inference")]
-    pub template: Option<String>,
-
     /// Image files corresponding to `<image>` placeholders, in order.
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<PathBuf>,
-
-    /// Override the default tokenizer path.
-    #[arg(long, value_name = "PATH", help_heading = "Application")]
-    pub tokenizer: Option<PathBuf>,
-
-    /// Override the weights path (defaults to DeepSeek-OCR/model-*.safetensors).
-    #[arg(long, value_name = "PATH", help_heading = "Application")]
-    pub weights: Option<PathBuf>,
-
-    /// Device backend to execute on (cpu/metal/cuda).
-    #[arg(long, help_heading = "Inference")]
-    pub device: Option<DeviceKind>,
-
-    /// Numeric precision. Defaults to f32 on CPU and f16 on Metal/CUDA.
-    #[arg(long, help_heading = "Inference")]
-    pub dtype: Option<Precision>,
-
-    /// Global view resolution (defaults to 1024).
-    #[arg(long, help_heading = "Inference")]
-    pub base_size: Option<u32>,
-
-    /// Local crop resolution (defaults to 640).
-    #[arg(long, help_heading = "Inference")]
-    pub image_size: Option<u32>,
-
-    /// Enable/disable dynamic crop mode (true/false).
-    #[arg(long, help_heading = "Inference")]
-    pub crop_mode: Option<bool>,
-
-    /// Maximum number of tokens to generate.
-    #[arg(long, help_heading = "Inference")]
-    pub max_new_tokens: Option<usize>,
-
-    /// Disable KV-cache usage during decoding.
-    #[arg(long, help_heading = "Inference")]
-    pub no_cache: bool,
-
-    /// Enable sampling during decoding (true/false).
-    #[arg(long, help_heading = "Inference", value_name = "BOOL")]
-    pub do_sample: Option<bool>,
-
-    /// Softmax temperature for sampling.
-    #[arg(long, help_heading = "Inference")]
-    pub temperature: Option<f64>,
-
-    /// Nucleus sampling probability mass.
-    #[arg(long, help_heading = "Inference")]
-    pub top_p: Option<f64>,
-
-    /// Top-k sampling cutoff.
-    #[arg(long, help_heading = "Inference")]
-    pub top_k: Option<usize>,
-
-    /// Repetition penalty (>1 decreases repetition).
-    #[arg(long, help_heading = "Inference")]
-    pub repetition_penalty: Option<f32>,
-
-    /// Enforce no-repeat n-gram constraint of the given size.
-    #[arg(long, help_heading = "Inference")]
-    pub no_repeat_ngram_size: Option<usize>,
-
-    /// RNG seed for sampling.
-    #[arg(long, help_heading = "Inference")]
-    pub seed: Option<u64>,
 
     /// Enable benchmark instrumentation (requires `bench-metrics` feature).
     #[arg(long, help_heading = "Benchmark")]
@@ -169,38 +96,6 @@ pub struct InferArgs {
 
 impl From<&InferArgs> for ConfigOverrides {
     fn from(args: &InferArgs) -> Self {
-        let inference = InferenceOverride {
-            device: args.device,
-            precision: args.dtype,
-            template: args.template.clone(),
-            base_size: args.base_size,
-            image_size: args.image_size,
-            crop_mode: args.crop_mode,
-            max_new_tokens: args.max_new_tokens,
-            use_cache: args.no_cache.then_some(false),
-            do_sample: args.do_sample,
-            temperature: args.temperature,
-            top_p: args.top_p,
-            top_k: args.top_k,
-            repetition_penalty: args.repetition_penalty,
-            no_repeat_ngram_size: args.no_repeat_ngram_size,
-            seed: args.seed,
-        };
-
-        ConfigOverrides {
-            config_path: args.config.clone(),
-            model_id: args.model.clone(),
-            model_config: args.model_config.clone(),
-            tokenizer: args.tokenizer.clone(),
-            weights: args.weights.clone(),
-            inference,
-            ..ConfigOverrides::default()
-        }
-    }
-}
-
-impl ConfigOverride for &InferArgs {
-    fn apply(self, config: &mut AppConfig) {
-        config.apply_overrides(&ConfigOverrides::from(self));
+        build_config_overrides(&args.model, &args.inference, None)
     }
 }

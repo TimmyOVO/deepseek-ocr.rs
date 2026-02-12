@@ -65,7 +65,10 @@ impl LinearWeights {
         if out_dtype != candle_core::DType::F32 {
             out = out.to_dtype(out_dtype)?;
         }
-        ensure!(out.shape().dims() == [rows, self.out_dim], "linear output shape mismatch");
+        ensure!(
+            out.shape().dims() == [rows, self.out_dim],
+            "linear output shape mismatch"
+        );
         Ok(out)
     }
 
@@ -145,8 +148,12 @@ pub struct GlmTextMlpWeights {
 
 impl GlmTextMlpWeights {
     pub fn load(vb: &VarBuilder, hidden_size: usize, intermediate_size: usize) -> Result<Self> {
-        let gate_up_proj =
-            LinearWeights::load(vb.pp("gate_up_proj"), intermediate_size * 2, hidden_size, false)?;
+        let gate_up_proj = LinearWeights::load(
+            vb.pp("gate_up_proj"),
+            intermediate_size * 2,
+            hidden_size,
+            false,
+        )?;
         let down_proj =
             LinearWeights::load(vb.pp("down_proj"), hidden_size, intermediate_size, false)?;
         Ok(Self {

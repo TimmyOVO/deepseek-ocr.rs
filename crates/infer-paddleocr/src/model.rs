@@ -423,10 +423,7 @@ pub fn load_model(args: ModelLoadArgs<'_>) -> Result<Box<dyn OcrEngine>> {
     Ok(Box::new(model))
 }
 
-pub fn projector_token_count(
-    grid: (usize, usize, usize),
-    merge_size: usize,
-) -> Result<usize> {
+pub fn projector_token_count(grid: (usize, usize, usize), merge_size: usize) -> Result<usize> {
     ensure!(merge_size > 0, "merge size must be positive");
     let (t, h, w) = grid;
     ensure!(
@@ -860,4 +857,3 @@ fn append_vision_chunk(
     }
     Ok(())
 }
-

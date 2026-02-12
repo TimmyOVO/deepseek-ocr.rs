@@ -4,14 +4,13 @@ use rocket::{Either, Route, State, serde::json::Json, tokio::sync::mpsc};
 use tracing::{debug, error};
 use uuid::Uuid;
 
-use deepseek_ocr_core::{DecodeParameters, ModelKind};
+use deepseek_ocr_core::ModelKind;
 
 use crate::{
     error::ApiError,
-    generation::{base_decode_parameters, convert_messages, generate_async},
+    generation::{convert_messages, generate_async},
     models::{
-        ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessageResponse,
-        DecodeOverrides, HasDecodeOverrides, ModelInfo,
+        ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessageResponse, ModelInfo,
         ModelsResponse, ResponseContent, ResponseOutput, ResponsesRequest, ResponsesResponse,
         Usage,
     },
@@ -76,8 +75,12 @@ pub async fn responses_endpoint(
         .max_output_tokens
         .or(req.max_tokens)
         .unwrap_or(gen_inputs.defaults.max_new_tokens);
-    let mut decode = base_decode_parameters(&gen_inputs, max_tokens);
-    apply_decode_overrides(&mut decode, req.decode_overrides());
+    let decode = (gen_inputs.defaults.clone()
+        + &deepseek_ocr_core::DecodeParametersPatch {
+            max_new_tokens: Some(max_tokens),
+            ..Default::default()
+        })
+        + &req.decode;
     if req.stream.unwrap_or(false) {
         let stream_inputs = gen_inputs.clone();
         let decode_for_task = decode.clone();
@@ -157,8 +160,12 @@ pub async fn chat_completions_endpoint(
     }
     debug!(prompt = %prompt, "Prepared chat prompt");
     let max_tokens = req.max_tokens.unwrap_or(gen_inputs.defaults.max_new_tokens);
-    let mut decode = base_decode_parameters(&gen_inputs, max_tokens);
-    apply_decode_overrides(&mut decode, req.decode_overrides());
+    let decode = (gen_inputs.defaults.clone()
+        + &deepseek_ocr_core::DecodeParametersPatch {
+            max_new_tokens: Some(max_tokens),
+            ..Default::default()
+        })
+        + &req.decode;
     if req.stream.unwrap_or(false) {
         let stream_inputs = gen_inputs.clone();
         let decode_for_task = decode.clone();
@@ -224,32 +231,6 @@ pub fn v1_routes() -> Vec<Route> {
     ]
 }
 
-fn apply_decode_overrides(params: &mut DecodeParameters, overrides: DecodeOverrides) {
-    if let Some(sample) = overrides.do_sample {
-        params.do_sample = sample;
-    }
-    if let Some(temp) = overrides.temperature {
-        params.temperature = temp;
-    }
-    if let Some(prob) = overrides.top_p {
-        params.top_p = if prob < 1.0 { Some(prob) } else { None };
-    }
-    if let Some(k) = overrides.top_k {
-        params.top_k = if k == 0 { None } else { Some(k) };
-    }
-    if let Some(penalty) = overrides.repetition_penalty {
-        params.repetition_penalty = penalty;
-    }
-    if let Some(size) = overrides.no_repeat_ngram_size {
-        params.no_repeat_ngram_size = if size == 0 { None } else { Some(size) };
-    }
-    if let Some(seed) = overrides.seed {
-        params.seed = Some(seed);
-    }
-    if let Some(use_cache) = overrides.use_cache {
-        params.use_cache = use_cache;
-    }
-}
 fn current_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

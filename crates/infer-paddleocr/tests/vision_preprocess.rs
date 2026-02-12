@@ -1,5 +1,7 @@
 use candle_core::Device;
-use deepseek_ocr_infer_paddleocr::vision::{SiglipPreprocessConfig, preprocess_image, smart_resize};
+use deepseek_ocr_infer_paddleocr::vision::{
+    SiglipPreprocessConfig, preprocess_image, smart_resize,
+};
 use image::{DynamicImage, Rgb, RgbImage};
 
 const DEFAULT_MIN_PIXELS: usize = 147_384;

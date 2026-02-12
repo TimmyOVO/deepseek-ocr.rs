@@ -8,20 +8,16 @@ use candle_core::{DType, Device};
 use tokenizers::Tokenizer;
 use tracing::info;
 
-use deepseek_ocr_assets as assets;
-use deepseek_ocr_config::{AppConfig, InferenceOverride, InferenceSettings, LocalFileSystem};
+use deepseek_ocr_config::{
+    AppConfig, InferenceOverride, InferenceSettings, LocalFileSystem, prepare_model_paths,
+};
 use deepseek_ocr_core::{DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings};
 use deepseek_ocr_infer_deepseek::load_model as load_deepseek_model;
 use deepseek_ocr_infer_dots::load_model as load_dots_model;
 use deepseek_ocr_infer_glm::load_model as load_glm_model;
 use deepseek_ocr_infer_paddleocr::load_model as load_paddle_model;
 
-use crate::{
-    error::ApiError,
-    resources::{
-        ensure_config_file, ensure_tokenizer_file, prepare_snapshot_path, prepare_weights_path,
-    },
-};
+use crate::error::ApiError;
 
 pub type SharedModel = Arc<Mutex<Box<dyn OcrEngine>>>;
 
@@ -87,41 +83,16 @@ impl AppState {
         model_id: &str,
     ) -> Result<(VisionSettings, DecodeParameters), ApiError> {
         let base_config = self.manager.config.as_ref();
-        let mut effective = self.base_inference.clone();
-        let Some(entry) = base_config.models.entries.get(model_id) else {
-            return Err(ApiError::BadRequest(format!(
-                "requested model `{model_id}` is not available"
-            )));
-        };
+        let effective = base_config
+            .effective_inference_for_model(
+                model_id,
+                &self.base_inference,
+                &self.inference_overrides,
+            )
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
-        // Resolve requested model defaults first, then overlay process-level
-        // inference overrides captured at bootstrap.
-        entry.defaults.inference.apply_to(&mut effective);
-        self.inference_overrides.apply_to(&mut effective);
-
-        let model_defaults = DecodeParameters {
-            max_new_tokens: effective.max_new_tokens,
-            do_sample: effective.do_sample,
-            temperature: effective.temperature,
-            top_p: if effective.top_p < 1.0 {
-                Some(effective.top_p)
-            } else {
-                None
-            },
-            top_k: effective.top_k,
-            repetition_penalty: effective.repetition_penalty,
-            no_repeat_ngram_size: effective.no_repeat_ngram_size,
-            seed: effective.seed,
-            use_cache: effective.use_cache,
-        };
-
-        let decode = model_defaults;
-
-        let vision = VisionSettings {
-            base_size: effective.base_size,
-            image_size: effective.image_size,
-            crop_mode: effective.crop_mode,
-        };
+        let decode = effective.decode.clone();
+        let vision = effective.to_vision_settings();
 
         Ok((vision, decode))
     }
@@ -223,14 +194,18 @@ impl ModelManager {
             .config
             .model_resources(&self.fs, model_id)
             .with_context(|| format!("model `{model_id}` not found in configuration"))?;
-        let config_path = ensure_config_file(&self.fs, &resources.id, &resources.config)?;
-        let tokenizer_path = ensure_tokenizer_file(&self.fs, &resources.id, &resources.tokenizer)?;
-        let weights_path = prepare_weights_path(&self.fs, &resources.id, &resources.weights)?;
-        let snapshot_path =
-            prepare_snapshot_path(&self.fs, &resources.id, resources.snapshot.as_ref())?;
-
-        // Ensure any model-specific preprocessor config is present (e.g. dots.ocr).
-        let _ = assets::ensure_model_preprocessor_for(&resources.id, &config_path)?;
+        let prepared = prepare_model_paths(
+            &self.fs,
+            &resources.id,
+            &resources.config,
+            &resources.tokenizer,
+            &resources.weights,
+            resources.snapshot.as_ref(),
+        )?;
+        let config_path = prepared.config;
+        let tokenizer_path = prepared.tokenizer;
+        let weights_path = prepared.weights;
+        let snapshot_path = prepared.snapshot;
 
         let load_args = ModelLoadArgs {
             kind: resources.kind,

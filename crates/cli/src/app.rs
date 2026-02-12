@@ -7,12 +7,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use deepseek_ocr_assets as assets;
-use deepseek_ocr_config::{AppConfig, LocalFileSystem};
+use deepseek_ocr_config::{AppConfig, ConfigOverrides, LocalFileSystem, prepare_model_paths};
 use deepseek_ocr_core::{
     ModelKind, ModelLoadArgs,
     benchmark::Timer,
-    inference::{DecodeOutcome, DecodeParameters, VisionSettings, render_prompt},
+    inference::{DecodeOutcome, render_prompt},
     runtime::{default_dtype_for_device, prepare_device_and_dtype},
     streaming::DeltaTracker,
 };
@@ -31,9 +30,6 @@ use crate::{
     args::{InferArgs, SnapshotArgs, WeightsArgs, WeightsCommand},
     bench, debug,
     prompt::load_prompt,
-    resources::{
-        ensure_config_file, ensure_tokenizer_file, prepare_snapshot_path, prepare_weights_path,
-    },
 };
 
 type TokenCallback = Box<dyn Fn(usize, &[i64])>;
@@ -59,8 +55,9 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
     };
 
     let fs = LocalFileSystem::new("deepseek-ocr");
-    let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.config.as_deref())?;
-    app_config += &args;
+    let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.model.config.as_deref())?;
+    let overrides = ConfigOverrides::from(&args);
+    app_config.apply_overrides(&overrides);
     app_config.normalise(&fs)?;
     let resources = app_config.active_model_resources(&fs)?;
 
@@ -70,14 +67,18 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
         app_config.models.active
     );
 
-    let config_path = ensure_config_file(&fs, &resources.id, &resources.config)?;
-    let tokenizer_path = ensure_tokenizer_file(&fs, &resources.id, &resources.tokenizer)?;
-    let weights_path = prepare_weights_path(&fs, &resources.id, &resources.weights)?;
-    let snapshot_path = prepare_snapshot_path(&fs, &resources.id, resources.snapshot.as_ref())?;
-
-    // Ensure any model-specific preprocessor config is present next to `config.json`
-    // in the cache directory (e.g. dots.ocr `preprocessor_config.json`).
-    let _ = assets::ensure_model_preprocessor_for(&resources.id, &config_path)?;
+    let prepared = prepare_model_paths(
+        &fs,
+        &resources.id,
+        &resources.config,
+        &resources.tokenizer,
+        &resources.weights,
+        resources.snapshot.as_ref(),
+    )?;
+    let config_path = prepared.config;
+    let tokenizer_path = prepared.tokenizer;
+    let weights_path = prepared.weights;
+    let snapshot_path = prepared.snapshot;
 
     let (device, maybe_precision) =
         prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
@@ -147,26 +148,8 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let vision_settings = VisionSettings {
-        base_size: app_config.inference.base_size,
-        image_size: app_config.inference.image_size,
-        crop_mode: app_config.inference.crop_mode,
-    };
-    let decode_params = DecodeParameters {
-        max_new_tokens: app_config.inference.max_new_tokens,
-        do_sample: app_config.inference.do_sample,
-        temperature: app_config.inference.temperature,
-        top_p: if app_config.inference.top_p < 1.0 {
-            Some(app_config.inference.top_p)
-        } else {
-            None
-        },
-        top_k: app_config.inference.top_k,
-        repetition_penalty: app_config.inference.repetition_penalty,
-        no_repeat_ngram_size: app_config.inference.no_repeat_ngram_size,
-        seed: app_config.inference.seed,
-        use_cache: app_config.inference.use_cache,
-    };
+    let vision_settings = app_config.inference.to_vision_settings();
+    let decode_params = app_config.inference.decode.clone();
 
     let tokenizer_for_stream = tokenizer.clone();
     let progress_state = Rc::new(RefCell::new(StreamProgress::default()));
@@ -228,7 +211,7 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
 
     info!(
         "Starting generation with requested budget {} tokens",
-        app_config.inference.max_new_tokens
+        app_config.inference.decode.max_new_tokens
     );
     info!("--- Generation start ---");
     let gen_start = Instant::now();
@@ -289,10 +272,10 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
                 base_size: app_config.inference.base_size,
                 image_size: app_config.inference.image_size,
                 crop_mode: app_config.inference.crop_mode,
-                max_new_tokens: app_config.inference.max_new_tokens,
-                repetition_penalty: app_config.inference.repetition_penalty,
-                no_repeat_ngram_size: app_config.inference.no_repeat_ngram_size,
-                use_cache: app_config.inference.use_cache,
+                max_new_tokens: app_config.inference.decode.max_new_tokens,
+                repetition_penalty: app_config.inference.decode.repetition_penalty,
+                no_repeat_ngram_size: app_config.inference.decode.no_repeat_ngram_size,
+                use_cache: app_config.inference.decode.use_cache,
                 prompt_user: &prompt_user,
                 rendered_prompt: &prompt_with_template,
                 image_paths: &image_paths,

@@ -27,15 +27,6 @@ pub struct GenerationResult {
     pub response_tokens: usize,
 }
 
-pub fn base_decode_parameters(
-    inputs: &GenerationInputs,
-    max_new_tokens: usize,
-) -> DecodeParameters {
-    let mut params = inputs.defaults.clone();
-    params.max_new_tokens = max_new_tokens;
-    params
-}
-
 pub async fn generate_async(
     inputs: GenerationInputs,
     prompt: String,
@@ -181,7 +172,9 @@ pub fn convert_messages(
 ) -> Result<(String, Vec<DynamicImage>), ApiError> {
     match kind {
         ModelKind::Deepseek => convert_deepseek_messages(messages),
-        ModelKind::PaddleOcrVl | ModelKind::DotsOcr | ModelKind::GlmOcr => convert_paddle_messages(messages),
+        ModelKind::PaddleOcrVl | ModelKind::DotsOcr | ModelKind::GlmOcr => {
+            convert_paddle_messages(messages)
+        }
     }
 }
 

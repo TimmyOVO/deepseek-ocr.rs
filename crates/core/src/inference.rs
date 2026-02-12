@@ -18,7 +18,8 @@ pub struct VisionSettings {
 }
 
 /// Decoding parameters that map directly onto generation options.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DecodeParameters {
     pub max_new_tokens: usize,
     pub do_sample: bool,
@@ -29,6 +30,20 @@ pub struct DecodeParameters {
     pub no_repeat_ngram_size: Option<usize>,
     pub seed: Option<u64>,
     pub use_cache: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DecodeParametersPatch {
+    pub max_new_tokens: Option<usize>,
+    pub do_sample: Option<bool>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<usize>,
+    pub repetition_penalty: Option<f32>,
+    pub no_repeat_ngram_size: Option<usize>,
+    pub seed: Option<u64>,
+    pub use_cache: Option<bool>,
 }
 
 impl DecodeParameters {
@@ -45,6 +60,75 @@ impl DecodeParameters {
             use_cache: true,
         }
     }
+}
+
+impl Default for DecodeParameters {
+    fn default() -> Self {
+        Self {
+            max_new_tokens: 512,
+            do_sample: false,
+            temperature: 0.0,
+            top_p: Some(1.0),
+            top_k: None,
+            repetition_penalty: 1.0,
+            no_repeat_ngram_size: Some(20),
+            seed: None,
+            use_cache: true,
+        }
+    }
+}
+
+impl std::ops::AddAssign<&DecodeParametersPatch> for DecodeParameters {
+    fn add_assign(&mut self, rhs: &DecodeParametersPatch) {
+        if let Some(max_new_tokens) = rhs.max_new_tokens {
+            self.max_new_tokens = max_new_tokens;
+        }
+        if let Some(sample) = rhs.do_sample {
+            self.do_sample = sample;
+        }
+        if let Some(temp) = rhs.temperature {
+            self.temperature = temp;
+        }
+        if let Some(prob) = rhs.top_p {
+            self.top_p = normalize_top_p(prob);
+        }
+        if let Some(top_k) = rhs.top_k {
+            self.top_k = normalize_top_k(top_k);
+        }
+        if let Some(repetition_penalty) = rhs.repetition_penalty {
+            self.repetition_penalty = repetition_penalty;
+        }
+        if let Some(no_repeat) = rhs.no_repeat_ngram_size {
+            self.no_repeat_ngram_size = normalize_no_repeat_ngram_size(no_repeat);
+        }
+        if let Some(seed) = rhs.seed {
+            self.seed = Some(seed);
+        }
+        if let Some(use_cache) = rhs.use_cache {
+            self.use_cache = use_cache;
+        }
+    }
+}
+
+impl std::ops::Add<&DecodeParametersPatch> for DecodeParameters {
+    type Output = DecodeParameters;
+
+    fn add(mut self, rhs: &DecodeParametersPatch) -> Self::Output {
+        self += rhs;
+        self
+    }
+}
+
+fn normalize_top_p(probability: f64) -> Option<f64> {
+    (probability < 1.0).then_some(probability)
+}
+
+fn normalize_top_k(top_k: usize) -> Option<usize> {
+    (top_k > 0).then_some(top_k)
+}
+
+fn normalize_no_repeat_ngram_size(size: usize) -> Option<usize> {
+    (size > 0).then_some(size)
 }
 
 impl TokenSelectionParams for DecodeParameters {
