@@ -5,6 +5,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use deepseek_ocr_core::config::{
+    DeepseekRuntimeConfig, ModelArchitecture, OcrModelConfig, RopeConfig,
+};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -91,6 +94,11 @@ impl DeepseekOcrConfig {
         Ok(merged)
     }
 
+    pub fn resolved_runtime_config(&self) -> Result<DeepseekRuntimeConfig> {
+        let cfg = self.resolved_language_config()?;
+        DeepseekRuntimeConfig::try_from(cfg)
+    }
+
     pub fn language_torch_dtype(&self) -> Option<&str> {
         self.language_config
             .as_ref()
@@ -113,6 +121,156 @@ impl DeepseekOcrConfig {
             .as_ref()
             .and_then(|vision| vision.width.get(name))
             .cloned()
+    }
+}
+
+impl TryFrom<DeepseekV2Config> for DeepseekRuntimeConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(value: DeepseekV2Config) -> Result<Self, Self::Error> {
+        ensure_non_zero(
+            value.num_attention_heads,
+            "num_attention_heads must be > 0",
+        )?;
+        ensure_non_zero(value.hidden_size, "hidden_size must be > 0")?;
+        if !value.hidden_size.is_multiple_of(value.num_attention_heads) {
+            bail!(
+                "hidden_size {} must be divisible by num_attention_heads {}",
+                value.hidden_size,
+                value.num_attention_heads
+            );
+        }
+        let head_dim = value.hidden_size / value.num_attention_heads;
+        let num_kv_heads = resolve_or_default(value.num_key_value_heads, value.num_attention_heads);
+        ensure_non_zero(num_kv_heads, "num_key_value_heads resolved to 0")?;
+        if !value.num_attention_heads.is_multiple_of(num_kv_heads) {
+            bail!(
+                "num_attention_heads {} must be divisible by num_key_value_heads {}",
+                value.num_attention_heads,
+                num_kv_heads
+            );
+        }
+
+        let kv_head_dim = resolve_or_default(value.qk_nope_head_dim, head_dim);
+        let v_head_dim = resolve_or_default(value.v_head_dim, head_dim);
+        let rotary_dim = resolve_or_default(value.qk_rope_head_dim, head_dim);
+
+        let base = OcrModelConfig {
+            architecture: ModelArchitecture::DeepseekV2,
+            hidden_size: value.hidden_size,
+            intermediate_size: value.intermediate_size,
+            num_hidden_layers: value.num_hidden_layers,
+            num_attention_heads: value.num_attention_heads,
+            num_kv_heads,
+            head_dim,
+            kv_head_dim,
+            v_head_dim,
+            vocab_size: value.vocab_size,
+            max_position_embeddings: value.max_position_embeddings,
+            rms_norm_eps: f64::from(value.rms_norm_eps),
+            rope: RopeConfig::Standard {
+                theta: f64::from(value.rope_theta),
+                rotary_dim,
+            },
+            use_cache: value.use_cache,
+            tie_word_embeddings: value.tie_word_embeddings,
+        };
+
+        let runtime = DeepseekRuntimeConfig {
+            base,
+            moe_intermediate_size: value.moe_intermediate_size,
+            n_shared_experts: value.n_shared_experts.unwrap_or(0),
+            n_routed_experts: value.n_routed_experts.unwrap_or(0),
+            ep_size: value.ep_size,
+            routed_scaling_factor: value.routed_scaling_factor,
+            kv_lora_rank: value.kv_lora_rank,
+            q_lora_rank: value.q_lora_rank,
+            n_group: value.n_group,
+            topk_group: value.topk_group,
+            num_experts_per_tok: value.num_experts_per_tok,
+            moe_layer_freq: value.moe_layer_freq,
+            first_k_dense_replace: value.first_k_dense_replace.unwrap_or(0),
+            norm_topk_prob: value.norm_topk_prob,
+            topk_method: value.topk_method.unwrap_or_else(|| "greedy".to_string()),
+            scoring_func: value.scoring_func.unwrap_or_else(|| "softmax".to_string()),
+            aux_loss_alpha: value.aux_loss_alpha,
+            seq_aux: value.seq_aux,
+            hidden_act: value.hidden_act,
+            initializer_range: value.initializer_range,
+            pretraining_tp: value.pretraining_tp,
+            attention_bias: value.attention_bias,
+            attention_dropout: value.attention_dropout,
+            use_mla: value.use_mla,
+            attn_implementation: value.attn_implementation,
+            rope_scaling: value.rope_scaling,
+            torch_dtype: value.torch_dtype,
+            lm_head: value.lm_head,
+            rm_head: value.rm_head,
+            pad_token_id: value.pad_token_id,
+            bos_token_id: value.bos_token_id,
+            eos_token_id: value.eos_token_id,
+            extra: value.extra,
+        };
+        runtime.validate()?;
+        Ok(runtime)
+    }
+}
+
+impl From<DeepseekRuntimeConfig> for DeepseekV2Config {
+    fn from(value: DeepseekRuntimeConfig) -> Self {
+        let (rope_theta, qk_rope_head_dim) = match value.base.rope {
+            RopeConfig::Standard { theta, rotary_dim } => (theta as f32, Some(rotary_dim)),
+            RopeConfig::MultiModal { theta, .. } => (theta as f32, Some(value.base.head_dim)),
+        };
+        Self {
+            vocab_size: value.base.vocab_size,
+            hidden_size: value.base.hidden_size,
+            intermediate_size: value.base.intermediate_size,
+            moe_intermediate_size: value.moe_intermediate_size,
+            num_hidden_layers: value.base.num_hidden_layers,
+            num_attention_heads: value.base.num_attention_heads,
+            num_key_value_heads: Some(value.base.num_kv_heads),
+            n_shared_experts: Some(value.n_shared_experts),
+            n_routed_experts: Some(value.n_routed_experts),
+            ep_size: value.ep_size,
+            routed_scaling_factor: value.routed_scaling_factor,
+            kv_lora_rank: value.kv_lora_rank,
+            q_lora_rank: value.q_lora_rank,
+            qk_rope_head_dim,
+            v_head_dim: Some(value.base.v_head_dim),
+            qk_nope_head_dim: Some(value.base.kv_head_dim),
+            topk_method: Some(value.topk_method),
+            n_group: value.n_group,
+            topk_group: value.topk_group,
+            num_experts_per_tok: value.num_experts_per_tok,
+            moe_layer_freq: value.moe_layer_freq,
+            moe_layer_freq_override: None,
+            first_k_dense_replace: Some(value.first_k_dense_replace),
+            norm_topk_prob: value.norm_topk_prob,
+            scoring_func: Some(value.scoring_func),
+            aux_loss_alpha: value.aux_loss_alpha,
+            seq_aux: value.seq_aux,
+            hidden_act: value.hidden_act,
+            max_position_embeddings: value.base.max_position_embeddings,
+            initializer_range: value.initializer_range,
+            rms_norm_eps: value.base.rms_norm_eps as f32,
+            use_cache: value.base.use_cache,
+            pad_token_id: value.pad_token_id,
+            bos_token_id: value.bos_token_id,
+            eos_token_id: value.eos_token_id,
+            pretraining_tp: value.pretraining_tp,
+            tie_word_embeddings: value.base.tie_word_embeddings,
+            attn_implementation: value.attn_implementation,
+            rope_theta,
+            rope_scaling: value.rope_scaling,
+            attention_bias: value.attention_bias,
+            attention_dropout: value.attention_dropout,
+            use_mla: value.use_mla,
+            torch_dtype: value.torch_dtype,
+            lm_head: value.lm_head,
+            rm_head: value.rm_head,
+            extra: value.extra,
+        }
     }
 }
 
@@ -361,5 +519,19 @@ fn merge_missing(target: &mut Value, fallback: &Value) {
             *target = fallback.clone();
         }
         _ => {}
+    }
+}
+
+fn ensure_non_zero(value: usize, message: &str) -> Result<()> {
+    if value == 0 {
+        bail!("{message}");
+    }
+    Ok(())
+}
+
+fn resolve_or_default(value: Option<usize>, fallback: usize) -> usize {
+    match value {
+        Some(0) | None => fallback,
+        Some(v) => v,
     }
 }

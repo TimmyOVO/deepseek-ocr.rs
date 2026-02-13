@@ -31,6 +31,7 @@ use crate::{
 };
 use deepseek_ocr_core::{
     benchmark::Timer,
+    config::DeepseekRuntimeConfig,
     inference::{
         DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
         normalize_text,
@@ -477,6 +478,7 @@ impl ImageProjector {
 /// language model. For now it wires the language stack so we can exercise text-only inference.
 pub struct DeepseekOcrModel {
     cfg: Arc<DeepseekOcrConfig>,
+    runtime_cfg: Arc<DeepseekRuntimeConfig>,
     language: DeepseekLanguageModel,
     projector_cfg: Arc<ProjectorConfig>,
     projector: ImageProjector,
@@ -942,7 +944,10 @@ impl DeepseekOcrModel {
     ) -> Result<Self> {
         let cfg = Arc::new(load_ocr_config(config_path)?);
         let variant = detect_ocr_variant(&cfg);
-        let language_cfg = Arc::new(cfg.resolved_language_config()?);
+        let runtime_cfg = Arc::new(cfg.resolved_runtime_config()?);
+        let language_cfg = Arc::new(crate::config::DeepseekV2Config::from(
+            runtime_cfg.as_ref().clone(),
+        ));
         let snapshot = if let Some(path) = snapshot_path {
             info!(
                 path = %path.display(),
@@ -1080,6 +1085,7 @@ impl DeepseekOcrModel {
 
         Ok(Self {
             cfg,
+            runtime_cfg,
             language,
             projector_cfg,
             projector,
@@ -1097,6 +1103,10 @@ impl DeepseekOcrModel {
     /// Access the currently loaded configuration.
     pub fn config(&self) -> &DeepseekOcrConfig {
         self.cfg.as_ref()
+    }
+
+    pub fn runtime_config(&self) -> &DeepseekRuntimeConfig {
+        self.runtime_cfg.as_ref()
     }
 
     /// Device backing the allocated tensors.
@@ -1143,9 +1153,9 @@ impl DeepseekOcrModel {
         // Low-precision models keep cache storage in f32 to reduce accumulation drift.
         let store_dtype = cache_store_dtype(self.dtype, dtype);
         for layer in 0..layers {
-            let heads = self.language.config().num_attention_heads;
-            let head_dim = self.language.config().hidden_size / heads;
-            let v_head_dim = self.language.config().v_head_dim.unwrap_or(head_dim);
+            let heads = self.runtime_cfg.base.num_attention_heads;
+            let head_dim = self.runtime_cfg.base.head_dim;
+            let v_head_dim = self.runtime_cfg.base.v_head_dim;
             let device = self.device.clone();
             let key_t =
                 Tensor::zeros((1, heads, head_dim, 0), store_dtype, &device)?.contiguous()?;
