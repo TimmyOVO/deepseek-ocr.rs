@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Tensor, quantized::QMatMul};
 use candle_nn::ops::rms_norm;
 use deepseek_ocr_core::{
-    cache::{DynamicCache, PromptCacheGuard},
+    RuntimeState, RuntimeStateGuard,
     tensor::{to_device_if_needed, to_dtype_if_needed, gather_token_embeddings},
 };
 
@@ -120,12 +120,12 @@ impl Qwen2LanguageModel {
         &self.token_embedding
     }
 
-    pub fn new_cache(&self) -> DynamicCache {
-        DynamicCache::with_num_layers(self.blocks.len())
+    pub fn new_runtime_state(&self) -> RuntimeState {
+        RuntimeState::new(self.token_embedding.device(), self.blocks.len())
     }
 
-    pub fn prompt_guard<'a>(&'a self, cache: &'a mut DynamicCache) -> PromptCacheGuard<'a> {
-        cache.prompt_guard()
+    pub fn prompt_guard<'a>(&'a self, state: &'a mut RuntimeState) -> RuntimeStateGuard<'a> {
+        state.prompt_guard()
     }
 
     pub fn forward(
@@ -134,7 +134,7 @@ impl Qwen2LanguageModel {
         inputs_embeds: Option<&Tensor>,
         attention_mask: Option<&Tensor>,
         position_ids: Option<&Tensor>,
-        mut cache: Option<&mut DynamicCache>,
+        mut state: Option<&mut RuntimeState>,
         use_cache: bool,
     ) -> Result<LanguageModelOutput> {
         ensure!(
@@ -142,7 +142,7 @@ impl Qwen2LanguageModel {
             "provide exactly one of input_ids or inputs_embeds"
         );
         ensure!(
-            !use_cache || cache.is_some(),
+            !use_cache || state.is_some(),
             "use_cache=true requires mutable cache"
         );
         let embeddings = match inputs_embeds {
@@ -154,7 +154,7 @@ impl Qwen2LanguageModel {
             }
         };
         let (batch, seq_len, _) = embeddings.shape().dims3()?;
-        let past_len = cache.as_ref().and_then(|c| c.seq_len()).unwrap_or(0);
+        let past_len = state.as_ref().map_or(0, |cache| cache.seq_len());
         let total_len = past_len + seq_len;
         let attn_mask = match attention_mask {
             Some(mask) => {
@@ -178,7 +178,7 @@ impl Qwen2LanguageModel {
             rope.ensure_len(total_len)?;
             rope.select(batch, seq_len, Some(&pos_ids))?
         };
-        if let Some(cache) = cache.as_ref() {
+        if let Some(cache) = state.as_ref() {
             ensure!(
                 cache.num_layers() == 0 || cache.num_layers() >= self.blocks.len(),
                 "cache tracks {} layers but model expects {}",
@@ -186,18 +186,18 @@ impl Qwen2LanguageModel {
                 self.blocks.len()
             );
         }
-        if let Some(cache_slot) = cache.as_mut() {
+        if let Some(cache_slot) = state.as_mut() {
             (**cache_slot).ensure_layers(self.blocks.len());
         }
         let mut hidden = embeddings;
         for (idx, block) in self.blocks.iter().enumerate() {
             let (next, present) = {
-                let past_entry = cache.as_ref().and_then(|c| c.get(idx));
+                let past_entry = state.as_ref().and_then(|cache| cache.layer_entry(idx));
                 block.forward(&hidden, &cos, &sin, Some(&attn_mask), past_entry, use_cache)?
             };
             hidden = next;
-            if let (Some(cache_slot), Some(chunk)) = (cache.as_mut(), present) {
-                (**cache_slot).append(idx, chunk)?;
+            if let (Some(cache_slot), Some(chunk)) = (state.as_mut(), present) {
+                (**cache_slot).append_chunk(idx, chunk)?;
             }
         }
         let normed = rms_norm(&hidden, &self.final_norm, self.cfg.rms_norm_eps as f32)

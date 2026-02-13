@@ -4,6 +4,9 @@ use candle_nn::{
     VarBuilder,
     ops::{rms_norm, softmax},
 };
+use deepseek_ocr_core::attention::{
+    collect_cache_chunk_views, output_from_cache_chunks, scores_from_cache_chunks,
+};
 use deepseek_ocr_core::cache::{KvCacheChunk, KvCacheEntry};
 use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 
@@ -153,7 +156,7 @@ impl Qwen2Attention {
             .forward(hidden_states)?
             .reshape((batch, seq_len, self.num_heads, self.head_dim))?
             .permute((0, 2, 1, 3))?;
-        let mut k = self
+        let k = self
             .k_proj
             .forward(hidden_states)?
             .reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?
@@ -163,38 +166,59 @@ impl Qwen2Attention {
             .forward(hidden_states)?
             .reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?
             .permute((0, 2, 1, 3))?;
-        let (q, k_rot) = apply_rope(&q, &k, cos, sin, self.rope_dim)?;
-        k = k_rot;
-        let k_t = k.transpose(2, 3)?;
+        let (q, k) = apply_rope(&q, &k, cos, sin, self.rope_dim)?;
+        let k = k.contiguous()?;
+        let v = v.contiguous()?;
+        let k_t = k.transpose(2, 3)?.contiguous()?;
         let chunk = KvCacheChunk::new(k_t.clone(), v.clone())?;
-        let mut key_total = chunk.key_t.clone();
-        let mut value_total = chunk.value.clone();
-        if let Some(entry) = past {
-            let past_k = entry.key_view()?;
-            let past_v = entry.value_view()?;
-            key_total = Tensor::cat(&[past_k, key_total], 3)?;
-            value_total = Tensor::cat(&[past_v, value_total], 2)?;
-        }
         let present = if use_cache { Some(chunk) } else { None };
-        let k_seq = key_total.transpose(2, 3)?;
-        let k_seq = repeat_kv(&k_seq, self.num_heads / self.num_kv_heads)?;
-        let v_full = repeat_kv(&value_total, self.num_heads / self.num_kv_heads)?;
-        let (_, _, total_len, _) = k_seq.shape().dims4()?;
-        let q_flat = make_contiguous(
-            q.reshape((batch * self.num_heads, seq_len, self.head_dim))?,
-            force_contig,
-        )?;
-        // Accelerate backend (via `metal`/`accelerate` features) requires contiguous
-        // RHS tensors in batched matmuls, so only force when running on CPU/Accelerate.
-        let k_tiled = make_contiguous(
-            k_seq
-                .transpose(2, 3)?
-                .reshape((batch * self.num_heads, self.head_dim, total_len))?,
-            force_contig,
-        )?;
-        let compute_dtype = compute_dtype_for(&q_flat);
-        let mut scores =
-            maybe_cast(&q_flat, compute_dtype)?.matmul(&maybe_cast(&k_tiled, compute_dtype)?)?;
+
+        let repeats = self.num_heads / self.num_kv_heads;
+        let cache_chunks = if let Some(entry) = past {
+            Some(collect_cache_chunk_views(
+                entry,
+                batch,
+                self.num_kv_heads,
+                self.head_dim,
+                self.head_dim,
+            )?)
+        } else {
+            None
+        };
+        let past_len = cache_chunks.as_ref().map_or(0, |chunks| chunks.total_len);
+        let total_len = past_len + seq_len;
+
+        let q = make_contiguous(q.contiguous()?, force_contig)?;
+        let q_dtype = q.dtype();
+        let compute_dtype = compute_dtype_for(&q);
+        let q = maybe_cast(&q, compute_dtype)?;
+
+        let k_new = make_contiguous(repeat_kv(&k, repeats)?.transpose(2, 3)?, force_contig)?;
+        let k_new = maybe_cast(&k_new, compute_dtype)?;
+        let v_new = make_contiguous(repeat_kv(&v, repeats)?, force_contig)?;
+        let v_new = maybe_cast(&v_new, compute_dtype)?;
+
+        let mut expanded_cache_keys = Vec::new();
+        let mut expanded_cache_values = Vec::new();
+        if let Some(cache) = cache_chunks.as_ref() {
+            expanded_cache_keys.reserve(cache.keys.len());
+            expanded_cache_values.reserve(cache.values.len());
+            for key_t in &cache.keys {
+                let key_seq = key_t.transpose(2, 3)?;
+                let key_t = make_contiguous(repeat_kv(&key_seq, repeats)?.transpose(2, 3)?, force_contig)?;
+                expanded_cache_keys.push(maybe_cast(&key_t, compute_dtype)?);
+            }
+            for value in &cache.values {
+                let value = make_contiguous(repeat_kv(value, repeats)?, force_contig)?;
+                expanded_cache_values.push(maybe_cast(&value, compute_dtype)?);
+            }
+        }
+
+        let mut scores = if expanded_cache_keys.is_empty() {
+            q.matmul(&k_new)?
+        } else {
+            scores_from_cache_chunks(&q, &expanded_cache_keys, &k_new)?
+        };
         let scale = 1.0f64 / (self.head_dim as f64).sqrt();
         let scale_tensor =
             Tensor::full(scale as f32, (), scores.device())?.to_dtype(compute_dtype)?;
@@ -202,21 +226,20 @@ impl Qwen2Attention {
         if let Some(mask) = attention_mask {
             let expanded = mask
                 .expand((batch, self.num_heads, seq_len, total_len))?
-                .reshape((batch * self.num_heads, seq_len, total_len))?;
+                .contiguous()?;
             let expanded = maybe_cast(&expanded, compute_dtype)?;
             scores = scores.add(&expanded)?;
         }
         let probs = softmax(&scores, D::Minus1)?;
-        let v_flat = make_contiguous(
-            v_full.reshape((batch * self.num_heads, total_len, self.head_dim))?,
-            force_contig,
-        )?;
-        let ctx = into_dtype_if_needed(
-            probs.matmul(&maybe_cast(&v_flat, compute_dtype)?)?,
-            q_flat.dtype(),
-        )?;
+
+        let ctx = if expanded_cache_values.is_empty() {
+            probs.matmul(&v_new)?
+        } else {
+            output_from_cache_chunks(&probs, &expanded_cache_values, &v_new, past_len, seq_len)?
+        };
+        let ctx = into_dtype_if_needed(ctx, q_dtype)?;
         let ctx = ctx
-            .reshape((batch, self.num_heads, seq_len, self.head_dim))?
+            .contiguous()?
             .transpose(1, 2)?
             .reshape((batch, seq_len, self.num_heads * self.head_dim))?;
         let output = self.o_proj.forward(&ctx)?;

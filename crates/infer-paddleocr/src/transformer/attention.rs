@@ -3,6 +3,9 @@ use candle_core::{DType, Device, IndexOp, Tensor, shape::D};
 #[cfg(feature = "flash-attn")]
 use candle_flash_attn::flash_attn;
 use candle_nn::ops::softmax;
+use deepseek_ocr_core::attention::{
+    collect_cache_chunk_views, output_from_cache_chunks, scores_from_cache_chunks,
+};
 
 use crate::config::PaddleOcrVlConfig;
 
@@ -101,34 +104,24 @@ pub fn attention_forward(
     let mut k = repeat_kv(&k, repeats)?;
     let mut v = repeat_kv(&v, repeats)?;
 
-    let mut cache_key_t_view: Option<Tensor> = None;
-    let mut cache_value_view: Option<Tensor> = None;
-    let past_len = if let Some(entry) = past_key_value {
-        let key_view = entry.key_view()?;
-        let value_view = entry.value_view()?;
-        validate_cache_shapes(cfg, &key_view, &value_view, batch, head_dim)?;
-        cache_key_t_view = Some(key_view);
-        cache_value_view = Some(value_view);
-        entry.seq_len()
+    let cache_chunks = if let Some(entry) = past_key_value {
+        Some(collect_cache_chunk_views(
+            entry, batch, num_heads, head_dim, head_dim,
+        )?)
     } else {
-        0
+        None
     };
+    let past_len = cache_chunks.as_ref().map_or(0, |chunks| chunks.total_len);
 
     let q = q.contiguous()?;
     k = k.contiguous()?;
     v = v.contiguous()?;
 
     let k_t = k.permute((0, 1, 3, 2))?.contiguous()?;
-    let attn_scores_new = q.matmul(&k_t)?;
-    let attn_scores = if let Some(cache_key) = cache_key_t_view.as_ref() {
-        if past_len > 0 {
-            let cache_scores = q.matmul(&cache_key.contiguous()?)?;
-            Tensor::cat(&[cache_scores, attn_scores_new], D::Minus1)?
-        } else {
-            attn_scores_new
-        }
+    let attn_scores = if let Some(cache) = cache_chunks.as_ref() {
+        scores_from_cache_chunks(&q, &cache.keys, &k_t)?
     } else {
-        attn_scores_new
+        q.matmul(&k_t)?
     };
 
     let scale = (head_dim as f64).sqrt();
@@ -138,19 +131,8 @@ pub fn attention_forward(
     }
     let attn_weights = softmax(&attn_scores, D::Minus1).context("attention softmax failed")?;
 
-    let attn_output = if let Some(cache_value) = cache_value_view.as_ref() {
-        let cache_value = cache_value.contiguous()?;
-        if past_len > 0 {
-            let cached = attn_weights
-                .narrow(D::Minus1, 0, past_len)?
-                .matmul(&cache_value)?;
-            let current = attn_weights
-                .narrow(D::Minus1, past_len, seq_len)?
-                .matmul(&v)?;
-            cached.add(&current)?
-        } else {
-            attn_weights.matmul(&v)?
-        }
+    let attn_output = if let Some(cache) = cache_chunks.as_ref() {
+        output_from_cache_chunks(&attn_weights, &cache.values, &v, past_len, seq_len)?
     } else {
         attn_weights.matmul(&v)?
     };
@@ -234,45 +216,6 @@ fn select_sections(tensor: &Tensor, sections: &[usize]) -> Result<Tensor> {
     );
     let refs: Vec<&Tensor> = segments.iter().collect();
     Ok(Tensor::cat(&refs, D::Minus1)?)
-}
-
-fn validate_cache_shapes(
-    cfg: &PaddleOcrVlConfig,
-    key: &Tensor,
-    value: &Tensor,
-    batch: usize,
-    head_dim: usize,
-) -> Result<()> {
-    let (cache_batch, cache_heads, cache_dim, _) = key.shape().dims4()?;
-    ensure!(
-        cache_batch == batch,
-        "cache batch {} does not match input batch {}",
-        cache_batch,
-        batch
-    );
-    ensure!(
-        cache_heads == cfg.num_attention_heads,
-        "cache heads {} does not match {}",
-        cache_heads,
-        cfg.num_attention_heads
-    );
-    ensure!(
-        cache_dim == head_dim,
-        "cache head dim {} mismatch {}",
-        cache_dim,
-        head_dim
-    );
-    let value_dims = value.shape().dims();
-    ensure!(value_dims.len() == 4, "cache value must be rank 4");
-    ensure!(value_dims[0] == batch, "cache value batch mismatch");
-    ensure!(
-        value_dims[1] == cfg.num_attention_heads,
-        "cache value heads {} mismatch {}",
-        value_dims[1],
-        cfg.num_attention_heads
-    );
-    ensure!(value_dims[3] == head_dim, "cache value dim mismatch");
-    Ok(())
 }
 
 #[allow(unused_variables, clippy::too_many_arguments)]

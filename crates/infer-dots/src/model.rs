@@ -293,14 +293,14 @@ impl OcrEngine for DotsOcrModel {
             embeddings,
             mut context_tokens,
         } = prepared;
-        let mut cache = self.decoder.new_cache();
-        let mut guard = self.decoder.prompt_guard(&mut cache);
+        let mut runtime_state = self.decoder.new_runtime_state();
+        let mut guard = self.decoder.prompt_guard(&mut runtime_state);
         let prefill = self.decoder.forward(
             None,
             Some(&embeddings),
             None,
             None,
-            Some(guard.cache()),
+            Some(guard.state()),
             params.use_cache,
         )?;
         let logits = prefill.logits.get(0)?.get(prompt_len.saturating_sub(1))?;
@@ -341,7 +341,7 @@ impl OcrEngine for DotsOcrModel {
                 Some(&decode_embeddings),
                 None,
                 None,
-                Some(guard.cache()),
+                Some(guard.state()),
                 params.use_cache,
             )?;
             let next_logits = decode.logits.get(0)?.get(0)?;
