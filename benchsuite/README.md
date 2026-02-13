@@ -98,4 +98,12 @@ python -m benchsuite.cli matrix-gate \
   --include-devices cpu \
   --include-precision f32 \
   --limit 1
+
+# 首个 strict mismatch / error 即停止后续执行
+python -m benchsuite.cli matrix-gate \
+  --run smoke_models_gate_failfast_v1 \
+  --include-models deepseek-ocr \
+  --include-devices cpu \
+  --include-precision f32 \
+  --failfast
 ```

@@ -180,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-new-tokens", type=int)
     p.add_argument("--cases", nargs="*")
     p.add_argument("--limit", type=int)
+    p.add_argument("--failfast", action="store_true", help="stop matrix gate at first strict mismatch/error")
     p.add_argument("--runtime-root", type=Path, help="shared runtime root for hf/transformers/cli caches")
     p.set_defaults(func=_run_matrix_gate)
 

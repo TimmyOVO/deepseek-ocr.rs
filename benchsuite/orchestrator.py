@@ -1145,6 +1145,35 @@ class BenchOrchestrator:
         all_results: list[dict[str, Any]] = []
         all_errors: list[dict[str, Any]] = []
         cli_variants: dict[str, Path] = {}
+        failfast = bool(getattr(args, "failfast", False))
+        failfast_trigger: dict[str, Any] | None = None
+
+        def _trigger_failfast(result: dict[str, Any], reason: str) -> bool:
+            nonlocal failfast_trigger
+            if not failfast or failfast_trigger is not None:
+                return False
+
+            failfast_trigger = {
+                "reason": reason,
+                "model": result.get("model"),
+                "case": result.get("case"),
+                "pair": result.get("pair"),
+                "runtime_feature": result.get("runtime_feature"),
+                "strict_status": result.get("strict_status"),
+                "detail": result.get("error")
+                or result.get("earliest_divergence")
+                or result.get("prompt_diff")
+                or "first strict failure",
+            }
+            print(
+                "[matrix][failfast] "
+                f"model={failfast_trigger.get('model')} "
+                f"case={failfast_trigger.get('case')} "
+                f"pair={failfast_trigger.get('pair')} "
+                f"reason={reason}",
+                flush=True,
+            )
+            return True
 
         if args.image is not None and args.prompt is not None:
             case_name = args.case_name or "adhoc"
@@ -1155,6 +1184,9 @@ class BenchOrchestrator:
             case_payloads = []
 
         for model_name in models:
+            if failfast_trigger is not None:
+                break
+
             adapter = get_adapter(model_name)
             suite = getattr(adapter, "suite_name", model_name.replace("-", "_"))
             model_dir = adapter.resolve_model_dir(
@@ -1296,6 +1328,9 @@ class BenchOrchestrator:
             pbar = tqdm(total=total, desc=f"matrix:{model_name}", unit="case") if tqdm is not None else None
 
             for case in local_payloads:
+                if failfast_trigger is not None:
+                    break
+
                 case_name = str(case["case"])
                 image_raw = Path(str(case["image"]))
                 image = image_raw if image_raw.is_absolute() else root / image_raw
@@ -1358,6 +1393,9 @@ class BenchOrchestrator:
                                 pbar.update(1)
 
                 for pair, pair_capabilities in pair_entries:
+                    if failfast_trigger is not None:
+                        break
+
                     pair_name = f"{pair['py_device']}_{pair['py_dtype']}__{pair['runtime_feature']}"
                     pair_label = f"{pair['py_device']}_{pair['py_dtype']}[{pair['runtime_feature']}]"
                     if pbar is None:
@@ -1418,8 +1456,11 @@ class BenchOrchestrator:
                         write_json(compare_output, result)
                         all_results.append(result)
                         all_errors.append(result)
+                        should_stop = _trigger_failfast(result, "strict_error")
                         if pbar is not None:
                             pbar.update(1)
+                        if should_stop:
+                            break
                         continue
 
                     runtime_feature = pair["runtime_feature"]
@@ -1468,8 +1509,11 @@ class BenchOrchestrator:
                         write_json(compare_output, result)
                         all_results.append(result)
                         all_errors.append(result)
+                        should_stop = _trigger_failfast(result, "strict_error")
                         if pbar is not None:
                             pbar.update(1)
+                        if should_stop:
+                            break
                         continue
 
                     if not bool(model_capabilities.get("strict_enabled")):
@@ -1500,6 +1544,7 @@ class BenchOrchestrator:
                         continue
 
                     if reference_metrics is None:
+                        should_stop = False
                         if reference_error:
                             result = {
                                 "run": run,
@@ -1521,6 +1566,7 @@ class BenchOrchestrator:
                             }
                             all_results.append(result)
                             all_errors.append(result)
+                            should_stop = _trigger_failfast(result, "strict_error")
                         else:
                             result = {
                                 "run": run,
@@ -1546,6 +1592,8 @@ class BenchOrchestrator:
                         write_json(compare_output, result)
                         if pbar is not None:
                             pbar.update(1)
+                        if should_stop:
+                            break
                         continue
 
                     strict = self._strict_compare(
@@ -1584,14 +1632,25 @@ class BenchOrchestrator:
                     }
                     write_json(compare_output, result)
                     all_results.append(result)
+                    should_stop = False
                     if not result["all_match"]:
                         all_errors.append(result)
+                        should_stop = _trigger_failfast(result, "strict_mismatch")
 
                     if pbar is not None:
                         pbar.update(1)
 
+                    if should_stop:
+                        break
+
+                if failfast_trigger is not None:
+                    break
+
             if pbar is not None:
                 pbar.close()
+
+            if failfast_trigger is not None:
+                break
 
         report_root = run_root / "matrix"
         report_root.mkdir(parents=True, exist_ok=True)
@@ -1642,6 +1701,9 @@ class BenchOrchestrator:
             "schema_version": 3,
             "run": run,
             "runtime_root": str(runtime.root),
+            "failfast": failfast,
+            "stopped_early": failfast_trigger is not None,
+            "stop_reason": failfast_trigger,
             "include": {
                 "models": models,
                 "devices": include_devices,
@@ -1725,6 +1787,8 @@ class BenchOrchestrator:
             f"run: {run}",
             f"runtime_root: {runtime.root}",
             f"all_match: {summary['all_match']}",
+            f"failfast: {failfast}",
+            f"stopped_early: {summary['stopped_early']}",
             f"strict_compared: {summary['strict_compared']}",
             f"strict_skipped: {summary['strict_skipped']}",
             f"strict_errors: {summary['strict_errors']}",
@@ -1736,10 +1800,14 @@ class BenchOrchestrator:
             "",
             self._format_table(["case", "runtime_feature", "strict", "prompt", "tokens", "detail"], rows),
         ]
+        if failfast_trigger is not None:
+            lines.insert(5, f"stop_reason: {failfast_trigger}")
         report_txt.write_text("\n".join(lines) + "\n")
 
         print("\n=== Matrix Strict Gate ===")
         print(self._format_table(["case", "runtime_feature", "strict", "prompt", "tokens", "detail"], rows))
+        if failfast_trigger is not None:
+            print(f"failfast_stop: {failfast_trigger}")
         print(f"runtime_root: {runtime.root}")
         print(f"summary: {report_json}")
         print(f"report:  {report_txt}")
