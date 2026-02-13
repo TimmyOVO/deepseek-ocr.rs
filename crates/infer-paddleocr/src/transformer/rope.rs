@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow, ensure};
 use candle_core::{DType, Tensor, shape::D};
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 
 use crate::config::PaddleOcrVlConfig;
 
@@ -81,11 +82,7 @@ impl ErnieRotaryEmbedding {
         let (axes, batch, seq_len) = position_ids.shape().dims3()?;
         ensure!(axes == 3, "position ids must have shape [3, batch, seq]");
         let device = position_ids.device();
-        let pos = if position_ids.dtype() == DType::F32 {
-            position_ids.clone()
-        } else {
-            position_ids.to_dtype(DType::F32)?
-        };
+        let pos = to_dtype_if_needed(position_ids, DType::F32)?;
         let pos = pos.reshape((axes, batch, seq_len, 1))?;
         let inv = Tensor::from_vec(
             self.inv_freq.clone(),
@@ -102,6 +99,9 @@ impl ErnieRotaryEmbedding {
         let sin_half = angles.sin()?;
         let cos = Tensor::cat(&[cos_half.clone(), cos_half], D::Minus1)?;
         let sin = Tensor::cat(&[sin_half.clone(), sin_half], D::Minus1)?;
-        Ok((cos.to_dtype(dtype)?, sin.to_dtype(dtype)?))
+        Ok((
+            into_dtype_if_needed(cos, dtype)?,
+            into_dtype_if_needed(sin, dtype)?,
+        ))
     }
 }

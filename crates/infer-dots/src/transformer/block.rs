@@ -5,6 +5,7 @@ use candle_nn::{
     ops::{rms_norm, softmax},
 };
 use deepseek_ocr_core::cache::{KvCacheChunk, KvCacheEntry};
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 
 use crate::{config::DotsOcrTextConfig, quant::QuantLinear, snapshot::SnapshotLinearMap};
 
@@ -210,10 +211,10 @@ impl Qwen2Attention {
             v_full.reshape((batch * self.num_heads, total_len, self.head_dim))?,
             force_contig,
         )?;
-        let mut ctx = probs.matmul(&maybe_cast(&v_flat, compute_dtype)?)?;
-        if compute_dtype != q_flat.dtype() {
-            ctx = ctx.to_dtype(q_flat.dtype())?;
-        }
+        let ctx = into_dtype_if_needed(
+            probs.matmul(&maybe_cast(&v_flat, compute_dtype)?)?,
+            q_flat.dtype(),
+        )?;
         let ctx = ctx
             .reshape((batch, self.num_heads, seq_len, self.head_dim))?
             .transpose(1, 2)?
@@ -294,11 +295,7 @@ fn compute_dtype_for(tensor: &Tensor) -> DType {
 }
 
 fn maybe_cast(tensor: &Tensor, dtype: DType) -> Result<Tensor> {
-    if tensor.dtype() == dtype {
-        Ok(tensor.clone())
-    } else {
-        Ok(tensor.to_dtype(dtype)?)
-    }
+    to_dtype_if_needed(tensor, dtype)
 }
 
 fn apply_rope(
@@ -346,16 +343,8 @@ fn apply_rotary_inner(t: &Tensor, cos: &Tensor, sin: &Tensor, rope_dim: usize) -
         (rot, Some(pass))
     };
     let rotated = rotate_half(&rot_part)?;
-    let cos = if cos.dtype() == rot_part.dtype() {
-        cos.clone()
-    } else {
-        cos.to_dtype(rot_part.dtype())?
-    };
-    let sin = if sin.dtype() == rot_part.dtype() {
-        sin.clone()
-    } else {
-        sin.to_dtype(rot_part.dtype())?
-    };
+    let cos = to_dtype_if_needed(cos, rot_part.dtype())?;
+    let sin = to_dtype_if_needed(sin, rot_part.dtype())?;
     let rot = rot_part
         .broadcast_mul(&cos)?
         .add(&rotated.broadcast_mul(&sin)?)?;

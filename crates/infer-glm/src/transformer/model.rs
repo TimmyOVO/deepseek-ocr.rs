@@ -5,7 +5,7 @@ use candle_core::{DType, Tensor};
 use deepseek_ocr_core::{
     benchmark::Timer,
     cache::{DynamicCache, PromptCacheGuard},
-    tensor::gather_token_embeddings,
+    tensor::{into_dtype_if_needed, to_dtype_if_needed, gather_token_embeddings},
 };
 
 use crate::config::GlmOcrTextConfig;
@@ -107,11 +107,7 @@ impl GlmTextDecoder {
             Some(t) => t.clone(),
             None => {
                 let ids = input_ids.expect("validated input ids");
-                let ids = if ids.dtype() == DType::I64 {
-                    ids.clone()
-                } else {
-                    ids.to_dtype(DType::I64)?
-                };
+                let ids = to_dtype_if_needed(ids, DType::I64)?;
                 gather_token_embeddings(&self.embed_tokens, &ids)?
             }
         };
@@ -223,7 +219,7 @@ fn normalize_position_ids(
                 axes == 3 && b == batch && s == seq_len,
                 "position_ids shape mismatch"
             );
-            Ok(ids.to_dtype(DType::I64)?)
+            to_dtype_if_needed(&ids, DType::I64)
         }
         2 => {
             let (b, s) = ids.shape().dims2()?;
@@ -232,7 +228,7 @@ fn normalize_position_ids(
                 .unsqueeze(0)?
                 .expand((3, batch, seq_len))?
                 .contiguous()?;
-            Ok(expanded.to_dtype(DType::I64)?)
+            into_dtype_if_needed(expanded, DType::I64)
         }
         other => anyhow::bail!("position_ids rank must be 2 or 3, got {other}"),
     }
@@ -240,15 +236,12 @@ fn normalize_position_ids(
 
 fn rms_norm_precise(input: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let dtype = input.dtype();
-    let x = input.to_dtype(DType::F32)?;
+    let x = to_dtype_if_needed(input, DType::F32)?;
     let hidden = x.dim(candle_core::shape::D::Minus1)?;
     let variance = (x.sqr()?.sum_keepdim(candle_core::shape::D::Minus1)? / hidden as f64)?;
     let inv = (variance + eps)?.sqrt()?.recip()?;
     let normed = x.broadcast_mul(&inv)?;
-    let weight = if weight.dtype() == DType::F32 {
-        weight.clone()
-    } else {
-        weight.to_dtype(DType::F32)?
-    };
-    Ok(normed.broadcast_mul(&weight)?.to_dtype(dtype)?)
+    let weight = to_dtype_if_needed(weight, DType::F32)?;
+    let out = normed.broadcast_mul(&weight)?;
+    into_dtype_if_needed(out, dtype)
 }

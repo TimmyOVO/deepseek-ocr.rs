@@ -1,6 +1,7 @@
 use crate::config::DeepseekV2Config;
 use anyhow::{Result, ensure};
 use candle_core::{DType, Device, Tensor};
+use deepseek_ocr_core::tensor::to_dtype_if_needed;
 
 #[cfg(feature = "memlog")]
 use deepseek_ocr_core::memlog;
@@ -131,11 +132,7 @@ impl RopeCache {
                 batch,
                 seq_len
             );
-            let ids_i64 = if ids.dtype() == DType::I64 {
-                ids.clone()
-            } else {
-                ids.to_dtype(DType::I64)?
-            };
+            let ids_i64 = to_dtype_if_needed(ids, DType::I64)?;
             let max_pos = ids_i64
                 .to_device(&Device::Cpu)?
                 .max_all()?

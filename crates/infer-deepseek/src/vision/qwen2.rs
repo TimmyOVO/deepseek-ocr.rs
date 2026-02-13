@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail, ensure};
 use candle_core::{DType, Device, Tensor, shape::D};
 use candle_nn::{VarBuilder, ops::rms_norm};
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 
 use crate::config::{DeepseekOcrConfig, DeepseekV2Config};
 use crate::transformer::block::TransformerBlock;
@@ -236,9 +237,7 @@ impl Qwen2DecoderAsEncoder {
         if !query.device().same_device(device) {
             query = query.to_device(device)?;
         }
-        if query.dtype() != dtype {
-            query = query.to_dtype(dtype)?;
-        }
+        query = into_dtype_if_needed(query, dtype)?;
         Ok(query)
     }
 }
@@ -397,9 +396,7 @@ impl Qwen2VisionEncoder {
         if !token.device().same_device(device) {
             token = token.to_device(device)?;
         }
-        if token.dtype() != dtype {
-            token = token.to_dtype(dtype)?;
-        }
+        token = into_dtype_if_needed(token, dtype)?;
         Ok(token)
     }
 }
@@ -481,23 +478,14 @@ fn linear_forward(layer: &LinearLayer, input: &Tensor) -> Result<Tensor> {
     );
     let leading = dims[..dims.len() - 1].iter().product::<usize>();
     let reshaped = input.reshape((leading, in_dim))?;
-    let weight_t = if layer.weight.dtype() == reshaped.dtype() {
-        layer.weight.transpose(0, 1)?
-    } else {
-        layer.weight.to_dtype(reshaped.dtype())?.transpose(0, 1)?
-    };
+    let weight = to_dtype_if_needed(&layer.weight, reshaped.dtype())?;
+    let weight_t = weight.transpose(0, 1)?;
     let mut output = reshaped.matmul(&weight_t)?;
     if let Some(bias) = &layer.bias {
-        let bias = if bias.dtype() == output.dtype() {
-            bias.reshape((1, out_dim))?
-        } else {
-            bias.to_dtype(output.dtype())?.reshape((1, out_dim))?
-        };
+        let bias = to_dtype_if_needed(bias, output.dtype())?.reshape((1, out_dim))?;
         output = output.broadcast_add(&bias)?;
     }
-    if output.dtype() != input.dtype() {
-        output = output.to_dtype(input.dtype())?;
-    }
+    output = into_dtype_if_needed(output, input.dtype())?;
     output
         .reshape(
             dims[..dims.len() - 1]
@@ -563,11 +551,7 @@ pub fn build_custom_attention_mask(token_type_ids: &Tensor, dtype: DType) -> Res
 
     let mask = Tensor::from_vec(mask, (batch, seq, seq), token_type_ids.device())?;
     let mask = mask.unsqueeze(1)?;
-    if mask.dtype() == dtype {
-        Ok(mask)
-    } else {
-        Ok(mask.to_dtype(dtype)?)
-    }
+    to_dtype_if_needed(&mask, dtype)
 }
 
 fn build_rope_tables(

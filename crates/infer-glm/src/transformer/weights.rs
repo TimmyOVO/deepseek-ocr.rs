@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use candle_core::Tensor;
 use candle_nn::VarBuilder;
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 
 #[derive(Debug, Clone)]
 pub struct LinearWeights {
@@ -44,27 +45,15 @@ impl LinearWeights {
         // Match HF eager path for numerically-sensitive parity:
         // run linear matmul + bias accumulation in fp32, then cast back.
         let out_dtype = input.dtype();
-        let input_f32 = if out_dtype == candle_core::DType::F32 {
-            input.clone()
-        } else {
-            input.to_dtype(candle_core::DType::F32)?
-        };
+        let input_f32 = to_dtype_if_needed(input, candle_core::DType::F32)?;
         let mut weight_t = self.weight.transpose(0, 1)?;
-        if weight_t.dtype() != candle_core::DType::F32 {
-            weight_t = weight_t.to_dtype(candle_core::DType::F32)?;
-        }
+        weight_t = into_dtype_if_needed(weight_t, candle_core::DType::F32)?;
         let mut out = input_f32.matmul(&weight_t)?;
         if let Some(bias) = &self.bias {
-            let bias = if bias.dtype() == candle_core::DType::F32 {
-                bias.clone()
-            } else {
-                bias.to_dtype(candle_core::DType::F32)?
-            };
+            let bias = to_dtype_if_needed(bias, candle_core::DType::F32)?;
             out = out.broadcast_add(&bias.reshape((1, self.out_dim))?)?;
         }
-        if out_dtype != candle_core::DType::F32 {
-            out = out.to_dtype(out_dtype)?;
-        }
+        out = into_dtype_if_needed(out, out_dtype)?;
         ensure!(
             out.shape().dims() == [rows, self.out_dim],
             "linear output shape mismatch"

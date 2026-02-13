@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Module, Tensor, shape::D};
 use candle_nn::{Linear, VarBuilder, ops::softmax};
-use deepseek_ocr_core::tensor::gather_token_embeddings;
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed, gather_token_embeddings};
 
 use super::SiglipImagePatches;
 use crate::{
@@ -61,7 +61,7 @@ impl SiglipVisionModel {
             interpolate_pos_encoding,
             device,
         )?;
-        let compute = embeddings.to_dtype(self.compute_dtype)?;
+        let compute = to_dtype_if_needed(&embeddings, self.compute_dtype)?;
         let hidden = self.encoder.forward(
             &compute,
             patches.grid_thw,
@@ -71,7 +71,7 @@ impl SiglipVisionModel {
             device,
         )?;
         let normalized = self.post_layernorm.forward(&hidden)?;
-        Ok(normalized.to_dtype(patches.patches.dtype())?)
+        into_dtype_if_needed(normalized, patches.patches.dtype())
     }
 
     pub fn forward_with_states(
@@ -88,7 +88,7 @@ impl SiglipVisionModel {
             interpolate_pos_encoding,
             device,
         )?;
-        let compute = embeddings.to_dtype(self.compute_dtype)?;
+        let compute = to_dtype_if_needed(&embeddings, self.compute_dtype)?;
         let (hidden, states) = self.encoder.forward_with_states(
             &compute,
             patches.grid_thw,
@@ -100,7 +100,8 @@ impl SiglipVisionModel {
         let normalized = self
             .post_layernorm
             .forward(&hidden)?
-            .to_dtype(patches.patches.dtype())?;
+            ;
+        let normalized = into_dtype_if_needed(normalized, patches.patches.dtype())?;
         let squeezed = Self::squeeze_states(states, patches.patches.dtype())?;
         Ok((normalized, squeezed))
     }
@@ -152,7 +153,7 @@ impl SiglipVisionModel {
         use_rope: bool,
         device: &Device,
     ) -> Result<Vec<Tensor>> {
-        let compute = hidden.to_dtype(self.compute_dtype)?;
+        let compute = to_dtype_if_needed(hidden, self.compute_dtype)?;
         let (_, states) = self.encoder.forward_with_states(
             &compute,
             patches.grid_thw,
@@ -232,16 +233,8 @@ impl SiglipEmbeddings {
                 compute_dtype
             );
         }
-        let weight = if weight.dtype() != compute_dtype {
-            weight.to_dtype(compute_dtype)?
-        } else {
-            weight
-        };
-        let bias = if bias.dtype() != compute_dtype {
-            bias.to_dtype(compute_dtype)?
-        } else {
-            bias
-        };
+        let weight = into_dtype_if_needed(weight, compute_dtype)?;
+        let bias = into_dtype_if_needed(bias, compute_dtype)?;
         let reshaped = weight.reshape((cfg.hidden_size, patch_dim))?;
         let patch_linear = Linear::new(reshaped, Some(bias));
         let packing_position_embedding = vb
@@ -287,18 +280,21 @@ impl SiglipEmbeddings {
         let patch_dim = self.channels * self.patch_size * self.patch_size;
         let flattened = patches
             .reshape((num_patches, patch_dim))?
-            .to_dtype(self.compute_dtype)?;
+            ;
+        let flattened = into_dtype_if_needed(flattened, self.compute_dtype)?;
         let embeddings = self.patch_linear.forward(&flattened)?;
 
         let embeddings = if interpolate_pos_encoding {
             let pos = self
                 .interpolate_pos_encoding(grid, device)?
-                .to_dtype(embeddings.dtype())?;
+                ;
+            let pos = into_dtype_if_needed(pos, embeddings.dtype())?;
             embeddings.add(&pos)?
         } else {
             let pos = self
                 .gather_packing_embeddings(position_ids, num_patches, device)?
-                .to_dtype(embeddings.dtype())?;
+                ;
+            let pos = into_dtype_if_needed(pos, embeddings.dtype())?;
             embeddings.add(&pos)?
         };
 
@@ -512,11 +508,7 @@ impl SiglipRotaryEmbedding {
             }
         }
         let table = Tensor::from_vec(data, (size, cols), device)?;
-        if table.dtype() == self.dtype {
-            Ok(table)
-        } else {
-            Ok(table.to_dtype(self.dtype)?)
-        }
+        into_dtype_if_needed(table, self.dtype)
     }
 
     fn freq_len(&self) -> usize {
@@ -677,11 +669,13 @@ impl SiglipAttention {
         let (q, k) = if let Some((cos, sin)) = rope {
             let cos = cos
                 .reshape((1, 1, seq_len, self.head_dim))?
-                .to_dtype(q.dtype())?
+                ;
+            let cos = into_dtype_if_needed(cos, q.dtype())?
                 .expand((batch, self.num_heads, seq_len, self.head_dim))?;
             let sin = sin
                 .reshape((1, 1, seq_len, self.head_dim))?
-                .to_dtype(q.dtype())?
+                ;
+            let sin = into_dtype_if_needed(sin, q.dtype())?
                 .expand((batch, self.num_heads, seq_len, self.head_dim))?;
             let q_rot = q.mul(&cos)?.add(&rotate_half_local(&q)?.mul(&sin)?)?;
             let k_rot = k.mul(&cos)?.add(&rotate_half_local(&k)?.mul(&sin)?)?;
@@ -701,9 +695,9 @@ impl SiglipAttention {
             .reshape((batch * self.num_heads, seq_len, self.head_dim))?;
 
         let scale = (self.head_dim as f64).sqrt() as f32;
-        let q = q.to_dtype(self.compute_dtype)?;
-        let k = k.to_dtype(self.compute_dtype)?;
-        let v = v.to_dtype(self.compute_dtype)?;
+        let q = into_dtype_if_needed(q, self.compute_dtype)?;
+        let k = into_dtype_if_needed(k, self.compute_dtype)?;
+        let v = into_dtype_if_needed(v, self.compute_dtype)?;
 
         let attn_scores = q.matmul(&k.transpose(1, 2)?)?;
         let scaling =
@@ -718,7 +712,8 @@ impl SiglipAttention {
             .transpose(1, 2)?
             .contiguous()?
             .reshape((batch, seq_len, hidden_size))?
-            .to_dtype(hidden.dtype())?;
+            ;
+        let context = into_dtype_if_needed(context, hidden.dtype())?;
         self.out_proj.forward(&context)
     }
 }
@@ -895,29 +890,18 @@ impl VisionLinear {
         } else {
             dims[..dims.len() - 1].iter().product()
         };
-        let cast = if input.dtype() == self.compute_dtype {
-            input.clone()
-        } else {
-            input.to_dtype(self.compute_dtype)?
-        };
+        let cast = to_dtype_if_needed(input, self.compute_dtype)?;
         let reshaped = cast.reshape((outer, self.weights.in_dim))?;
         let mut out = self.weights.matmul_2d(&reshaped)?;
         if let Some(bias) = &self.weights.bias {
-            let bias = if bias.dtype() == self.compute_dtype {
-                bias.clone()
-            } else {
-                bias.to_dtype(self.compute_dtype)?
-            };
+            let bias = to_dtype_if_needed(bias, self.compute_dtype)?;
             out = out.broadcast_add(&bias.reshape((1, self.weights.out_dim))?)?;
         }
         let mut new_dims = dims;
         let last_idx = new_dims.len() - 1;
         new_dims[last_idx] = self.weights.out_dim;
-        let mut restored = out.reshape(new_dims)?;
-        if restored.dtype() != input.dtype() {
-            restored = restored.to_dtype(input.dtype())?;
-        }
-        Ok(restored)
+        let restored = out.reshape(new_dims)?;
+        into_dtype_if_needed(restored, input.dtype())
     }
 }
 
@@ -948,11 +932,7 @@ impl PreciseLayerNorm {
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let dtype = input.dtype();
-        let x = if dtype == self.compute_dtype {
-            input.clone()
-        } else {
-            input.to_dtype(self.compute_dtype)?
-        };
+        let x = to_dtype_if_needed(input, self.compute_dtype)?;
         let hidden = x.dim(D::Minus1)?;
         let mean = (x.sum_keepdim(D::Minus1)? / hidden as f64)?;
         let centered = x.broadcast_sub(&mean)?;
@@ -961,7 +941,7 @@ impl PreciseLayerNorm {
         let normed = centered.broadcast_div(&denom)?;
         let scaled = normed.broadcast_mul(&self.weight)?;
         let shifted = scaled.broadcast_add(&self.bias)?;
-        Ok(shifted.to_dtype(dtype)?)
+        into_dtype_if_needed(shifted, dtype)
     }
 }
 

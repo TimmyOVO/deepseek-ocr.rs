@@ -5,7 +5,7 @@ use candle_core::{DType, Device, Tensor, quantized::QMatMul};
 use candle_nn::ops::rms_norm;
 use deepseek_ocr_core::{
     cache::{DynamicCache, PromptCacheGuard},
-    tensor::gather_token_embeddings,
+    tensor::{to_device_if_needed, to_dtype_if_needed, gather_token_embeddings},
 };
 
 use crate::{config::DotsOcrTextConfig, quant::run_quantized_matmul, snapshot::SnapshotLinearMap};
@@ -149,11 +149,7 @@ impl Qwen2LanguageModel {
             Some(t) => t.clone(),
             None => {
                 let ids = input_ids.expect("input_ids validated");
-                let ids = if ids.dtype() == DType::I64 {
-                    ids.clone()
-                } else {
-                    ids.to_dtype(DType::I64)?
-                };
+                let ids = to_dtype_if_needed(ids, DType::I64)?;
                 gather_token_embeddings(&self.token_embedding, &ids)?
             }
         };
@@ -162,11 +158,7 @@ impl Qwen2LanguageModel {
         let total_len = past_len + seq_len;
         let attn_mask = match attention_mask {
             Some(mask) => {
-                if mask.dtype() == embeddings.dtype() {
-                    mask.clone()
-                } else {
-                    mask.to_dtype(embeddings.dtype())?
-                }
+                to_dtype_if_needed(mask, embeddings.dtype())?
             }
             None => build_causal_mask(
                 batch,
@@ -275,8 +267,6 @@ fn default_position_ids(
 }
 
 fn normalize_position_ids(ids: &Tensor, device: &Device) -> Result<Tensor> {
-    if ids.device().location() == device.location() && ids.dtype() == DType::I64 {
-        return Ok(ids.clone());
-    }
-    Ok(ids.to_device(device)?.to_dtype(DType::I64)?)
+    let ids = to_device_if_needed(ids, device)?;
+    to_dtype_if_needed(&ids, DType::I64)
 }

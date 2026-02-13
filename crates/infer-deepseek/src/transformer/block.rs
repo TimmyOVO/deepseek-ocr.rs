@@ -14,6 +14,7 @@ use candle_core::{DType, Device, Tensor, shape::D};
 #[cfg(feature = "flash-attn")]
 use candle_flash_attn::flash_attn;
 use candle_nn::ops::{rms_norm_slow, sigmoid, softmax};
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, into_dtype_vec_if_needed, to_dtype_if_needed};
 
 fn is_low_precision(t: &Tensor) -> bool {
     matches!(t.dtype(), DType::F16 | DType::BF16)
@@ -360,16 +361,18 @@ fn attention_forward_f32_keep(
     let k_new = repeat_kv(&k, repeats)?.contiguous()?;
     let v_new = repeat_kv(&v, repeats)?.contiguous()?;
 
-    let mut cache_key_t_view: Option<Tensor> = None;
-    let mut cache_value_view: Option<Tensor> = None;
+    let mut cache_key_t_chunks: Option<Vec<Tensor>> = None;
+    let mut cache_value_chunks: Option<Vec<Tensor>> = None;
     let past_len = if let Some(cache) = past_key_value {
-        let past_len = cache.seq_len();
-        if past_len > 0 {
-            let key_view = cache.key_view()?.contiguous()?;
-            let value_view = cache.value_view()?.contiguous()?;
-            cache_key_t_view = Some(key_view.to_dtype(DType::F32)?);
-            cache_value_view = Some(value_view.to_dtype(DType::F32)?);
-        }
+        let (keys, values, past_len) = cache_key_value_chunks(
+            cache,
+            batch,
+            cfg.num_attention_heads,
+            kv_head_dim,
+            v_head_dim,
+        )?;
+        cache_key_t_chunks = Some(into_dtype_vec_if_needed(keys, DType::F32)?);
+        cache_value_chunks = Some(into_dtype_vec_if_needed(values, DType::F32)?);
         past_len
     } else {
         0
@@ -378,10 +381,15 @@ fn attention_forward_f32_keep(
     let k_new_t = transpose(&k_new, 2, 3)?;
 
     let scores_new = q.matmul(&k_new_t)?;
-    let attn_scores_mat = if let Some(cache_key_t) = cache_key_t_view.as_ref() {
+    let attn_scores_mat = if let Some(cache_key_t_chunks) = cache_key_t_chunks.as_ref() {
         if past_len > 0 {
-            let scores_past = q.matmul(cache_key_t)?;
-            Tensor::cat(&[scores_past, scores_new], D::Minus1)?
+            let mut score_parts = Vec::with_capacity(cache_key_t_chunks.len() + 1);
+            for cache_key_t in cache_key_t_chunks {
+                score_parts.push(q.matmul(cache_key_t)?);
+            }
+            score_parts.push(scores_new);
+            let score_refs: Vec<&Tensor> = score_parts.iter().collect();
+            Tensor::cat(&score_refs, D::Minus1)?
         } else {
             scores_new
         }
@@ -398,13 +406,34 @@ fn attention_forward_f32_keep(
     }
     let attn_weights = softmax(&attn_scores, D::Minus1).context("attention softmax f32 failed")?;
 
-    let out_f32 = if let Some(cache_value) = cache_value_view.as_ref() {
+    let out_f32 = if let Some(cache_value_chunks) = cache_value_chunks.as_ref() {
         if past_len > 0 {
-            let w_past = attn_weights.narrow(D::Minus1, 0, past_len)?;
             let w_new = attn_weights.narrow(D::Minus1, past_len, seq_len)?;
-            let past_out = w_past.matmul(cache_value)?;
+            let mut offset = 0usize;
+            let mut past_out: Option<Tensor> = None;
+            for cache_value in cache_value_chunks {
+                let chunk_len = cache_value.dim(D::Minus2)?;
+                let w_chunk = attn_weights.narrow(D::Minus1, offset, chunk_len)?;
+                offset += chunk_len;
+                let contrib = w_chunk.matmul(cache_value)?;
+                past_out = Some(if let Some(existing) = past_out {
+                    existing.add(&contrib)?
+                } else {
+                    contrib
+                });
+            }
+            ensure!(
+                offset == past_len,
+                "cache score width {} does not match past_len {}",
+                offset,
+                past_len
+            );
             let new_out = w_new.matmul(&v_new)?;
-            past_out.add(&new_out)?
+            if let Some(past_out) = past_out {
+                past_out.add(&new_out)?
+            } else {
+                new_out
+            }
         } else {
             attn_weights.matmul(&v_new)?
         }
@@ -414,11 +443,8 @@ fn attention_forward_f32_keep(
 
     let present = if use_cache {
         let store_dtype = DType::F32;
-        let (k_store, v_store) = if store_dtype == DType::F32 {
-            (k_new_t.to_dtype(DType::F32)?, v_new.to_dtype(DType::F32)?)
-        } else {
-            (k_new_t.to_dtype(store_dtype)?, v_new.to_dtype(store_dtype)?)
-        };
+        let k_store = to_dtype_if_needed(&k_new_t, store_dtype)?;
+        let v_store = to_dtype_if_needed(&v_new, store_dtype)?;
         Some(KvCacheChunk::new(k_store, v_store)?)
     } else {
         None
@@ -549,18 +575,18 @@ fn attention_forward(
             rope_dim
         );
         let cos = if use_f32_projection {
-            cos.to_dtype(DType::F32)?
+            to_dtype_if_needed(cos, DType::F32)?
         } else {
             cos.clone()
         };
         let sin = if use_f32_projection {
-            sin.to_dtype(DType::F32)?
+            to_dtype_if_needed(sin, DType::F32)?
         } else {
             sin.clone()
         };
         if use_f32_projection {
-            q = q.to_dtype(DType::F32)?;
-            k = k.to_dtype(DType::F32)?;
+            q = into_dtype_if_needed(q, DType::F32)?;
+            k = into_dtype_if_needed(k, DType::F32)?;
         }
         let q_rot = q.narrow(D::Minus1, 0, rope_dim)?;
         let k_rot = k.narrow(D::Minus1, 0, rope_dim)?;
@@ -598,62 +624,26 @@ fn attention_forward(
     let mut k_new = repeat_kv(&k, repeats)?;
     let mut v_new = repeat_kv(&v, repeats)?;
     if use_attn_f32 {
-        v_new = v_new.to_dtype(DType::F32)?;
+        v_new = into_dtype_if_needed(v_new, DType::F32)?;
     }
 
     q = q.contiguous()?;
     k_new = k_new.contiguous()?;
     v_new = v_new.contiguous()?;
 
-    let mut cache_key_t_view: Option<Tensor> = None;
-    let mut cache_value_view: Option<Tensor> = None;
+    let mut cache_key_t_chunks: Option<Vec<Tensor>> = None;
+    let mut cache_value_chunks: Option<Vec<Tensor>> = None;
     let past_len = if let Some(cache) = options.past_key_value {
-        let key_view = cache.key_view()?;
-        let value_view = cache.value_view()?;
-        let (cache_batch, cache_heads, cache_dim, _) = key_view
-            .shape()
-            .dims4()
-            .context("cache key tensor must be 4D")?;
-        ensure!(
-            cache_batch == batch,
-            "cache batch {} does not match current batch {}",
-            cache_batch,
-            batch
-        );
-        ensure!(
-            cache_heads == cfg.num_attention_heads,
-            "cache heads {} does not match attention heads {}",
-            cache_heads,
-            cfg.num_attention_heads
-        );
-        ensure!(
-            cache_dim == kv_head_dim,
-            "cache key head dim {} does not match kv_head_dim {}",
-            cache_dim,
-            kv_head_dim
-        );
-        let value_dims = value_view.shape().dims();
-        ensure!(
-            value_dims[0] == batch,
-            "cache value batch {} does not match current batch {}",
-            value_dims[0],
-            batch
-        );
-        ensure!(
-            value_dims[1] == cfg.num_attention_heads,
-            "cache value heads {} does not match attention heads {}",
-            value_dims[1],
-            cfg.num_attention_heads
-        );
-        ensure!(
-            value_dims[3] == v_head_dim,
-            "cache value head dim {} does not match v_head_dim {}",
-            value_dims[3],
-            v_head_dim
-        );
-        cache_key_t_view = Some(key_view);
-        cache_value_view = Some(value_view);
-        cache.seq_len()
+        let (keys, values, past_len) = cache_key_value_chunks(
+            cache,
+            batch,
+            cfg.num_attention_heads,
+            kv_head_dim,
+            v_head_dim,
+        )?;
+        cache_key_t_chunks = Some(keys);
+        cache_value_chunks = Some(values);
+        past_len
     } else {
         0
     };
@@ -661,57 +651,59 @@ fn attention_forward(
     let k_new_t = transpose(&k_new, 2, 3)?.contiguous()?;
     let attn_scores_mat = if use_attn_f32 {
         // f16->f32: attention score matmul can be extremely sensitive.
-        let q_f32 = q.to_dtype(DType::F32)?;
-        let k_new_t_f32 = k_new_t.to_dtype(DType::F32)?;
-        if let Some(cache_key_t) = cache_key_t_view.as_ref() {
+        let q_f32 = to_dtype_if_needed(&q, DType::F32)?;
+        let k_new_t_f32 = to_dtype_if_needed(&k_new_t, DType::F32)?;
+        if let Some(cache_key_t_chunks) = cache_key_t_chunks.as_ref() {
             let scores_new = q_f32.matmul(&k_new_t_f32)?;
             if past_len > 0 {
-                let cache_key_t_f32 = cache_key_t.contiguous()?.to_dtype(DType::F32)?;
-                let scores_past = q_f32.matmul(&cache_key_t_f32)?;
-                Tensor::cat(&[scores_past, scores_new], D::Minus1)?
+                let mut score_parts = Vec::with_capacity(cache_key_t_chunks.len() + 1);
+                for cache_key_t in cache_key_t_chunks {
+                    let cache_key_t_f32 = to_dtype_if_needed(cache_key_t, DType::F32)?;
+                    score_parts.push(q_f32.matmul(&cache_key_t_f32)?);
+                }
+                score_parts.push(scores_new);
+                let score_refs: Vec<&Tensor> = score_parts.iter().collect();
+                Tensor::cat(&score_refs, D::Minus1)?
             } else {
                 scores_new
             }
         } else {
             q_f32.matmul(&k_new_t_f32)?
         }
-    } else if let Some(cache_key_t) = cache_key_t_view.as_ref() {
-        let k_new_t_f16 = k_new_t.to_dtype(q.dtype())?;
+    } else if let Some(cache_key_t_chunks) = cache_key_t_chunks.as_ref() {
+        let k_new_t_f16 = to_dtype_if_needed(&k_new_t, q.dtype())?;
         let scores_new = q.matmul(&k_new_t_f16)?;
         if past_len > 0 {
-            let cache_key_t = if q.dtype() == DType::F32 {
-                cache_key_t.contiguous()?.to_dtype(DType::F32)?
-            } else {
-                cache_key_t.contiguous()?.to_dtype(q.dtype())?
-            };
-            let scores_past = q.matmul(&cache_key_t)?;
-            Tensor::cat(&[scores_past, scores_new], D::Minus1)?
+            let mut score_parts = Vec::with_capacity(cache_key_t_chunks.len() + 1);
+            for cache_key_t in cache_key_t_chunks {
+                let cache_key_t = to_dtype_if_needed(cache_key_t, q.dtype())?;
+                score_parts.push(q.matmul(&cache_key_t)?);
+            }
+            score_parts.push(scores_new);
+            let score_refs: Vec<&Tensor> = score_parts.iter().collect();
+            Tensor::cat(&score_refs, D::Minus1)?
         } else {
             scores_new
         }
     } else {
-        let k_new_t_f16 = k_new_t.to_dtype(q.dtype())?;
+        let k_new_t_f16 = to_dtype_if_needed(&k_new_t, q.dtype())?;
         q.matmul(&k_new_t_f16)?
     };
 
     let scale = (head_dim as f64).sqrt();
     let mut attn_scores = (attn_scores_mat / scale)?;
     if let Some(bias) = options.additive_attn_bias {
-        let bias = if bias.dtype() != attn_scores.dtype() {
-            bias.to_dtype(attn_scores.dtype())?
-        } else {
-            bias.clone()
-        };
+        let bias = to_dtype_if_needed(bias, attn_scores.dtype())?;
         let bias = bias.broadcast_as(attn_scores.shape().dims())?;
         attn_scores = attn_scores.broadcast_add(&bias)?;
     }
     if use_attn_f32 {
         // Keep attention scores in f32 before softmax to reduce near-tie drift.
-        attn_scores = attn_scores.to_dtype(DType::F32)?;
+        attn_scores = into_dtype_if_needed(attn_scores, DType::F32)?;
     }
     let attn_weights = if use_attn_f32 {
         // Keep softmax in f32 for stability; downstream matmul decides whether to cast.
-        softmax(&attn_scores.to_dtype(DType::F32)?, D::Minus1)
+        softmax(&to_dtype_if_needed(&attn_scores, DType::F32)?, D::Minus1)
             .context("attention softmax failed")?
     } else {
         softmax(&attn_scores, D::Minus1).context("attention softmax failed")?
@@ -719,15 +711,31 @@ fn attention_forward(
 
     // Keep (attn_weights @ values) matmul in f32 when we upcasted softmax.
     let attn_output = if attn_weights.dtype() == DType::F32 && use_attn_f32 {
-        let v_new_f32 = v_new.to_dtype(DType::F32)?;
-        if let Some(cache_value_view) = cache_value_view.as_ref() {
+        let v_new_f32 = to_dtype_if_needed(&v_new, DType::F32)?;
+        if let Some(cache_value_chunks) = cache_value_chunks.as_ref() {
             let accum = if past_len > 0 {
-                let cache_value_f32 = cache_value_view.contiguous()?.to_dtype(DType::F32)?;
-                Some(
-                    attn_weights
-                        .narrow(D::Minus1, 0, past_len)?
-                        .matmul(&cache_value_f32)?,
-                )
+                let mut offset = 0usize;
+                let mut accum: Option<Tensor> = None;
+                for cache_value_chunk in cache_value_chunks {
+                    let chunk_len = cache_value_chunk.dim(D::Minus2)?;
+                    let cache_value_f32 = to_dtype_if_needed(cache_value_chunk, DType::F32)?;
+                    let contrib = attn_weights
+                        .narrow(D::Minus1, offset, chunk_len)?
+                        .matmul(&cache_value_f32)?;
+                    offset += chunk_len;
+                    accum = Some(if let Some(existing) = accum {
+                        existing.add(&contrib)?
+                    } else {
+                        contrib
+                    });
+                }
+                ensure!(
+                    offset == past_len,
+                    "cache score width {} does not match past_len {}",
+                    offset,
+                    past_len
+                );
+                accum
             } else {
                 None
             };
@@ -743,21 +751,31 @@ fn attention_forward(
             attn_weights.matmul(&v_new_f32)?
         }
     } else {
-        let v_new = if v_new.dtype() == attn_weights.dtype() {
-            v_new.clone()
-        } else {
-            v_new.to_dtype(attn_weights.dtype())?
-        };
-        if let Some(cache_value_view) = cache_value_view.as_ref() {
+        let v_new = to_dtype_if_needed(&v_new, attn_weights.dtype())?;
+        if let Some(cache_value_chunks) = cache_value_chunks.as_ref() {
             let accum = if past_len > 0 {
-                let cache_value = cache_value_view
-                    .contiguous()?
-                    .to_dtype(attn_weights.dtype())?;
-                Some(
-                    attn_weights
-                        .narrow(D::Minus1, 0, past_len)?
-                        .matmul(&cache_value)?,
-                )
+                let mut offset = 0usize;
+                let mut accum: Option<Tensor> = None;
+                for cache_value_chunk in cache_value_chunks {
+                    let chunk_len = cache_value_chunk.dim(D::Minus2)?;
+                    let cache_value = to_dtype_if_needed(cache_value_chunk, attn_weights.dtype())?;
+                    let contrib = attn_weights
+                        .narrow(D::Minus1, offset, chunk_len)?
+                        .matmul(&cache_value)?;
+                    offset += chunk_len;
+                    accum = Some(if let Some(existing) = accum {
+                        existing.add(&contrib)?
+                    } else {
+                        contrib
+                    });
+                }
+                ensure!(
+                    offset == past_len,
+                    "cache score width {} does not match past_len {}",
+                    offset,
+                    past_len
+                );
+                accum
             } else {
                 None
             };
@@ -779,11 +797,8 @@ fn attention_forward(
         } else {
             k_new_t.dtype()
         };
-        let (k_store, v_store) = if store_dtype == k_new_t.dtype() {
-            (k_new_t.clone(), v_new.clone())
-        } else {
-            (k_new_t.to_dtype(store_dtype)?, v_new.to_dtype(store_dtype)?)
-        };
+        let k_store = to_dtype_if_needed(&k_new_t, store_dtype)?;
+        let v_store = to_dtype_if_needed(&v_new, store_dtype)?;
         Some(KvCacheChunk::new(k_store, v_store)?)
     } else {
         None
@@ -801,6 +816,83 @@ fn attention_forward(
         apply_linear(&attn_output, &weights.o_proj)?
     };
     Ok((out, present))
+}
+
+fn cache_key_value_chunks(
+    cache: &KvCacheEntry,
+    batch: usize,
+    heads: usize,
+    kv_head_dim: usize,
+    v_head_dim: usize,
+) -> Result<(Vec<Tensor>, Vec<Tensor>, usize)> {
+    let mut keys = Vec::new();
+    let mut values = Vec::new();
+    let mut total_len = 0usize;
+    for chunk in cache.chunks() {
+        let key_view = if chunk.key_t.is_contiguous() {
+            chunk.key_t.clone()
+        } else {
+            chunk.key_t.contiguous()?
+        };
+        let value_view = if chunk.value.is_contiguous() {
+            chunk.value.clone()
+        } else {
+            chunk.value.contiguous()?
+        };
+        let (cache_batch, cache_heads, cache_dim, chunk_len) = key_view
+            .shape()
+            .dims4()
+            .context("cache key tensor must be 4D")?;
+        ensure!(
+            cache_batch == batch,
+            "cache batch {} does not match current batch {}",
+            cache_batch,
+            batch
+        );
+        ensure!(
+            cache_heads == heads,
+            "cache heads {} does not match attention heads {}",
+            cache_heads,
+            heads
+        );
+        ensure!(
+            cache_dim == kv_head_dim,
+            "cache key head dim {} does not match kv_head_dim {}",
+            cache_dim,
+            kv_head_dim
+        );
+
+        let value_dims = value_view.shape().dims();
+        ensure!(
+            value_dims[0] == batch,
+            "cache value batch {} does not match current batch {}",
+            value_dims[0],
+            batch
+        );
+        ensure!(
+            value_dims[1] == heads,
+            "cache value heads {} does not match attention heads {}",
+            value_dims[1],
+            heads
+        );
+        ensure!(
+            value_dims[2] == chunk_len,
+            "cache value seq {} does not match key seq {}",
+            value_dims[2],
+            chunk_len
+        );
+        ensure!(
+            value_dims[3] == v_head_dim,
+            "cache value head dim {} does not match v_head_dim {}",
+            value_dims[3],
+            v_head_dim
+        );
+
+        total_len += chunk_len;
+        keys.push(key_view);
+        values.push(value_view);
+    }
+    Ok((keys, values, total_len))
 }
 
 fn flash_attention_forward(
@@ -987,20 +1079,12 @@ fn apply_linear(input: &Tensor, weights: &LinearWeights) -> Result<Tensor> {
             .weight
             .as_ref()
             .context("float linear weight missing for non-quantized layer")?;
-        let weight = if weight.dtype() != input2d.dtype() {
-            weight.to_dtype(input2d.dtype())?
-        } else {
-            weight.clone()
-        };
+        let weight = to_dtype_if_needed(weight, input2d.dtype())?;
         let weight = weight.contiguous()?;
         input2d.matmul(&transpose(&weight, 0, 1)?)?
     };
     let proj = if let Some(bias) = &weights.bias {
-        let bias = if bias.dtype() != proj.dtype() {
-            bias.to_dtype(proj.dtype())?
-        } else {
-            bias.clone()
-        };
+        let bias = to_dtype_if_needed(bias, proj.dtype())?;
         proj.broadcast_add(&bias.reshape((1, out_dim))?)?
     } else {
         proj
@@ -1071,15 +1155,17 @@ fn apply_linear_f32_then_cast(
         let bias = bias.to_dtype(DType::F32)?;
         proj = proj.broadcast_add(&bias.reshape((1, out_dim))?)?;
     }
-    Ok(proj
+    into_dtype_if_needed(
+        proj
         .reshape(
             dims[..dims.len() - 1]
                 .iter()
                 .copied()
                 .chain(std::iter::once(out_dim))
                 .collect::<Vec<_>>(),
-        )?
-        .to_dtype(out_dtype)?)
+        )?,
+        out_dtype,
+    )
 }
 
 fn apply_linear_f32_keep(input: &Tensor, weights: &LinearWeights) -> Result<Tensor> {
@@ -1100,24 +1186,24 @@ fn apply_linear_f32_keep(input: &Tensor, weights: &LinearWeights) -> Result<Tens
     let input2d = input.reshape((leading, in_dim))?.contiguous()?;
 
     let proj = if let Some(qm) = &weights.qmatmul {
-        run_quantized_matmul(&weights.label, qm, &input2d)?.to_dtype(DType::F32)?
+        into_dtype_if_needed(run_quantized_matmul(&weights.label, qm, &input2d)?, DType::F32)?
     } else {
         let weight = weights
             .weight
             .as_ref()
             .context("float linear weight missing for non-quantized layer")?;
-        let x = input2d.to_dtype(DType::F32)?;
+        let x = to_dtype_if_needed(&input2d, DType::F32)?;
         let w = if let Some(w_f32) = &weights.weight_f32 {
             w_f32.clone()
         } else {
-            weight.to_dtype(DType::F32)?
+            to_dtype_if_needed(weight, DType::F32)?
         };
         let w = w.contiguous()?;
         x.matmul(&transpose(&w, 0, 1)?)?
     };
 
     let proj = if let Some(bias) = &weights.bias {
-        let bias = bias.to_dtype(DType::F32)?;
+        let bias = to_dtype_if_needed(bias, DType::F32)?;
         proj.broadcast_add(&bias.reshape((1, out_dim))?)?
     } else {
         proj
@@ -1434,16 +1520,8 @@ fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, reorder: bool) -> Result<T
             sin.to_dtype(DType::F32)?,
         )
     } else {
-        let cos = if cos.dtype() == out_dtype {
-            cos.clone()
-        } else {
-            cos.to_dtype(out_dtype)?
-        };
-        let sin = if sin.dtype() == out_dtype {
-            sin.clone()
-        } else {
-            sin.to_dtype(out_dtype)?
-        };
+        let cos = to_dtype_if_needed(cos, out_dtype)?;
+        let sin = to_dtype_if_needed(sin, out_dtype)?;
         (x, cos, sin)
     };
 
@@ -1539,11 +1617,7 @@ pub fn build_attention_bias(
             s,
             k_len
         );
-        let mask = if mask.dtype() == dtype {
-            mask.clone()
-        } else {
-            mask.to_dtype(dtype)?
-        };
+        let mask = to_dtype_if_needed(mask, dtype)?;
         let ones = Tensor::full(1f32, (batch, k_len), device)?.to_dtype(dtype)?;
         let inv = ones.sub(&mask)?;
         let inv = inv.reshape((batch, 1, 1, k_len))?;

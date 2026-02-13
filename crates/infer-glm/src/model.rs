@@ -28,7 +28,7 @@ use deepseek_ocr_core::{
     },
     normalize_text,
     sampling::{init_rng, select_token_id},
-    tensor::gather_token_embeddings,
+    tensor::{into_dtype_if_needed, to_dtype_if_needed, gather_token_embeddings},
 };
 
 pub const DEFAULT_WEIGHTS_PATH: &str = "GLM-OCR/model.safetensors";
@@ -332,11 +332,7 @@ impl GlmOcrModel {
             .get(0)?
             .reshape((prompt_tokens.len(), hidden))?
             .contiguous()?;
-        let replacements = if vision_embeds.dtype() == dtype {
-            vision_embeds.clone()
-        } else {
-            vision_embeds.to_dtype(dtype)?
-        };
+        let replacements = to_dtype_if_needed(vision_embeds, dtype)?;
         let replacements = if replacements.device().same_device(device) {
             replacements
         } else {
@@ -404,11 +400,7 @@ impl GlmOcrModel {
             vision_timer.finish(|event| {
                 event.add_field("images", image_batch.image_grid_thw.len() as u64);
             });
-            if vision_tokens.dtype() == self.dtype {
-                vision_tokens
-            } else {
-                vision_tokens.to_dtype(self.dtype)?
-            }
+            into_dtype_if_needed(vision_tokens, self.dtype)?
         };
 
         #[cfg(feature = "trace-logits")]

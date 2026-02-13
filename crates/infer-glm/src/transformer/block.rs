@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use candle_core::Tensor;
+use candle_core::{DType, Tensor};
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 
 use crate::config::GlmOcrTextConfig;
 
@@ -78,15 +79,12 @@ fn mlp_forward(input: &Tensor, mlp: &GlmTextMlpWeights) -> Result<Tensor> {
 
 fn rms_norm_precise(input: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let dtype = input.dtype();
-    let x = input.to_dtype(candle_core::DType::F32)?;
+    let x = to_dtype_if_needed(input, DType::F32)?;
     let hidden = x.dim(candle_core::shape::D::Minus1)?;
     let variance = (x.sqr()?.sum_keepdim(candle_core::shape::D::Minus1)? / hidden as f64)?;
     let inv = (variance + eps)?.sqrt()?.recip()?;
     let normed = x.broadcast_mul(&inv)?;
-    let weight = if weight.dtype() == candle_core::DType::F32 {
-        weight.clone()
-    } else {
-        weight.to_dtype(candle_core::DType::F32)?
-    };
-    Ok(normed.broadcast_mul(&weight)?.to_dtype(dtype)?)
+    let weight = to_dtype_if_needed(weight, DType::F32)?;
+    let out = normed.broadcast_mul(&weight)?;
+    into_dtype_if_needed(out, dtype)
 }

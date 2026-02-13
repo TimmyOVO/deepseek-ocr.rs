@@ -36,6 +36,7 @@ use deepseek_ocr_core::{
         normalize_text,
     },
     sampling::{TokenSelectionParams, init_rng, select_token_id},
+    tensor::{into_dtype_if_needed, to_dtype_if_needed},
 };
 
 #[cfg(feature = "cli-debug")]
@@ -48,19 +49,11 @@ use crate::debug::{
 type ProgressCallback<'a> = Option<&'a dyn Fn(usize, &[i64])>;
 
 fn cast_dtype(tensor: &Tensor, dtype: DType, context_msg: &'static str) -> Result<Tensor> {
-    if tensor.dtype() == dtype {
-        Ok(tensor.clone())
-    } else {
-        tensor.to_dtype(dtype).context(context_msg)
-    }
+    to_dtype_if_needed(tensor, dtype).context(context_msg)
 }
 
 fn cast_dtype_owned(tensor: Tensor, dtype: DType, context_msg: &'static str) -> Result<Tensor> {
-    if tensor.dtype() == dtype {
-        Ok(tensor)
-    } else {
-        tensor.to_dtype(dtype).context(context_msg)
-    }
+    into_dtype_if_needed(tensor, dtype).context(context_msg)
 }
 
 fn select_f32<'a, T>(dtype: DType, native: &'a T, f32: Option<&'a T>) -> &'a T {
@@ -413,20 +406,19 @@ impl ImageProjector {
                 .as_ref()
                 .context("projector float weight missing for non-quantized path")?;
             let weight_t = weight.transpose(0, 1)?;
-            if flat.dtype() != weight_t.dtype() {
-                let x = flat.to_dtype(weight_t.dtype())?;
-                let mut out = x.matmul(&weight_t)?;
-                if out.dtype() != flat.dtype() {
-                    out = out.to_dtype(flat.dtype())?;
-                }
-                out
-            } else if matches!(flat.dtype(), DType::F16 | DType::BF16) {
+            if matches!(flat.dtype(), DType::F16 | DType::BF16) {
                 // Dtype-sensitive path: keep projector matmul in f32 for low-precision inputs.
-                let x = flat.to_dtype(DType::F32)?;
-                let w = weight_t.to_dtype(DType::F32)?;
+                let x = cast_dtype(&flat, DType::F32, "projector f32 input cast failed")?;
+                let w = cast_dtype(&weight_t, DType::F32, "projector f32 weight cast failed")?;
                 x.matmul(&w)?.to_dtype(flat.dtype())?
             } else {
-                flat.matmul(&weight_t)?
+                let x = cast_dtype(
+                    &flat,
+                    weight_t.dtype(),
+                    "projector input dtype cast failed",
+                )?;
+                let out = x.matmul(&weight_t)?;
+                cast_dtype_owned(out, flat.dtype(), "projector output dtype restore failed")?
             }
         };
         if let Some(bias) = &self.bias {
@@ -548,9 +540,7 @@ fn prepare_image_tensor_for_device(
     if !image.device().same_device(device) {
         image = image.to_device(device)?;
     }
-    if image.dtype() != dtype {
-        image = image.to_dtype(dtype)?;
-    }
+    image = cast_dtype_owned(image, dtype, "image tensor dtype cast failed")?;
     Ok(image.contiguous()?)
 }
 

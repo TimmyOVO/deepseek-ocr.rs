@@ -22,7 +22,7 @@ use deepseek_ocr_core::{
         normalize_text,
     },
     sampling::{init_rng, select_token_id},
-    tensor::gather_token_embeddings,
+    tensor::{gather_token_embeddings, to_device_if_needed, to_dtype_if_needed},
 };
 
 pub const DEFAULT_WEIGHTS_PATH: &str = "PaddleOCR-VL/model.safetensors";
@@ -498,11 +498,7 @@ pub fn inject_image_embeddings(
         .shape()
         .dims3()
         .context("embeddings must have shape [batch, seq, hidden]")?;
-    let mask = if mask.dtype() == DType::U8 {
-        mask.clone()
-    } else {
-        mask.to_dtype(DType::U8)?
-    };
+    let mask = to_dtype_if_needed(mask, DType::U8)?;
     ensure!(
         mask.shape().dims() == [batch, seq_len],
         "image mask must have shape [batch, seq]"
@@ -523,9 +519,9 @@ pub fn inject_image_embeddings(
         }
         let replacements = per_batch
             .get(b)
-            .ok_or_else(|| anyhow!("missing image embeddings for batch {b}"))?
-            .to_dtype(row.dtype())?
-            .to_device(row.device())?;
+            .ok_or_else(|| anyhow!("missing image embeddings for batch {b}"))?;
+        let replacements = to_dtype_if_needed(replacements, row.dtype())?;
+        let replacements = to_device_if_needed(&replacements, row.device())?;
         let (rep_tokens, _) = replacements
             .shape()
             .dims2()
@@ -576,22 +572,14 @@ pub fn compute_position_ids(
         image_grids.len() == batch,
         "image grid metadata must track each batch row"
     );
-    let ids = if input_ids.dtype() == DType::I64 {
-        input_ids.clone()
-    } else {
-        input_ids.to_dtype(DType::I64)?
-    };
+    let ids = to_dtype_if_needed(input_ids, DType::I64)?;
     let ids_host = ids.to_vec2::<i64>()?;
     let mask_host = if let Some(mask) = attention_mask {
         ensure!(
             mask.shape().dims() == [batch, seq_len],
             "attention mask must match [batch, seq]"
         );
-        let m = if mask.dtype() == DType::U8 {
-            mask.clone()
-        } else {
-            mask.to_dtype(DType::U8)?
-        };
+        let m = to_dtype_if_needed(mask, DType::U8)?;
         Some(m.to_vec2::<u8>()?)
     } else {
         None

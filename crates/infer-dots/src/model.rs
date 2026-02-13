@@ -13,7 +13,7 @@ use serde::Deserialize;
 use tokenizers::Tokenizer;
 
 use deepseek_ocr_core::sampling::{init_rng, select_token_id};
-use deepseek_ocr_core::tensor::gather_token_embeddings;
+use deepseek_ocr_core::tensor::{to_dtype_if_needed, gather_token_embeddings};
 use deepseek_ocr_core::{
     DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
     normalize_text,
@@ -152,11 +152,7 @@ impl DotsOcrModel {
         }
         // Pre-processing always emits F32 tensors; convert them to the model dtype so
         // downstream convolutions (which may be BF16) can run without dtype mismatches.
-        let vision_input = if pixel_values.dtype() == self.dtype {
-            pixel_values.clone()
-        } else {
-            pixel_values.to_dtype(self.dtype)?
-        };
+        let vision_input = to_dtype_if_needed(pixel_values, self.dtype)?;
         let vision_hidden = self.vision.forward(&vision_input, grids)?;
         let mut outputs = Vec::with_capacity(grids.len());
         let mut offset = 0usize;
@@ -539,11 +535,7 @@ pub fn inject_image_embeddings(
     per_batch: &[Tensor],
 ) -> Result<Tensor> {
     let (batch, seq_len, hidden) = embeddings.shape().dims3()?;
-    let mask = if mask.dtype() == DType::U8 {
-        mask.clone()
-    } else {
-        mask.to_dtype(DType::U8)?
-    };
+    let mask = to_dtype_if_needed(mask, DType::U8)?;
     ensure!(
         mask.shape().dims() == [batch, seq_len],
         "image mask must have shape [batch, seq]"

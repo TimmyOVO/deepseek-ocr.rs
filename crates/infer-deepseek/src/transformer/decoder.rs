@@ -9,6 +9,7 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use candle_core::{DType, Tensor};
+use deepseek_ocr_core::tensor::to_dtype_if_needed;
 use std::{cell::RefCell, sync::Arc};
 
 /// Runs the stacked transformer decoder layers, handling optional KV cache reuse.
@@ -104,11 +105,7 @@ impl TransformerDecoder {
             rope_dim_cfg
         };
         let position_ids_local = if let Some(ids) = position_ids {
-            Some(if ids.dtype() == DType::I64 {
-                ids.clone()
-            } else {
-                ids.to_dtype(DType::I64)?
-            })
+            Some(to_dtype_if_needed(ids, DType::I64)?)
         } else {
             let start = past_len as i64;
             let end = start + q_len as i64;

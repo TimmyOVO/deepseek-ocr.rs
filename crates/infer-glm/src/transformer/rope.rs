@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use candle_core::{DType, Tensor};
+use deepseek_ocr_core::tensor::to_dtype_if_needed;
 
 use crate::config::GlmOcrTextConfig;
 
@@ -45,11 +46,7 @@ impl GlmTextRotaryEmbedding {
     pub fn cos_sin(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor)> {
         let (axes, batch, seq_len) = position_ids.shape().dims3()?;
         ensure!(axes == 3, "position ids must be [3, batch, seq]");
-        let ids = if position_ids.dtype() == DType::I64 {
-            position_ids.clone()
-        } else {
-            position_ids.to_dtype(DType::I64)?
-        };
+        let ids = to_dtype_if_needed(position_ids, DType::I64)?;
         let ids_host = ids.to_vec3::<i64>()?;
         let half = self.inv_freq.len();
         let head_dim = half * 2;

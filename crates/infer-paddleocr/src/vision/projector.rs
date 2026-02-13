@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Tensor, shape::D};
 use candle_nn::VarBuilder;
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 
 use crate::{
     config::PaddleOcrVisionConfig, snapshot::SnapshotLinearMap, transformer::LinearWeights,
@@ -87,17 +88,10 @@ impl SiglipProjector {
         );
         let normed = self.pre_norm.forward(features)?;
         let reshaped = self.reshape_for_merge(&normed, grid)?;
-        let reshaped = if reshaped.dtype() == self.pre_norm.compute_dtype() {
-            reshaped
-        } else {
-            reshaped.to_dtype(self.pre_norm.compute_dtype())?
-        };
+        let reshaped = into_dtype_if_needed(reshaped, self.pre_norm.compute_dtype())?;
         let merged = self.linear1.forward(&reshaped)?;
         let activated = merged.gelu()?;
-        let projected = self
-            .linear2
-            .forward(&activated)?
-            .to_dtype(features.dtype())?;
+        let projected = into_dtype_if_needed(self.linear2.forward(&activated)?, features.dtype())?;
         Ok(ProjectorOutput {
             embeddings: projected,
             grid: (t, h / self.merge_size, w / self.merge_size),
@@ -183,11 +177,7 @@ impl ProjectorLayerNorm {
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let dtype = input.dtype();
-        let x = if dtype == self.compute_dtype {
-            input.clone()
-        } else {
-            input.to_dtype(self.compute_dtype)?
-        };
+        let x = to_dtype_if_needed(input, self.compute_dtype)?;
         let hidden = x.dim(D::Minus1)?;
         let mean = (x.sum_keepdim(D::Minus1)? / hidden as f64)?;
         let centered = x.broadcast_sub(&mean)?;
@@ -196,7 +186,7 @@ impl ProjectorLayerNorm {
         let normed = centered.broadcast_div(&denom)?;
         let scaled = normed.broadcast_mul(&self.weight)?;
         let shifted = scaled.broadcast_add(&self.bias)?;
-        Ok(shifted.to_dtype(dtype)?)
+        into_dtype_if_needed(shifted, dtype)
     }
 
     fn compute_dtype(&self) -> DType {
@@ -227,18 +217,10 @@ impl ProjectorLinear {
     }
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let x = if input.dtype() == self.compute_dtype {
-            input.clone()
-        } else {
-            input.to_dtype(self.compute_dtype)?
-        };
+        let x = to_dtype_if_needed(input, self.compute_dtype)?;
         let mut out = self.weights.matmul_2d(&x)?;
         if let Some(bias) = &self.weights.bias {
-            let bias = if bias.dtype() == self.compute_dtype {
-                bias.clone()
-            } else {
-                bias.to_dtype(self.compute_dtype)?
-            };
+            let bias = to_dtype_if_needed(bias, self.compute_dtype)?;
             out = out.broadcast_add(&bias.reshape((1, self.weights.out_dim))?)?;
         }
         Ok(out)

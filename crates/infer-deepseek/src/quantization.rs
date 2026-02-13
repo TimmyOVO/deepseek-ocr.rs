@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor, quantized::QMatMul};
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 use once_cell::sync::Lazy;
 use tracing::info;
 
@@ -165,21 +166,11 @@ pub fn run_quantized_matmul(_label: &str, qm: &QMatMul, input: &Tensor) -> Resul
     let dtype = input.dtype();
     let device = input.device();
     if device.is_cuda() || device.is_metal() {
-        let mut out = if dtype == DType::F32 {
-            qm.forward(input)?
-        } else {
-            let activations = input.to_dtype(DType::F32)?;
-            qm.forward(&activations)?
-        };
-        if out.dtype() != dtype {
-            out = out.to_dtype(dtype)?;
-        }
-        Ok(out)
+        let activations = to_dtype_if_needed(input, DType::F32)?;
+        let out = qm.forward(&activations)?;
+        into_dtype_if_needed(out, dtype)
     } else {
-        let mut out = qm.forward(input)?;
-        if out.dtype() != dtype {
-            out = out.to_dtype(dtype)?;
-        }
-        Ok(out)
+        let out = qm.forward(input)?;
+        into_dtype_if_needed(out, dtype)
     }
 }

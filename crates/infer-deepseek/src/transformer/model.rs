@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, IndexOp, Tensor, quantized::QMatMul};
 use candle_nn::ops::{rms_norm, rms_norm_slow};
-use deepseek_ocr_core::tensor::gather_token_embeddings;
+use deepseek_ocr_core::tensor::{gather_token_embeddings, to_dtype_if_needed};
 
 use crate::{
     config::DeepseekV2Config,
@@ -114,11 +114,7 @@ impl DeepseekLanguageModel {
 
     /// Lookup token embeddings for the provided input ids.
     pub fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
-        let ids = if input_ids.dtype() == DType::I64 {
-            input_ids.clone()
-        } else {
-            input_ids.to_dtype(DType::I64)?
-        };
+        let ids = to_dtype_if_needed(input_ids, DType::I64)?;
         let mut embeds = gather_token_embeddings(&self.token_embedding, &ids)?;
         if matches!(embeds.dtype(), DType::F16 | DType::BF16) {
             embeds = embeds.to_dtype(DType::F32)?;
@@ -171,11 +167,7 @@ impl DeepseekLanguageModel {
             Some(t) => t.clone(),
             None => {
                 let ids = input_ids.expect("input_ids validity checked above");
-                let ids = if ids.dtype() == DType::I64 {
-                    ids.clone()
-                } else {
-                    ids.to_dtype(DType::I64)?
-                };
+                let ids = to_dtype_if_needed(ids, DType::I64)?;
                 gather_token_embeddings(&self.token_embedding, &ids)?
             }
         };

@@ -6,7 +6,11 @@ use candle_nn::{
     Conv2d, Conv2dConfig, LayerNorm, VarBuilder, conv2d, conv2d_no_bias, layer_norm,
     ops::softmax_last_dim,
 };
-use deepseek_ocr_core::{benchmark::Timer, inference::VisionSettings};
+use deepseek_ocr_core::{
+    benchmark::Timer,
+    inference::VisionSettings,
+    tensor::{into_dtype_if_needed, to_dtype_if_needed},
+};
 use image::{DynamicImage, RgbImage};
 
 use crate::{
@@ -660,25 +664,15 @@ impl VisionPatchEmbed {
         );
 
         let compute_dtype = self.weight.dtype();
-        let mut input = if flatten_patches.dtype() == compute_dtype {
-            flatten_patches.clone()
-        } else {
-            flatten_patches.to_dtype(compute_dtype)?
-        };
+        let mut input = to_dtype_if_needed(flatten_patches, compute_dtype)?;
         input = input.contiguous()?;
 
         let mut weight_t = self.weight.transpose(0, 1)?;
-        if weight_t.dtype() != compute_dtype {
-            weight_t = weight_t.to_dtype(compute_dtype)?;
-        }
+        weight_t = into_dtype_if_needed(weight_t, compute_dtype)?;
 
         let mut out = input.matmul(&weight_t)?;
         if let Some(bias) = &self.bias {
-            let bias = if bias.dtype() == out.dtype() {
-                bias.clone()
-            } else {
-                bias.to_dtype(out.dtype())?
-            };
+            let bias = to_dtype_if_needed(bias, out.dtype())?;
             out = out.broadcast_add(&bias.reshape((1, self.embed_dim))?)?;
         }
         Ok(out)
@@ -825,21 +819,9 @@ impl GlmVisionAttention {
                 DType::F16 | DType::BF16 => DType::F32,
                 d => d,
             };
-            let qh = if qh.dtype() == compute_dtype {
-                qh
-            } else {
-                qh.to_dtype(compute_dtype)?
-            };
-            let kt = if kt.dtype() == compute_dtype {
-                kt
-            } else {
-                kt.to_dtype(compute_dtype)?
-            };
-            let vh = if vh.dtype() == compute_dtype {
-                vh
-            } else {
-                vh.to_dtype(compute_dtype)?
-            };
+            let qh = into_dtype_if_needed(qh, compute_dtype)?;
+            let kt = into_dtype_if_needed(kt, compute_dtype)?;
+            let vh = into_dtype_if_needed(vh, compute_dtype)?;
             let qh = (qh * (1.0f64 / self.scaling.sqrt()))?;
 
             // Softmax is row-wise over keys; chunking queries keeps numerics while
@@ -850,10 +832,7 @@ impl GlmVisionAttention {
                 let q_chunk = qh.narrow(1, q_start, q_chunk_len)?;
                 let scores = q_chunk.matmul(&kt)?;
                 let probs = softmax_last_dim(&scores)?;
-                let mut ctx_chunk = probs.matmul(&vh)?;
-                if ctx_chunk.dtype() != hidden.dtype() {
-                    ctx_chunk = ctx_chunk.to_dtype(hidden.dtype())?;
-                }
+                let ctx_chunk = into_dtype_if_needed(probs.matmul(&vh)?, hidden.dtype())?;
                 ctx_chunks.push(ctx_chunk);
             }
 
@@ -995,16 +974,12 @@ impl VisionPatchMerger {
 
 fn precise_rms_norm_last_dim(input: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let input_dtype = input.dtype();
-    let x = input.to_dtype(DType::F32)?;
+    let x = to_dtype_if_needed(input, DType::F32)?;
     let hidden = x.dim(D::Minus1)?;
     let variance = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden as f64)?;
     let inv = (variance + eps)?.sqrt()?.recip()?;
     let normed = x.broadcast_mul(&inv)?;
-    let weight = if weight.dtype() == DType::F32 {
-        weight.clone()
-    } else {
-        weight.to_dtype(DType::F32)?
-    };
+    let weight = to_dtype_if_needed(weight, DType::F32)?;
     let out = normed.broadcast_mul(&weight)?;
-    Ok(out.to_dtype(input_dtype)?)
+    into_dtype_if_needed(out, input_dtype)
 }

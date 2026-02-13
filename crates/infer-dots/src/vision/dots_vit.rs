@@ -6,6 +6,7 @@ use candle_nn::{
     Conv2d, Conv2dConfig, LayerNorm, VarBuilder, conv2d, conv2d_no_bias, layer_norm,
     ops::{rms_norm, softmax},
 };
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 
 use crate::{config::DotsVisionConfig, quant::QuantLinear, snapshot::SnapshotLinearMap};
 
@@ -525,11 +526,7 @@ fn apply_rotary(q: &Tensor, k: &Tensor, rope: &Tensor) -> Result<(Tensor, Tensor
         rope_dim,
         head_dim
     );
-    let rope = if rope.dtype() == DType::F32 {
-        rope.clone()
-    } else {
-        rope.to_dtype(DType::F32)?
-    };
+    let rope = to_dtype_if_needed(rope, DType::F32)?;
     let cos = rope.cos()?.unsqueeze(1)?;
     let cos = Tensor::cat(&[cos.clone(), cos], 2)?
         .expand((len, heads, head_dim))?
@@ -538,19 +535,14 @@ fn apply_rotary(q: &Tensor, k: &Tensor, rope: &Tensor) -> Result<(Tensor, Tensor
     let sin = Tensor::cat(&[sin.clone(), sin], 2)?
         .expand((len, heads, head_dim))?
         .contiguous()?;
-    let q_base = if q.dtype() == DType::F32 {
-        q.clone()
-    } else {
-        q.to_dtype(DType::F32)?
-    };
-    let k_base = if k.dtype() == DType::F32 {
-        k.clone()
-    } else {
-        k.to_dtype(DType::F32)?
-    };
+    let q_base = to_dtype_if_needed(q, DType::F32)?;
+    let k_base = to_dtype_if_needed(k, DType::F32)?;
     let q_rot = apply_rotary_to(&q_base, &cos, &sin)?;
     let k_rot = apply_rotary_to(&k_base, &cos, &sin)?;
-    Ok((q_rot.to_dtype(q.dtype())?, k_rot.to_dtype(k.dtype())?))
+    Ok((
+        into_dtype_if_needed(q_rot, q.dtype())?,
+        into_dtype_if_needed(k_rot, k.dtype())?,
+    ))
 }
 
 fn apply_rotary_to(input: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
@@ -589,11 +581,7 @@ fn compute_dtype_for(tensor: &Tensor) -> DType {
 }
 
 fn maybe_cast(tensor: &Tensor, dtype: DType) -> Result<Tensor> {
-    if tensor.dtype() == dtype {
-        Ok(tensor.clone())
-    } else {
-        Ok(tensor.to_dtype(dtype)?)
-    }
+    to_dtype_if_needed(tensor, dtype)
 }
 
 impl DotsSwiGLUFFN {

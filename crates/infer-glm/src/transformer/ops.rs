@@ -1,5 +1,6 @@
 use anyhow::{Result, ensure};
 use candle_core::{DType, Tensor, shape::D};
+use deepseek_ocr_core::tensor::to_dtype_if_needed;
 
 pub fn rotate_half_last_dim(tensor: &Tensor) -> Result<Tensor> {
     let mut dims = tensor.shape().dims().to_vec();
@@ -46,9 +47,5 @@ pub fn compute_dtype_for(tensor: &Tensor) -> DType {
 }
 
 pub fn maybe_cast(tensor: &Tensor, dtype: DType) -> Result<Tensor> {
-    if tensor.dtype() == dtype {
-        Ok(tensor.clone())
-    } else {
-        Ok(tensor.to_dtype(dtype)?)
-    }
+    to_dtype_if_needed(tensor, dtype)
 }

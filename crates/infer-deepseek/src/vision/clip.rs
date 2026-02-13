@@ -4,6 +4,7 @@ use candle_nn::{
     Conv2d, Conv2dConfig, LayerNorm, VarBuilder, conv2d_no_bias, layer_norm,
     ops::{sigmoid, softmax},
 };
+use deepseek_ocr_core::tensor::to_dtype_if_needed;
 
 use crate::config::{DeepseekOcrConfig, VisionBackboneConfig};
 use crate::transformer::weights::{LinearWeights, qualified_name};
@@ -175,11 +176,7 @@ impl ClipEmbeddings {
                     .patch_embedding
                     .as_ref()
                     .context("patch_embeds missing and patch_embedding weights unavailable")?;
-                let input = if pixel_values.dtype() == conv.weight().dtype() {
-                    pixel_values.clone()
-                } else {
-                    pixel_values.to_dtype(conv.weight().dtype())?
-                };
+                let input = to_dtype_if_needed(pixel_values, conv.weight().dtype())?;
                 conv.forward(&input)?
             }
         };
@@ -205,22 +202,14 @@ impl ClipEmbeddings {
             .class_embedding
             .reshape((1, 1, embed_dim))?
             .expand((batch, 1, embed_dim))?;
-        let class_embedding = if class_embedding.dtype() == patches.dtype() {
-            class_embedding
-        } else {
-            class_embedding.to_dtype(patches.dtype())?
-        };
+        let class_embedding = to_dtype_if_needed(&class_embedding, patches.dtype())?;
         let tokens = Tensor::cat(&[class_embedding, patches], 1)?;
 
         let base_pos = self
             .position_embedding
             .reshape((1, self.seq_length + 1, embed_dim))?;
         let pos = adapt_position_embedding(&base_pos, num_patches + 1)?;
-        let pos = if pos.dtype() == tokens.dtype() {
-            pos
-        } else {
-            pos.to_dtype(tokens.dtype())?
-        };
+        let pos = to_dtype_if_needed(&pos, tokens.dtype())?;
         let tokens = tokens
             .add(&pos.expand((batch, num_patches + 1, embed_dim))?)?
             .contiguous()?;
@@ -514,28 +503,16 @@ fn adapt_position_embedding(table: &Tensor, target_tokens: usize) -> Result<Tens
         .unsqueeze(0)?
         .contiguous()
         .context("clip positional grid reshape not contiguous")?;
-    let float_grid = if patch_grid.dtype() == DType::F32 {
-        patch_grid.clone()
-    } else {
-        patch_grid.to_dtype(DType::F32)?
-    };
+    let float_grid = to_dtype_if_needed(&patch_grid, DType::F32)?;
     let resized = crate::vision::sam::bicubic_resize_antialiased(&float_grid, tgt_size, tgt_size)?;
-    let resized = if resized.dtype() == patch_grid.dtype() {
-        resized
-    } else {
-        resized.to_dtype(patch_grid.dtype())?
-    };
+    let resized = to_dtype_if_needed(&resized, patch_grid.dtype())?;
     let resized_tokens = resized
         .squeeze(0)?
         .permute((1, 2, 0))?
         .reshape((tgt_patches, hidden))?
         .contiguous()
         .context("clip positional resized tokens not contiguous")?;
-    let cls_token = if cls_token.dtype() == resized_tokens.dtype() {
-        cls_token
-    } else {
-        cls_token.to_dtype(resized_tokens.dtype())?
-    };
+    let cls_token = to_dtype_if_needed(&cls_token, resized_tokens.dtype())?;
     let cls_token = cls_token.reshape((1, hidden))?;
     let combined = Tensor::cat(&[cls_token, resized_tokens], 0)?;
     combined

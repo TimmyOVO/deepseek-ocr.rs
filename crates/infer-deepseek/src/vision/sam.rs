@@ -4,7 +4,16 @@ use candle_core::{DType, Device, Module, Tensor, shape::D};
 use candle_nn::{
     Conv2d, Conv2dConfig, LayerNorm, VarBuilder, conv2d, conv2d_no_bias, layer_norm, ops::softmax,
 };
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 use std::path::Path;
+
+fn to_dtype_if_needed_candle(tensor: &Tensor, dtype: DType) -> candle_core::Result<Tensor> {
+    to_dtype_if_needed(tensor, dtype).map_err(|err| candle_core::Error::Msg(err.to_string()))
+}
+
+fn into_dtype_if_needed_candle(tensor: Tensor, dtype: DType) -> candle_core::Result<Tensor> {
+    into_dtype_if_needed(tensor, dtype).map_err(|err| candle_core::Error::Msg(err.to_string()))
+}
 
 /// Parameter bundle for the SAM ViT backbone.
 #[derive(Debug, Clone)]
@@ -229,11 +238,7 @@ impl SamBackbone {
             self.params.embed_dim,
         )?;
 
-        let input_f32 = if input.dtype() == DType::F32 {
-            input.clone()
-        } else {
-            input.to_dtype(DType::F32)?
-        };
+        let input_f32 = to_dtype_if_needed(input, DType::F32)?;
 
         let patch = self
             .patch_embed
@@ -260,9 +265,7 @@ impl SamBackbone {
             if pos.shape().dims4()?.0 == 1 && batch > 1 {
                 pos = pos.expand((batch, tokens_h, tokens_w, channels))?;
             }
-            if pos.dtype() != x.dtype() {
-                pos = pos.to_dtype(x.dtype())?;
-            }
+            pos = into_dtype_if_needed(pos, x.dtype())?;
             x = x.add(&pos)?;
         }
 
@@ -310,11 +313,7 @@ impl SamBackbone {
             self.params.embed_dim,
         )?;
 
-        let input_f32 = if input.dtype() == DType::F32 {
-            input.clone()
-        } else {
-            input.to_dtype(DType::F32)?
-        };
+        let input_f32 = to_dtype_if_needed(input, DType::F32)?;
 
         let patch = self
             .patch_embed
@@ -335,9 +334,7 @@ impl SamBackbone {
                 if pos.shape().dims4()?.0 == 1 && batch > 1 {
                     pos = pos.expand((batch, tokens_h, tokens_w, channels))?;
                 }
-                if pos.dtype() != x.dtype() {
-                    pos = pos.to_dtype(x.dtype())?;
-                }
+                pos = into_dtype_if_needed(pos, x.dtype())?;
                 x = x.add(&pos)?;
                 pos_trace = Some(x.clone());
             }
@@ -446,11 +443,7 @@ impl PatchEmbed {
 
     fn forward(&self, input: &Tensor) -> candle_core::Result<Tensor> {
         let weight_dtype = self.conv.weight().dtype();
-        let input = if input.dtype() == weight_dtype {
-            input.clone()
-        } else {
-            input.to_dtype(weight_dtype)?
-        };
+        let input = to_dtype_if_needed_candle(input, weight_dtype)?;
         self.conv.forward(&input)
     }
 }
@@ -502,19 +495,11 @@ impl SamNeck {
 
     fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         let weight_dtype = self.conv1.weight().dtype();
-        let x = if x.dtype() == weight_dtype {
-            x.clone()
-        } else {
-            x.to_dtype(weight_dtype)?
-        };
+        let x = to_dtype_if_needed_candle(x, weight_dtype)?;
         let x = self.conv1.forward(&x)?;
         let x = self.norm1.forward(&x)?;
         let weight_dtype = self.conv2.weight().dtype();
-        let x = if x.dtype() == weight_dtype {
-            x
-        } else {
-            x.to_dtype(weight_dtype)?
-        };
+        let x = into_dtype_if_needed_candle(x, weight_dtype)?;
         let x = self.conv2.forward(&x)?;
         self.norm2.forward(&x)
     }
@@ -556,9 +541,7 @@ impl SamDownsample {
             )));
         }
         let weight_dtype = self.net2.weight().dtype();
-        if x.dtype() != weight_dtype {
-            x = x.to_dtype(weight_dtype)?;
-        }
+        x = into_dtype_if_needed_candle(x, weight_dtype)?;
         x = self.net2.forward(&x)?;
         let (_, _, h, w) = x.shape().dims4()?;
         if h % 2 != 0 || w % 2 != 0 {
@@ -568,9 +551,7 @@ impl SamDownsample {
             )));
         }
         let weight_dtype = self.net3.weight().dtype();
-        if x.dtype() != weight_dtype {
-            x = x.to_dtype(weight_dtype)?;
-        }
+        x = into_dtype_if_needed_candle(x, weight_dtype)?;
         self.net3.forward(&x)
     }
 }
@@ -672,23 +653,14 @@ fn linear_forward(layer: &LinearLayer, input: &Tensor) -> Result<Tensor> {
     );
     let leading = dims[..dims.len() - 1].iter().product::<usize>();
     let reshaped = input.reshape((leading, in_dim))?;
-    let weight_t = if layer.weight.dtype() == reshaped.dtype() {
-        layer.weight.transpose(0, 1)?
-    } else {
-        layer.weight.to_dtype(reshaped.dtype())?.transpose(0, 1)?
-    };
+    let weight = to_dtype_if_needed(&layer.weight, reshaped.dtype())?;
+    let weight_t = weight.transpose(0, 1)?;
     let mut output = reshaped.matmul(&weight_t)?;
     if let Some(bias) = &layer.bias {
-        let bias = if bias.dtype() == output.dtype() {
-            bias.reshape((1, out_dim))?
-        } else {
-            bias.to_dtype(output.dtype())?.reshape((1, out_dim))?
-        };
+        let bias = to_dtype_if_needed(bias, output.dtype())?.reshape((1, out_dim))?;
         output = output.broadcast_add(&bias)?;
     }
-    if output.dtype() != input.dtype() {
-        output = output.to_dtype(input.dtype())?;
-    }
+    output = into_dtype_if_needed(output, input.dtype())?;
     output
         .reshape(
             dims[..dims.len() - 1]
@@ -862,9 +834,7 @@ impl SamAttention {
                 self.rel_pos_h.as_ref(),
                 self.rel_pos_w.as_ref(),
             )?;
-            if attn_bias.dtype() != scores.dtype() {
-                attn_bias = attn_bias.to_dtype(scores.dtype())?;
-            }
+            attn_bias = into_dtype_if_needed(attn_bias, scores.dtype())?;
             scores = scores.add(&attn_bias)?;
         }
 

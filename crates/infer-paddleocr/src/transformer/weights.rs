@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Module, Tensor, quantized::QMatMul};
 use candle_nn::VarBuilder;
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 use tracing::trace;
 
 use crate::{
@@ -102,9 +103,7 @@ impl LinearWeights {
                 .as_ref()
                 .context("linear weight missing for float matmul")?;
             let mut transposed = weight.transpose(0, 1)?;
-            if transposed.dtype() != input.dtype() {
-                transposed = transposed.to_dtype(input.dtype())?;
-            }
+            transposed = into_dtype_if_needed(transposed, input.dtype())?;
             Ok(input.matmul(&transposed)?)
         }
     }
@@ -113,20 +112,13 @@ impl LinearWeights {
 fn run_quantized_matmul(qm: &QMatMul, input: &Tensor) -> Result<Tensor> {
     let dtype = input.dtype();
     let device = input.device();
-    let mut out = if device.is_cuda() || device.is_metal() {
-        let activations = if dtype == DType::F32 {
-            input.clone()
-        } else {
-            input.to_dtype(DType::F32)?
-        };
+    let out = if device.is_cuda() || device.is_metal() {
+        let activations = to_dtype_if_needed(input, DType::F32)?;
         qm.forward(&activations)?
     } else {
         qm.forward(input)?
     };
-    if out.dtype() != dtype {
-        out = out.to_dtype(dtype)?;
-    }
-    Ok(out)
+    into_dtype_if_needed(out, dtype)
 }
 
 fn qualified_name(vb: &VarBuilder, tensor: &str) -> String {

@@ -3,6 +3,7 @@ use candle_core::{DType, Device, Tensor, shape::D};
 use candle_nn::ops::{softmax, softmax_last_dim};
 use deepseek_ocr_core::benchmark::Timer;
 use deepseek_ocr_core::cache::{KvCacheChunk, KvCacheEntry};
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 
 use super::{
     ops::{compute_dtype_for, maybe_cast, repeat_kv, rotate_half_last_dim},
@@ -190,21 +191,11 @@ pub fn attention_forward(
     } else {
         attn_weights.matmul(&v_for_values)?
     };
-    if attn_output.dtype() != q.dtype() {
-        attn_output = attn_output.to_dtype(q.dtype())?;
-    }
+    attn_output = into_dtype_if_needed(attn_output, q.dtype())?;
 
     let present = if use_cache {
-        let cache_k_t = if k_t.dtype() == cache_dtype {
-            k_t.clone()
-        } else {
-            k_t.to_dtype(cache_dtype)?
-        };
-        let cache_v = if v.dtype() == cache_dtype {
-            v.clone()
-        } else {
-            v.to_dtype(cache_dtype)?
-        };
+        let cache_k_t = to_dtype_if_needed(&k_t, cache_dtype)?;
+        let cache_v = to_dtype_if_needed(&v, cache_dtype)?;
         Some(KvCacheChunk::new(cache_k_t, cache_v)?)
     } else {
         None
@@ -258,11 +249,7 @@ pub fn build_attention_bias(
             mask_len,
             k_len
         );
-        let mask = if mask.dtype() == DType::U8 {
-            mask.clone()
-        } else {
-            mask.to_dtype(DType::U8)?
-        };
+        let mask = to_dtype_if_needed(mask, DType::U8)?;
         let mask = mask.to_vec2::<u8>()?;
         let mut pad = vec![0f32; batch * q_len * k_len];
         for b in 0..batch {

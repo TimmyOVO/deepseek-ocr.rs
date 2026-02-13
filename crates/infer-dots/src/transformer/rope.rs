@@ -1,5 +1,6 @@
 use anyhow::{Result, ensure};
 use candle_core::{DType, Device, Tensor, shape::D};
+use deepseek_ocr_core::tensor::to_dtype_if_needed;
 
 /// Cache for RoPE cosine/sine tables keyed by `(device, dtype, rope_dim)`.
 #[derive(Debug)]
@@ -100,11 +101,7 @@ impl RopeCache {
                 batch,
                 seq_len
             );
-            let ids = if ids.dtype() == DType::I64 {
-                ids.clone()
-            } else {
-                ids.to_dtype(DType::I64)?
-            };
+            let ids = to_dtype_if_needed(ids, DType::I64)?;
             let ids = ids
                 .reshape((batch, 1, seq_len, 1))?
                 .expand((batch, 1, seq_len, self.rope_dim))?

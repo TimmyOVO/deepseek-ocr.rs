@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::ops::{rms_norm, silu};
+use deepseek_ocr_core::tensor::to_dtype_if_needed;
 
 use crate::config::PaddleOcrVlConfig;
 
@@ -105,11 +106,7 @@ pub fn build_attention_bias(
             mask_len,
             k_len
         );
-        let mask = if mask.dtype() == dtype {
-            mask.clone()
-        } else {
-            mask.to_dtype(dtype)?
-        };
+        let mask = to_dtype_if_needed(mask, dtype)?;
         let ones = Tensor::full(1f32, (batch, k_len), device)?.to_dtype(dtype)?;
         let inverted = ones.sub(&mask)?;
         let inverted = inverted.reshape((batch, 1, 1, k_len))?;

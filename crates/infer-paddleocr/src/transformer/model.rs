@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, ensure};
 use candle_core::{DType, Tensor};
 use candle_nn::ops::rms_norm;
-use deepseek_ocr_core::tensor::gather_token_embeddings;
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed, gather_token_embeddings};
 
 use crate::config::PaddleOcrVlConfig;
 
@@ -122,11 +122,7 @@ impl ErnieDecoder {
             Some(t) => t.clone(),
             None => {
                 let ids = input_ids.expect("input_ids validity checked above");
-                let ids = if ids.dtype() == DType::I64 {
-                    ids.clone()
-                } else {
-                    ids.to_dtype(DType::I64)?
-                };
+                let ids = to_dtype_if_needed(ids, DType::I64)?;
                 gather_token_embeddings(&self.weights.embed_tokens, &ids)?
             }
         };
@@ -218,7 +214,8 @@ fn default_position_ids(
         .reshape((1, seq_len))?
         .expand((batch, seq_len))?
         .contiguous()?;
-    Ok(Tensor::stack(&[base.clone(), base.clone(), base], 0)?.to_dtype(DType::I64)?)
+    let stacked = Tensor::stack(&[base.clone(), base.clone(), base], 0)?;
+    into_dtype_if_needed(stacked, DType::I64)
 }
 
 fn normalize_position_ids(ids: &Tensor, device: &candle_core::Device) -> Result<Tensor> {

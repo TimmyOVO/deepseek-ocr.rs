@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Module, Tensor, quantized::QMatMul};
 use candle_nn::VarBuilder;
+use deepseek_ocr_core::tensor::{into_dtype_if_needed, to_dtype_if_needed};
 use tracing::trace;
 
 use crate::snapshot::{SnapshotLinear, SnapshotLinearMap};
@@ -112,9 +113,7 @@ impl QuantLinear {
                 .as_ref()
                 .context("linear weight missing for float matmul")?;
             let mut transposed = weight.transpose(0, 1)?;
-            if transposed.dtype() != input.dtype() {
-                transposed = transposed.to_dtype(input.dtype())?;
-            }
+            transposed = into_dtype_if_needed(transposed, input.dtype())?;
             Ok(input.matmul(&transposed)?)
         }
     }
@@ -141,22 +140,15 @@ impl QuantLinear {
         let mut out = self.matmul_2d(&reshaped)?;
 
         if let Some(bias) = &self.bias {
-            let bias = if bias.dtype() == out.dtype() {
-                bias.clone()
-            } else {
-                bias.to_dtype(out.dtype())?
-            };
+            let bias = to_dtype_if_needed(bias, out.dtype())?;
             out = out.broadcast_add(&bias.reshape((1, self.out_dim))?)?;
         }
 
         let mut new_dims = dims;
         let last_idx = new_dims.len() - 1;
         new_dims[last_idx] = self.out_dim;
-        let mut restored = out.reshape(new_dims)?;
-        if restored.dtype() != input.dtype() {
-            restored = restored.to_dtype(input.dtype())?;
-        }
-        Ok(restored)
+        let restored = out.reshape(new_dims)?;
+        into_dtype_if_needed(restored, input.dtype())
     }
 }
 
@@ -178,22 +170,12 @@ pub fn run_quantized_matmul(qm: &QMatMul, input: &Tensor) -> Result<Tensor> {
     let dtype = input.dtype();
     let device = input.device();
     if device.is_cuda() || device.is_metal() {
-        let mut out = if dtype == DType::F32 {
-            qm.forward(input)?
-        } else {
-            let activations = input.to_dtype(DType::F32)?;
-            qm.forward(&activations)?
-        };
-        if out.dtype() != dtype {
-            out = out.to_dtype(dtype)?;
-        }
-        Ok(out)
+        let activations = to_dtype_if_needed(input, DType::F32)?;
+        let out = qm.forward(&activations)?;
+        into_dtype_if_needed(out, dtype)
     } else {
-        let mut out = qm.forward(input)?;
-        if out.dtype() != dtype {
-            out = out.to_dtype(dtype)?;
-        }
-        Ok(out)
+        let out = qm.forward(input)?;
+        into_dtype_if_needed(out, dtype)
     }
 }
 
