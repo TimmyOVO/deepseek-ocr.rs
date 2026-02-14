@@ -208,20 +208,40 @@ pub trait OcrEngine: Send {
     ) -> Result<DecodeOutcome>;
 }
 
-/// Render a prompt using the configured conversation template and system prompt.
-pub fn render_prompt(template: &str, system_prompt: &str, raw_prompt: &str) -> Result<String> {
+/// Render a conversation using the configured template, system prompt, and message list.
+///
+/// This is the closest equivalent to `transformers`' `apply_chat_template(..., tokenize=False)`
+/// within the Rust runtime.
+pub fn render_conversation(
+    template: &str,
+    system_prompt: &str,
+    messages: &[(String, Option<String>)],
+) -> Result<String> {
     let timer = Timer::new("prompt.render");
     let mut template = get_conv_template(template)
         .with_context(|| format!("unknown conversation template {template}"))?;
     template.set_system_message(system_prompt.to_owned());
     template.reset_messages();
-    template.append_message("User", Some(raw_prompt.to_owned()));
-    template.append_message("Assistant", None);
+    for (role, content) in messages {
+        template.append_message(role.clone(), content.clone());
+    }
     let prompt = template.get_prompt();
     timer.finish(|event| {
         event.add_field("chars", prompt.len() as u64);
     });
     Ok(prompt)
+}
+
+/// Render a prompt using the configured conversation template and system prompt.
+pub fn render_prompt(template: &str, system_prompt: &str, raw_prompt: &str) -> Result<String> {
+    render_conversation(
+        template,
+        system_prompt,
+        &[
+            ("User".to_string(), Some(raw_prompt.to_owned())),
+            ("Assistant".to_string(), None),
+        ],
+    )
 }
 
 /// Normalise decoder output by stripping sentinel tokens and Windows line-endings.

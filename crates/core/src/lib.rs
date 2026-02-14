@@ -5,6 +5,7 @@ pub mod config;
 pub mod conversation;
 pub mod inference;
 pub mod ocr_inference_engine;
+pub mod prompt_tokens;
 pub mod runtime;
 pub mod runtime_backend;
 pub mod sampling;
@@ -13,12 +14,16 @@ pub mod tensor;
 
 pub use inference::{
     DecodeOutcome, DecodeParameters, DecodeParametersPatch, ModelKind, ModelLoadArgs, OcrEngine,
-    VisionSettings, normalize_text, render_prompt,
+    VisionSettings, normalize_text, render_conversation, render_prompt,
 };
 pub use ocr_inference_engine::{
     DefaultModelSemantics, ModelSemantics, OcrInferenceEngine, OcrInferenceRequest,
-    OcrInferenceResult, OcrPromptInput, OcrPromptMessage, OcrPromptRole, PreparedInputs,
-    RenderedPrompt,
+    OcrInferenceResult, OcrPromptInput, OcrPromptMessage, OcrPromptRenderRequest,
+    OcrPromptRole, PreparedInputs, RenderedPrompt,
+};
+pub use prompt_tokens::{
+    IMAGE_PLACEHOLDER, PromptBuildOptions, PromptTokenSequence, build_prompt_tokens_with,
+    grid_token_count,
 };
 pub use runtime_backend::{
     BackendCaps, BackendHooks, KvReadView, KvStateBackend, PromptScopeGuard, RopeState,

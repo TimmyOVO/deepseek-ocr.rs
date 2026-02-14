@@ -1,7 +1,10 @@
 use std::{convert::TryFrom, sync::Arc};
 
 use base64::Engine;
-use deepseek_ocr_core::{DecodeOutcome, DecodeParameters, ModelKind, VisionSettings};
+use deepseek_ocr_core::{
+    DecodeOutcome, DecodeParameters, VisionSettings,
+    ocr_inference_engine::{OcrInferenceEngine, OcrInferenceRequest, OcrPromptInput, OcrPromptMessage},
+};
 use image::DynamicImage;
 use reqwest::blocking::Client;
 use rocket::tokio;
@@ -23,28 +26,49 @@ const EMPTY_GENERATION_ERROR: &str =
 #[derive(Debug)]
 pub struct GenerationResult {
     pub text: String,
+    pub rendered_prompt: String,
     pub prompt_tokens: usize,
     pub response_tokens: usize,
 }
 
+pub struct ParsedPromptInputs {
+    pub messages: Vec<OcrPromptMessage>,
+    pub images: Vec<DynamicImage>,
+}
+
+struct GenerateBlockingArgs {
+    model: SharedModel,
+    engine: Arc<OcrInferenceEngine>,
+    template: String,
+    tokenizer: Arc<Tokenizer>,
+    messages: Vec<OcrPromptMessage>,
+    images: Vec<DynamicImage>,
+    vision: VisionSettings,
+    params: DecodeParameters,
+    stream: Option<StreamContext>,
+}
+
 pub async fn generate_async(
     inputs: GenerationInputs,
-    prompt: String,
+    messages: Vec<OcrPromptMessage>,
     images: Vec<DynamicImage>,
     params: DecodeParameters,
     stream: Option<StreamContext>,
 ) -> Result<GenerationResult, ApiError> {
     let stream_for_block = stream.clone();
+    let args = GenerateBlockingArgs {
+        model: Arc::clone(&inputs.model),
+        engine: Arc::clone(&inputs.engine),
+        template: inputs.template.clone(),
+        tokenizer: Arc::clone(&inputs.tokenizer),
+        messages,
+        images,
+        vision: inputs.vision,
+        params,
+        stream: stream_for_block,
+    };
     let join_result = tokio::task::spawn_blocking(move || {
-        generate_blocking(
-            &inputs.model,
-            Arc::clone(&inputs.tokenizer),
-            prompt,
-            images,
-            inputs.vision,
-            params,
-            stream_for_block,
-        )
+        generate_blocking(args)
     })
     .await;
 
@@ -72,15 +96,19 @@ pub async fn generate_async(
     }
 }
 
-fn generate_blocking(
-    model: &SharedModel,
-    tokenizer: Arc<Tokenizer>,
-    prompt: String,
-    images: Vec<DynamicImage>,
-    vision: VisionSettings,
-    params: DecodeParameters,
-    stream: Option<StreamContext>,
-) -> Result<GenerationResult, ApiError> {
+fn generate_blocking(args: GenerateBlockingArgs) -> Result<GenerationResult, ApiError> {
+    let GenerateBlockingArgs {
+        model,
+        engine,
+        template,
+        tokenizer,
+        messages,
+        images,
+        vision,
+        params,
+        stream,
+    } = args;
+
     let guard = model
         .lock()
         .map_err(|_| ApiError::Internal("model lock poisoned".into()))?;
@@ -93,12 +121,18 @@ fn generate_blocking(
         callback_box = Some(Box::new(callback));
     }
 
-    let decode_result = guard.decode(
+    let decode_result = engine.generate(
+        guard.as_ref(),
         tokenizer_ref,
-        &prompt,
-        &images,
-        vision,
-        &params,
+        &OcrInferenceRequest {
+            prompt: OcrPromptInput::Messages(&messages),
+            template: &template,
+            system_prompt: "",
+            images: &images,
+            vision,
+            decode: &params,
+        },
+        None,
         callback_box.as_deref(),
     );
     drop(callback_box);
@@ -108,9 +142,7 @@ fn generate_blocking(
         Err(err) => {
             drop(guard);
             let message = err.to_string();
-            if message.contains("prompt formatting failed")
-                || message.contains("prompt/image embedding mismatch")
-            {
+            if is_bad_request_generation_error(&message) {
                 return Err(ApiError::BadRequest(message));
             }
             return Err(ApiError::Internal(format!("generation failed: {err:#}")));
@@ -124,7 +156,12 @@ fn generate_blocking(
         prompt_tokens,
         response_tokens,
         generated_tokens,
-    } = outcome;
+    } = DecodeOutcome {
+        text: outcome.text,
+        prompt_tokens: outcome.prompt_tokens,
+        response_tokens: outcome.response_tokens,
+        generated_tokens: outcome.generated_tokens,
+    };
 
     let decoded = tokenizer_ref
         .decode(
@@ -161,45 +198,29 @@ fn generate_blocking(
 
     Ok(GenerationResult {
         text: normalized,
+        rendered_prompt: outcome.rendered_prompt,
         prompt_tokens,
         response_tokens,
     })
 }
 
-pub fn convert_messages(
-    kind: ModelKind,
-    messages: &[ApiMessage],
-) -> Result<(String, Vec<DynamicImage>), ApiError> {
-    match kind {
-        ModelKind::Deepseek => convert_deepseek_messages(messages),
-        ModelKind::PaddleOcrVl | ModelKind::DotsOcr | ModelKind::GlmOcr => {
-            convert_paddle_messages(messages)
-        }
-    }
+fn is_bad_request_generation_error(message: &str) -> bool {
+    message.contains("prompt formatting failed")
+        || message.contains("prompt/image embedding mismatch")
+        || message.contains("rendered prompt expects")
 }
 
-fn convert_deepseek_messages(
-    messages: &[ApiMessage],
-) -> Result<(String, Vec<DynamicImage>), ApiError> {
-    let (sections, images) = collect_prompt_sections(messages)?;
-    let mut prompt = String::from("");
-    let body = sections.join("\n\n").trim().to_owned();
-    prompt.push_str(&body);
-
-    Ok((prompt, images))
+pub fn collect_prompt_inputs(messages: &[ApiMessage]) -> Result<ParsedPromptInputs, ApiError> {
+    let (prompt_messages, images) = collect_prompt_messages(messages)?;
+    Ok(ParsedPromptInputs {
+        messages: prompt_messages,
+        images,
+    })
 }
 
-fn convert_paddle_messages(
+fn collect_prompt_messages(
     messages: &[ApiMessage],
-) -> Result<(String, Vec<DynamicImage>), ApiError> {
-    let (sections, images) = collect_prompt_sections(messages)?;
-    let prompt = sections.join("\n\n").trim().to_owned();
-    Ok((prompt, images))
-}
-
-fn collect_prompt_sections(
-    messages: &[ApiMessage],
-) -> Result<(Vec<String>, Vec<DynamicImage>), ApiError> {
+) -> Result<(Vec<OcrPromptMessage>, Vec<DynamicImage>), ApiError> {
     let latest_user_idx = messages
         .iter()
         .rposition(|message| message.role.eq_ignore_ascii_case("user"))
@@ -207,7 +228,7 @@ fn collect_prompt_sections(
             ApiError::BadRequest("request must include at least one user message".into())
         })?;
 
-    let mut sections = Vec::new();
+    let mut prompt_messages = Vec::new();
     let mut all_images = Vec::new();
 
     // OCR模型不是为对话训练的，所以只保留一轮的prompt，留多轮连正常输出都产生不了
@@ -217,30 +238,24 @@ fn collect_prompt_sections(
         }
         let (text, mut msg_images) = flatten_content(&message.content)?;
         if !text.is_empty() {
-            sections.push(text);
+            prompt_messages.push(OcrPromptMessage::system(text));
         }
         all_images.append(&mut msg_images);
     }
 
     let (user_text, mut user_images) = flatten_content(&messages[latest_user_idx].content)?;
     if !user_text.is_empty() {
-        sections.push(user_text);
+        prompt_messages.push(OcrPromptMessage::user(user_text));
     }
     all_images.append(&mut user_images);
 
-    if sections.is_empty() && all_images.is_empty() {
+    if prompt_messages.is_empty() && all_images.is_empty() {
         return Err(ApiError::BadRequest(
             "user content must include text or images".into(),
         ));
     }
 
-    if sections.is_empty() && all_images.is_empty() {
-        return Err(ApiError::BadRequest(
-            "user content must include text or images".into(),
-        ));
-    }
-
-    Ok((sections, all_images))
+    Ok((prompt_messages, all_images))
 }
 
 fn flatten_content(content: &MessageContent) -> Result<(String, Vec<DynamicImage>), ApiError> {

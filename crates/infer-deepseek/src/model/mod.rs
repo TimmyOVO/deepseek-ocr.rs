@@ -31,11 +31,13 @@ use crate::{
 };
 use deepseek_ocr_core::{
     benchmark::Timer,
+    build_prompt_tokens_with,
     config::DeepseekRuntimeConfig,
     inference::{
         DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
         normalize_text,
     },
+    PromptBuildOptions as CorePromptBuildOptions,
     sampling::{TokenSelectionParams, init_rng, select_token_id},
     tensor::{into_dtype_if_needed, to_dtype_if_needed},
 };
@@ -2546,32 +2548,19 @@ fn build_prompt_tokens(
         .ok_or_else(|| anyhow!("tokenizer missing <image> token"))? as i64;
     let bos_id = 0i64;
 
-    let segments: Vec<&str> = prompt.split("<image>").collect();
-    anyhow::ensure!(
-        segments.len().saturating_sub(1) == embeddings.len(),
-        "prompt/image embedding mismatch: {} slots vs {} embeddings",
-        segments.len().saturating_sub(1),
-        embeddings.len()
-    );
     anyhow::ensure!(
         embeddings.len() == vision_inputs.len(),
         "vision input count {} does not match embeddings {}",
         vision_inputs.len(),
         embeddings.len()
     );
-
-    let mut tokens = Vec::new();
-    let mut mask = Vec::new();
-    tokens.push(bos_id);
-    mask.push(0);
-
-    for (idx, segment) in segments.iter().enumerate() {
-        let encoding = tokenizer
-            .encode(*segment, false)
-            .map_err(|err| anyhow!("tokenization failed: {err}"))?;
-        tokens.extend(encoding.get_ids().iter().map(|&id| id as i64));
-        mask.extend(std::iter::repeat_n(0u8, encoding.len()));
-        if idx < embeddings.len() {
+    let prefix = [bos_id];
+    let sequence = build_prompt_tokens_with(
+        tokenizer,
+        prompt,
+        embeddings.len(),
+        CorePromptBuildOptions::image_slots("embeddings").with_prefix(&prefix),
+        |idx, tokens, mask| {
             let placeholders = build_image_placeholders(
                 image_token_id,
                 &vision_inputs[idx],
@@ -2585,17 +2574,22 @@ fn build_prompt_tokens(
                 options.vision.crop_mode,
                 options.variant,
             )?;
-            tokens.extend(&placeholders);
-            mask.extend(std::iter::repeat_n(1u8, placeholders.len()));
-        }
-    }
+            let placeholders_len = placeholders.len();
+            tokens.extend(placeholders);
+            mask.extend(std::iter::repeat_n(1u8, placeholders_len));
+            Ok(())
+        },
+    )?;
+
+    let tokens = sequence.tokens;
+    let mask = sequence.image_mask;
 
     let total_tokens = tokens.len();
     let image_tokens = mask.iter().filter(|&&flag| flag != 0).count();
     timer.finish(|event| {
         event.add_field("tokens", total_tokens);
         event.add_field("image_tokens", image_tokens);
-        event.add_field("segments", segments.len());
+        event.add_field("segments", embeddings.len() + 1);
         event.add_field("crop_mode", options.vision.crop_mode);
     });
 

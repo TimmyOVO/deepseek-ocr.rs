@@ -11,7 +11,8 @@ use deepseek_ocr_config::{AppConfig, ConfigOverrides, LocalFileSystem, prepare_m
 use deepseek_ocr_core::{
     ModelKind, ModelLoadArgs,
     benchmark::Timer,
-    inference::{DecodeOutcome, render_prompt},
+    inference::DecodeOutcome,
+    ocr_inference_engine::{OcrInferenceEngine, OcrInferenceRequest, OcrPromptInput},
     runtime::{default_dtype_for_device, prepare_device_and_dtype},
     streaming::DeltaTracker,
 };
@@ -131,14 +132,8 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
         )
     })?;
 
+    let inference_engine = OcrInferenceEngine::with_default_semantics(resources.kind);
     let prompt_user = prompt_raw.clone();
-    let prompt_with_template = render_prompt(&app_config.inference.template, "", &prompt_raw)?;
-    let image_slots = prompt_with_template.matches("<image>").count();
-    anyhow::ensure!(
-        image_slots == args.images.len(),
-        "prompt includes {image_slots} <image> tokens but {} image paths were provided",
-        args.images.len()
-    );
 
     let images: Vec<DynamicImage> = args
         .images
@@ -216,13 +211,19 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
     info!("--- Generation start ---");
     let gen_start = Instant::now();
     start_time_cell.set(Some(gen_start));
-    let outcome = model
-        .decode(
+    let outcome = inference_engine
+        .generate(
+            model.as_ref(),
             &tokenizer,
-            &prompt_with_template,
-            &images,
-            vision_settings,
-            &decode_params,
+            &OcrInferenceRequest {
+                prompt: OcrPromptInput::Raw(&prompt_raw),
+                template: &app_config.inference.template,
+                system_prompt: "",
+                images: &images,
+                vision: vision_settings,
+                decode: &decode_params,
+            },
+            None,
             callback_holder.as_deref(),
         )
         .context("generation failed")?;
@@ -234,7 +235,13 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
         prompt_tokens,
         response_tokens,
         generated_tokens,
-    } = outcome;
+    } = DecodeOutcome {
+        text: outcome.text,
+        prompt_tokens: outcome.prompt_tokens,
+        response_tokens: outcome.response_tokens,
+        generated_tokens: outcome.generated_tokens,
+    };
+    let rendered_prompt = outcome.rendered_prompt;
 
     info!(
         "Prompt prepared: {} tokens ({} image slots)",
@@ -277,7 +284,7 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
                 no_repeat_ngram_size: app_config.inference.decode.no_repeat_ngram_size,
                 use_cache: app_config.inference.decode.use_cache,
                 prompt_user: &prompt_user,
-                rendered_prompt: &prompt_with_template,
+                rendered_prompt: &rendered_prompt,
                 image_paths: &image_paths,
                 prompt_tokens,
                 generated_len: response_tokens,

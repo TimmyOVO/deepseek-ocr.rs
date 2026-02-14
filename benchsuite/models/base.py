@@ -88,6 +88,29 @@ class BaseAdapter(ABC):
             return False, self.python_skip_reason() or "python baseline is disabled"
         return True, None
 
+    def ensure_model_dir_ready(self, *, model_dir: Path) -> None:
+        missing = [name for name in self.required_rust_files if not (model_dir / name).exists()]
+        if not missing:
+            return
+
+        repo_id = getattr(self, "hf_repo_id", None)
+        if not repo_id:
+            joined = ", ".join(missing)
+            raise RuntimeError(
+                f"model_dir is missing required files ({joined}) and adapter has no hf_repo_id: {model_dir}"
+            )
+
+        model_dir.mkdir(parents=True, exist_ok=True)
+        from huggingface_hub import hf_hub_download
+
+        for name in missing:
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=name,
+                local_dir=str(model_dir),
+                local_dir_use_symlinks=False,
+            )
+
     def resolve_rust_model_dir(self, *, root: Path, runtime_root: Path | None = None) -> Path:
         _ = root
         return runtime_paths(runtime_root=runtime_root, create_dirs=True).cli_models_dir / self.model_id
@@ -684,6 +707,8 @@ class BaseAdapter(ABC):
         )
         if delegated is not None:
             return delegated
+
+        self.ensure_model_dir_ready(model_dir=model_dir)
 
         import numpy as np
         import torch

@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use image::DynamicImage;
@@ -13,10 +13,14 @@ use serde::Deserialize;
 use tokenizers::Tokenizer;
 
 use deepseek_ocr_core::sampling::{init_rng, select_token_id};
-use deepseek_ocr_core::tensor::{to_dtype_if_needed, gather_token_embeddings};
+use deepseek_ocr_core::tensor::{
+    concat_token_embeddings, gather_token_embeddings, inject_embeddings_by_mask,
+    to_dtype_if_needed,
+};
 use deepseek_ocr_core::{
     DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
-    normalize_text,
+    build_prompt_tokens_with, grid_token_count, normalize_text, PromptBuildOptions,
+    PromptTokenSequence,
 };
 
 use crate::{
@@ -32,7 +36,6 @@ use crate::{
 
 const DEFAULT_WEIGHTS_INDEX: &str = "dots.ocr/model.safetensors.index.json";
 const FALLBACK_EOS_TOKEN: &str = "<|endoftext|>";
-const IMAGE_PLACEHOLDER: &str = "<image>";
 const MAX_INLINE_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 
 pub struct DotsOcrModel {
@@ -226,10 +229,10 @@ impl DotsOcrModel {
         let fused_embeddings = if placeholder_count == 0 {
             base_embeddings
         } else {
-            let replacements = flatten_vision_embeddings(vision_embeddings)?
+            let replacements = concat_token_embeddings(vision_embeddings)?
                 .expect("placeholder count validated against embeddings");
             let per_batch = vec![replacements];
-            inject_image_embeddings(&base_embeddings, &image_mask, &per_batch)?
+            inject_embeddings_by_mask(&base_embeddings, &image_mask, &per_batch)?
         };
 
         Ok(PreparedPrompt {
@@ -467,18 +470,7 @@ fn parse_index_bytes(index_path: &Path, bytes: Vec<u8>) -> Result<Vec<PathBuf>> 
 }
 
 pub fn vision_token_count(grid: [u32; 3], merge: usize) -> Result<usize> {
-    ensure!(merge > 0, "spatial merge size must be positive");
-    let t = grid[0] as usize;
-    let h = grid[1] as usize;
-    let w = grid[2] as usize;
-    ensure!(
-        h.is_multiple_of(merge) && w.is_multiple_of(merge),
-        "grid {}x{} not divisible by merge {}",
-        h,
-        w,
-        merge
-    );
-    Ok(t * (h / merge) * (w / merge))
+    grid_token_count((grid[0] as usize, grid[1] as usize, grid[2] as usize), merge)
 }
 
 pub fn build_prompt_inputs(
@@ -487,24 +479,12 @@ pub fn build_prompt_inputs(
     per_image_tokens: &[usize],
     image_tokens: &DotsImageTokens,
 ) -> Result<(Vec<i64>, Vec<u8>)> {
-    let segments: Vec<&str> = prompt.split(IMAGE_PLACEHOLDER).collect();
-    ensure!(
-        segments.len().saturating_sub(1) == per_image_tokens.len(),
-        "prompt/image mismatch: {} slots vs {} images",
-        segments.len().saturating_sub(1),
-        per_image_tokens.len()
-    );
-    let mut tokens = Vec::new();
-    let mut mask = Vec::new();
-    for (idx, segment) in segments.iter().enumerate() {
-        if !segment.is_empty() {
-            let encoding = tokenizer
-                .encode(*segment, false)
-                .map_err(|err| anyhow!("tokenization failed: {err}"))?;
-            tokens.extend(encoding.get_ids().iter().map(|&id| id as i64));
-            mask.extend(std::iter::repeat_n(0u8, encoding.len()));
-        }
-        if idx < per_image_tokens.len() {
+    let sequence = build_prompt_tokens_with(
+        tokenizer,
+        prompt,
+        per_image_tokens.len(),
+        PromptBuildOptions::image_slots("images"),
+        |idx, tokens, mask| {
             let placeholders = per_image_tokens[idx];
             ensure!(placeholders > 0, "image {idx} produced zero vision tokens");
             tokens.push(image_tokens.start as i64);
@@ -513,84 +493,11 @@ pub fn build_prompt_inputs(
             mask.extend(std::iter::repeat_n(1u8, placeholders));
             tokens.push(image_tokens.end as i64);
             mask.push(0);
-        }
-    }
-    Ok((tokens, mask))
-}
-
-pub fn flatten_vision_embeddings(mut per_image: Vec<Tensor>) -> Result<Option<Tensor>> {
-    if per_image.is_empty() {
-        return Ok(None);
-    }
-    if per_image.len() == 1 {
-        return Ok(per_image.pop());
-    }
-    let refs: Vec<&Tensor> = per_image.iter().collect();
-    Ok(Some(Tensor::cat(&refs, 0)?))
-}
-
-pub fn inject_image_embeddings(
-    embeddings: &Tensor,
-    mask: &Tensor,
-    per_batch: &[Tensor],
-) -> Result<Tensor> {
-    let (batch, seq_len, hidden) = embeddings.shape().dims3()?;
-    let mask = to_dtype_if_needed(mask, DType::U8)?;
-    ensure!(
-        mask.shape().dims() == [batch, seq_len],
-        "image mask must have shape [batch, seq]"
-    );
-    let mut rows = Vec::with_capacity(batch);
-    for b in 0..batch {
-        let row = embeddings
-            .get(b)?
-            .reshape((seq_len, hidden))?
-            .contiguous()?;
-        let mask_row = mask.get(b)?.reshape((seq_len,))?;
-        let mask_vec = mask_row.to_vec1::<u8>()?;
-        let ones = mask_vec.iter().filter(|&&flag| flag != 0).count();
-        if ones == 0 {
-            rows.push(row);
-            continue;
-        }
-        let replacements = per_batch
-            .get(b)
-            .with_context(|| format!("missing image embeddings for batch {b}"))?
-            .to_dtype(row.dtype())?
-            .to_device(row.device())?;
-        let (rep_tokens, _) = replacements.shape().dims2()?;
-        ensure!(
-            rep_tokens == ones,
-            "image embeddings provide {rep_tokens} tokens but mask requires {ones}"
-        );
-        let mut rep_offset = 0usize;
-        let mut cursor = 0usize;
-        let mut segments = Vec::new();
-        while cursor < seq_len {
-            let flag = mask_vec[cursor];
-            let start = cursor;
-            while cursor < seq_len && mask_vec[cursor] == flag {
-                cursor += 1;
-            }
-            let length = cursor - start;
-            let segment = if flag == 0 {
-                row.narrow(0, start, length)?
-            } else {
-                let seg = replacements.narrow(0, rep_offset, length)?;
-                rep_offset += length;
-                seg
-            };
-            segments.push(segment);
-        }
-        ensure!(
-            rep_offset == ones,
-            "not all image embeddings were consumed ({rep_offset} of {ones})"
-        );
-        let refs: Vec<&Tensor> = segments.iter().collect();
-        rows.push(Tensor::cat(&refs, 0)?);
-    }
-    let refs: Vec<&Tensor> = rows.iter().collect();
-    Ok(Tensor::stack(&refs, 0)?)
+            Ok(())
+        },
+    )?;
+    let PromptTokenSequence { tokens, image_mask } = sequence;
+    Ok((tokens, image_mask))
 }
 
 pub fn resolve_eos_token_id(tokenizer: &Tokenizer) -> Option<i64> {

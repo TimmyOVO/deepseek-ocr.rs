@@ -928,6 +928,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepseek-ocr-pipeline"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "deepseek-ocr-config",
+ "deepseek-ocr-core",
+ "deepseek-ocr-infer-deepseek",
+ "deepseek-ocr-infer-dots",
+ "deepseek-ocr-infer-glm",
+ "deepseek-ocr-infer-paddleocr",
+ "image",
+ "tokenizers",
+ "tracing",
+]
+
+[[package]]
 name = "deepseek-ocr-server"
 version = "0.5.1"
 dependencies = [

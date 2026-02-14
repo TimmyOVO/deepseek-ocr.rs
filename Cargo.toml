@@ -2,6 +2,7 @@
 members = [
     "crates/core",
     "crates/assets",
+    "crates/pipeline",
     "crates/cli",
     "crates/server",
     "crates/config",
@@ -24,6 +25,7 @@ serde_json = "1.0"
 deepseek-ocr-core = { path = "./crates/core" }
 deepseek-ocr-assets = { path = "./crates/assets" }
 deepseek-ocr-config = { path = "./crates/config" }
+deepseek-ocr-pipeline = { path = "./crates/pipeline" }
 deepseek-ocr-dsq = { path = "./crates/dsq" }
 deepseek-ocr-dsq-runtime = { path = "./crates/dsq-runtime" }
 deepseek-ocr-dsq-writer = { path = "./crates/dsq-writer" }

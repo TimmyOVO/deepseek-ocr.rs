@@ -7,7 +7,7 @@ use tokenizers::Tokenizer;
 use crate::{
     inference::{
         DecodeParameters, DecodeOutcome, ModelKind, OcrEngine, StreamCallback, VisionSettings,
-        normalize_text, render_prompt,
+        normalize_text, render_conversation, render_prompt,
     },
     runtime_backend::{RuntimeState, RuntimeStateGuard},
 };
@@ -56,6 +56,14 @@ pub enum OcrPromptInput<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct OcrPromptRenderRequest<'a> {
+    pub prompt: OcrPromptInput<'a>,
+    pub template: &'a str,
+    pub system_prompt: &'a str,
+    pub image_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct OcrInferenceRequest<'a> {
     pub prompt: OcrPromptInput<'a>,
     pub template: &'a str,
@@ -68,6 +76,7 @@ pub struct OcrInferenceRequest<'a> {
 #[derive(Debug, Clone)]
 pub struct OcrInferenceResult {
     pub text: String,
+    pub rendered_prompt: String,
     pub prompt_tokens: usize,
     pub response_tokens: usize,
     pub generated_tokens: Vec<i64>,
@@ -101,7 +110,7 @@ pub struct PreparedInputs<'a> {
 pub trait ModelSemantics: Send + Sync {
     fn kind(&self) -> ModelKind;
 
-    fn render_prompt(&self, req: &OcrInferenceRequest<'_>) -> Result<RenderedPrompt>;
+    fn render_prompt(&self, req: &OcrPromptRenderRequest<'_>) -> Result<RenderedPrompt>;
 
     fn prepare_inputs<'a>(
         &self,
@@ -125,16 +134,37 @@ impl DefaultModelSemantics {
         Self { kind }
     }
 
-    fn collapse_messages(messages: &[OcrPromptMessage]) -> String {
-        let mut sections = Vec::new();
+    fn split_system_messages(
+        messages: &[OcrPromptMessage],
+    ) -> (Vec<String>, Vec<(String, Option<String>)>) {
+        let mut system_sections = Vec::new();
+        let mut payload = Vec::new();
+
         for message in messages {
             let text = message.content.trim();
             if text.is_empty() {
                 continue;
             }
-            sections.push(text.to_owned());
+
+            match message.role {
+                OcrPromptRole::System => system_sections.push(text.to_owned()),
+                OcrPromptRole::User => payload.push(("User".to_string(), Some(text.to_owned()))),
+                OcrPromptRole::Assistant => {
+                    payload.push(("Assistant".to_string(), Some(text.to_owned())))
+                }
+            }
         }
-        sections.join("\n\n")
+
+        // Mirror Transformers `add_generation_prompt=True` by ensuring the
+        // rendered prompt ends with an assistant slot.
+        let needs_generation_prompt = payload.last().is_none_or(|(role, content)| {
+            role != "Assistant" || content.as_ref().is_some_and(|value| !value.trim().is_empty())
+        });
+        if needs_generation_prompt {
+            payload.push(("Assistant".to_string(), None));
+        }
+
+        (system_sections, payload)
     }
 }
 
@@ -143,13 +173,25 @@ impl ModelSemantics for DefaultModelSemantics {
         self.kind
     }
 
-    fn render_prompt(&self, req: &OcrInferenceRequest<'_>) -> Result<RenderedPrompt> {
+    fn render_prompt(&self, req: &OcrPromptRenderRequest<'_>) -> Result<RenderedPrompt> {
         let rendered = match req.prompt {
             OcrPromptInput::Raw(raw) => render_prompt(req.template, req.system_prompt, raw)?,
             OcrPromptInput::Rendered(rendered) => rendered.to_owned(),
             OcrPromptInput::Messages(messages) => {
-                let collapsed = Self::collapse_messages(messages);
-                render_prompt(req.template, req.system_prompt, &collapsed)?
+                let (system_sections, payload) = Self::split_system_messages(messages);
+                let mut system_prompt = String::new();
+                if !req.system_prompt.trim().is_empty() {
+                    system_prompt.push_str(req.system_prompt.trim());
+                }
+                for section in system_sections {
+                    if system_prompt.is_empty() {
+                        system_prompt.push_str(&section);
+                    } else {
+                        system_prompt.push_str("\n\n");
+                        system_prompt.push_str(&section);
+                    }
+                }
+                render_conversation(req.template, &system_prompt, &payload)?
             }
         };
         let image_slots = rendered.matches("<image>").count();
@@ -157,7 +199,7 @@ impl ModelSemantics for DefaultModelSemantics {
             text: rendered,
             image_slots,
         };
-        prompt.validate_image_count(req.images.len())?;
+        prompt.validate_image_count(req.image_count)?;
         Ok(prompt)
     }
 
@@ -217,7 +259,12 @@ impl OcrInferenceEngine {
             self.semantics.kind()
         );
 
-        let rendered = self.semantics.render_prompt(req)?;
+        let rendered = self.semantics.render_prompt(&OcrPromptRenderRequest {
+            prompt: req.prompt,
+            template: req.template,
+            system_prompt: req.system_prompt,
+            image_count: req.images.len(),
+        })?;
         let prepared = self.semantics.prepare_inputs(req, &rendered, state)?;
         let outcome = model.decode(
             tokenizer,
@@ -227,12 +274,13 @@ impl OcrInferenceEngine {
             prepared.decode,
             stream,
         )?;
-        Ok(self.postprocess(outcome))
+        Ok(self.postprocess(rendered, outcome))
     }
 
-    fn postprocess(&self, outcome: DecodeOutcome) -> OcrInferenceResult {
+    fn postprocess(&self, rendered: RenderedPrompt, outcome: DecodeOutcome) -> OcrInferenceResult {
         OcrInferenceResult {
             text: self.semantics.postprocess_text(&outcome.text),
+            rendered_prompt: rendered.text,
             prompt_tokens: outcome.prompt_tokens,
             response_tokens: outcome.response_tokens,
             generated_tokens: outcome.generated_tokens,

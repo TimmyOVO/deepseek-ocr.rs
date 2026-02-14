@@ -11,7 +11,9 @@ use tracing::info;
 use deepseek_ocr_config::{
     AppConfig, InferenceOverride, InferenceSettings, LocalFileSystem, prepare_model_paths,
 };
-use deepseek_ocr_core::{DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings};
+use deepseek_ocr_core::{
+    DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, OcrInferenceEngine, VisionSettings,
+};
 use deepseek_ocr_infer_deepseek::load_model as load_deepseek_model;
 use deepseek_ocr_infer_dots::load_model as load_dots_model;
 use deepseek_ocr_infer_glm::load_model as load_glm_model;
@@ -20,6 +22,12 @@ use deepseek_ocr_infer_paddleocr::load_model as load_paddle_model;
 use crate::error::ApiError;
 
 pub type SharedModel = Arc<Mutex<Box<dyn OcrEngine>>>;
+type LoadedModelHandles = (
+    SharedModel,
+    Arc<OcrInferenceEngine>,
+    Arc<Tokenizer>,
+    String,
+);
 
 #[derive(Clone)]
 pub struct ModelListing {
@@ -37,9 +45,10 @@ pub struct AppState {
 
 #[derive(Clone)]
 pub struct GenerationInputs {
-    pub kind: ModelKind,
     pub model: SharedModel,
+    pub engine: Arc<OcrInferenceEngine>,
     pub tokenizer: Arc<Tokenizer>,
+    pub template: String,
     pub vision: VisionSettings,
     pub defaults: DecodeParameters,
 }
@@ -81,7 +90,7 @@ impl AppState {
     pub fn per_model_inference_settings(
         &self,
         model_id: &str,
-    ) -> Result<(VisionSettings, DecodeParameters), ApiError> {
+    ) -> Result<(VisionSettings, DecodeParameters, String), ApiError> {
         let base_config = self.manager.config.as_ref();
         let effective = base_config
             .effective_inference_for_model(
@@ -93,8 +102,9 @@ impl AppState {
 
         let decode = effective.decode.clone();
         let vision = effective.to_vision_settings();
+        let template = effective.template.clone();
 
-        Ok((vision, decode))
+        Ok((vision, decode, template))
     }
 
     pub fn prepare_generation(
@@ -102,13 +112,13 @@ impl AppState {
         requested_model: &str,
     ) -> Result<(GenerationInputs, String), ApiError> {
         self.validate_model(requested_model)?;
-        let (shared_model, tokenizer, model_id, kind) =
-            self.ensure_model_loaded(requested_model)?;
-        let (vision, defaults) = self.per_model_inference_settings(requested_model)?;
+        let (shared_model, engine, tokenizer, model_id) = self.ensure_model_loaded(requested_model)?;
+        let (vision, defaults, template) = self.per_model_inference_settings(requested_model)?;
         let inputs = GenerationInputs {
-            kind,
             model: shared_model,
+            engine,
             tokenizer,
+            template,
             vision,
             defaults,
         };
@@ -132,7 +142,7 @@ impl AppState {
     fn ensure_model_loaded(
         &self,
         model_id: &str,
-    ) -> Result<(SharedModel, Arc<Tokenizer>, String, ModelKind), ApiError> {
+    ) -> Result<LoadedModelHandles, ApiError> {
         {
             if let Ok(guard) = self.current.lock()
                 && let Some(loaded) = guard.as_ref()
@@ -140,9 +150,9 @@ impl AppState {
             {
                 return Ok((
                     Arc::clone(&loaded.model),
+                    Arc::clone(&loaded.engine),
                     Arc::clone(&loaded.tokenizer),
                     loaded.id.clone(),
-                    loaded.kind,
                 ));
             }
         }
@@ -158,17 +168,17 @@ impl AppState {
             .expect("loaded model missing after assignment");
         Ok((
             Arc::clone(&loaded.model),
+            Arc::clone(&loaded.engine),
             Arc::clone(&loaded.tokenizer),
             loaded.id.clone(),
-            loaded.kind,
         ))
     }
 }
 
 struct LoadedModel {
     id: String,
-    kind: ModelKind,
     model: SharedModel,
+    engine: Arc<OcrInferenceEngine>,
     tokenizer: Arc<Tokenizer>,
 }
 
@@ -236,10 +246,11 @@ impl ModelManager {
                 tokenizer_path.display()
             )
         })?);
+        let engine = Arc::new(OcrInferenceEngine::with_default_semantics(resources.kind));
         Ok(LoadedModel {
             id: model_id.to_string(),
-            kind: resources.kind,
             model: Arc::new(Mutex::new(model)),
+            engine,
             tokenizer,
         })
     }

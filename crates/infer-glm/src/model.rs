@@ -23,12 +23,16 @@ use crate::{
 
 use deepseek_ocr_core::{
     benchmark::Timer,
+    build_prompt_tokens_with,
+    grid_token_count,
     inference::{
         DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
     },
     normalize_text,
+    PromptBuildOptions,
+    PromptTokenSequence,
     sampling::{init_rng, select_token_id},
-    tensor::{into_dtype_if_needed, to_dtype_if_needed, gather_token_embeddings},
+    tensor::{inject_embeddings_by_mask, into_dtype_if_needed, gather_token_embeddings},
 };
 
 pub const DEFAULT_WEIGHTS_PATH: &str = "GLM-OCR/model.safetensors";
@@ -121,45 +125,32 @@ impl GlmOcrModel {
         tokenizer: &Tokenizer,
         prompt: &str,
         image_grids: &[(usize, usize, usize)],
-    ) -> Result<Vec<i64>> {
-        let slots = prompt.matches("<image>").count();
-        ensure!(
-            slots == image_grids.len(),
-            "prompt includes {slots} <image> placeholders but {} images were provided",
-            image_grids.len()
-        );
-
-        let mut tokens = vec![TOKEN_GMASK, TOKEN_SOP, TOKEN_USER, TOKEN_NEWLINE];
-        for (idx, segment) in prompt.split("<image>").enumerate() {
-            if !segment.is_empty() {
-                let encoded = tokenizer
-                    .encode(segment, false)
-                    .map_err(|err| anyhow!("failed to tokenize instruction segment: {err}"))?;
-                tokens.extend(encoded.get_ids().iter().map(|&id| id as i64));
-            }
-
-            if idx < image_grids.len() {
-                let (t, h, w) = image_grids[idx];
-                ensure!(
-                    h % self.preprocessor.spatial_merge_size == 0
-                        && w % self.preprocessor.spatial_merge_size == 0,
-                    "grid ({t},{h},{w}) not divisible by merge {}",
-                    self.preprocessor.spatial_merge_size
-                );
-                let image_token_count = t * h * w
-                    / (self.preprocessor.spatial_merge_size * self.preprocessor.spatial_merge_size);
+    ) -> Result<PromptTokenSequence> {
+        let prefix = [TOKEN_GMASK, TOKEN_SOP, TOKEN_USER, TOKEN_NEWLINE];
+        let suffix = [TOKEN_ASSISTANT, TOKEN_NEWLINE];
+        let merge = self.preprocessor.spatial_merge_size;
+        let sequence = build_prompt_tokens_with(
+            tokenizer,
+            prompt,
+            image_grids.len(),
+            PromptBuildOptions::image_slots("images")
+                .with_prefix(&prefix)
+                .with_suffix(&suffix),
+            |idx, tokens, mask| {
+                let image_token_count = grid_token_count(image_grids[idx], merge)?;
                 tokens.push(self.config.image_start_token_id);
+                mask.push(0);
                 tokens.extend(std::iter::repeat_n(
                     self.config.image_token_id,
                     image_token_count,
                 ));
+                mask.extend(std::iter::repeat_n(1u8, image_token_count));
                 tokens.push(self.config.image_end_token_id);
-            }
-        }
-
-        tokens.push(TOKEN_ASSISTANT);
-        tokens.push(TOKEN_NEWLINE);
-        Ok(tokens)
+                mask.push(0);
+                Ok(())
+            },
+        )?;
+        Ok(sequence)
     }
 
     fn build_position_ids(
@@ -295,73 +286,6 @@ impl GlmOcrModel {
         Ok((position_ids, next_position_base))
     }
 
-    fn inject_image_embeddings(
-        &self,
-        embeddings: Tensor,
-        prompt_tokens: &[i64],
-        vision_embeds: &Tensor,
-    ) -> Result<Tensor> {
-        let (available, hidden) = vision_embeds.shape().dims2()?;
-        ensure!(
-            hidden == self.config.text_config.hidden_size,
-            "vision hidden size {} mismatches text hidden size {}",
-            hidden,
-            self.config.text_config.hidden_size
-        );
-
-        let mut image_positions = Vec::new();
-        for (idx, &token) in prompt_tokens.iter().enumerate() {
-            if token == self.config.image_token_id {
-                image_positions.push(idx);
-            }
-        }
-        ensure!(
-            image_positions.len() == available,
-            "image placeholder count {} mismatches vision embeds {}",
-            image_positions.len(),
-            available
-        );
-
-        if available == 0 {
-            return Ok(embeddings);
-        }
-
-        let dtype = embeddings.dtype();
-        let device = embeddings.device();
-        let row = embeddings
-            .get(0)?
-            .reshape((prompt_tokens.len(), hidden))?
-            .contiguous()?;
-        let replacements = to_dtype_if_needed(vision_embeds, dtype)?;
-        let replacements = if replacements.device().same_device(device) {
-            replacements
-        } else {
-            replacements.to_device(device)?
-        }
-        .contiguous()?;
-
-        let mut mask_row = vec![0u8; prompt_tokens.len()];
-        let position_i64: Vec<i64> = image_positions.iter().map(|&p| p as i64).collect();
-        for &idx in &image_positions {
-            mask_row[idx] = 1;
-        }
-
-        let replacements_full = Tensor::zeros((prompt_tokens.len(), hidden), dtype, device)?;
-        let idx_tensor =
-            Tensor::from_vec(position_i64, (available,), device)?.to_dtype(DType::I64)?;
-        let idx_matrix = idx_tensor
-            .reshape((available, 1))?
-            .expand((available, hidden))?
-            .contiguous()?;
-        replacements_full.scatter_add_set(&idx_matrix, &replacements, 0)?;
-
-        let mask = Tensor::from_vec(mask_row, (prompt_tokens.len(), 1), device)?.to_dtype(dtype)?;
-        let ones = Tensor::ones((prompt_tokens.len(), 1), dtype, device)?;
-        let keep = ones.sub(&mask)?;
-        let merged = row.broadcast_mul(&keep)?.add(&replacements_full)?;
-        Ok(merged.unsqueeze(0)?)
-    }
-
     fn prepare_inputs(
         &self,
         tokenizer: &Tokenizer,
@@ -416,12 +340,18 @@ impl GlmOcrModel {
         }
 
         let prompt_timer = Timer::new("prompt.build_tokens");
-        let prompt_tokens =
-            self.build_prompt_tokens(tokenizer, prompt, &image_batch.image_grid_thw)?;
+        let prompt_sequence = self.build_prompt_tokens(tokenizer, prompt, &image_batch.image_grid_thw)?;
         prompt_timer.finish(|event| {
-            event.add_field("tokens", prompt_tokens.len() as u64);
+            event.add_field("tokens", prompt_sequence.tokens.len() as u64);
             event.add_field("images", image_batch.image_grid_thw.len() as u64);
         });
+
+        let placeholder_tokens = prompt_sequence.image_token_count();
+        let PromptTokenSequence {
+            tokens: prompt_tokens,
+            image_mask,
+        } = prompt_sequence;
+
         let prompt_len = prompt_tokens.len();
         ensure!(prompt_len > 0, "prompt must contain at least one token");
 
@@ -429,9 +359,19 @@ impl GlmOcrModel {
             .to_dtype(DType::I64)?;
         let mut embeddings = gather_token_embeddings(self.decoder.embed_tokens(), &input_ids)?;
 
-        if !image_batch.image_grid_thw.is_empty() {
-            embeddings = self
-                .inject_image_embeddings(embeddings, &prompt_tokens, &vision_embeds)
+        if placeholder_tokens > 0 {
+            let (available, _) = vision_embeds.shape().dims2()?;
+            ensure!(
+                placeholder_tokens == available,
+                "image placeholder span ({placeholder_tokens}) mismatches vision embeds ({available})"
+            );
+            let mask = Tensor::from_vec(image_mask, (1, prompt_len), &self.device)?
+                .to_dtype(DType::U8)?;
+            embeddings = inject_embeddings_by_mask(
+                &embeddings,
+                &mask,
+                std::slice::from_ref(&vision_embeds),
+            )
                 .context("failed to inject image embeddings into prompt")?;
         }
 

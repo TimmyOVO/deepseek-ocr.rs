@@ -1,14 +1,16 @@
 use std::{sync::Arc, time::SystemTime};
 
+use deepseek_ocr_core::{
+    DecodeParameters, DecodeParametersPatch, ModelKind, ocr_inference_engine::OcrPromptMessage,
+};
+use image::DynamicImage;
 use rocket::{Either, Route, State, serde::json::Json, tokio::sync::mpsc};
 use tracing::{debug, error};
 use uuid::Uuid;
 
-use deepseek_ocr_core::ModelKind;
-
 use crate::{
     error::ApiError,
-    generation::{convert_messages, generate_async},
+    generation::{ParsedPromptInputs, collect_prompt_inputs, generate_async},
     models::{
         ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessageResponse, ModelInfo,
         ModelsResponse, ResponseContent, ResponseOutput, ResponsesRequest, ResponsesResponse,
@@ -58,8 +60,8 @@ pub async fn responses_endpoint(
     req: Json<ResponsesRequest>,
 ) -> Result<Either<Json<ResponsesResponse>, BoxEventStream>, ApiError> {
     let (gen_inputs, active_model_id) = state.prepare_generation(&req.model)?;
-    let (prompt, images) = convert_messages(gen_inputs.kind, &req.input)?;
-    if prompt_missing_image(&prompt) {
+    let parsed = collect_prompt_inputs(&req.input)?;
+    if prompt_inputs_missing_image(&parsed) {
         let fallback = missing_image_markdown();
         if req.stream.unwrap_or(false) {
             return Ok(Either::Right(stream_fallback_response(
@@ -71,50 +73,23 @@ pub async fn responses_endpoint(
         let response = fallback_response_response(active_model_id, &fallback);
         return Ok(Either::Left(Json(response)));
     }
-    let max_tokens = req
-        .max_output_tokens
-        .or(req.max_tokens)
-        .unwrap_or(gen_inputs.defaults.max_new_tokens);
-    let decode = (gen_inputs.defaults.clone()
-        + &deepseek_ocr_core::DecodeParametersPatch {
-            max_new_tokens: Some(max_tokens),
-            ..Default::default()
-        })
-        + &req.decode;
+    let messages = parsed.messages;
+    let images = parsed.images;
+    let decode = merge_decode(
+        &gen_inputs.defaults,
+        req.max_output_tokens.or(req.max_tokens),
+        &req.decode,
+    );
     if req.stream.unwrap_or(false) {
-        let stream_inputs = gen_inputs.clone();
-        let decode_for_task = decode.clone();
-        let created = current_timestamp();
-        let response_id = format!("resp-{}", Uuid::new_v4());
-        let output_id = format!("msg-{}", Uuid::new_v4());
-        let (sender, rx) = mpsc::unbounded_channel();
-        let stream = into_event_stream(rx);
-        let context = StreamContext {
-            sender,
-            kind: StreamKind::Responses {
-                response_id: response_id.clone(),
-                output_id: output_id.clone(),
-                model: active_model_id.clone(),
-                created,
-            },
-        };
-        let task_context = context.clone();
-        rocket::tokio::spawn(async move {
-            if let Err(err) = generate_async(
-                stream_inputs,
-                prompt,
-                images,
-                decode_for_task,
-                Some(task_context),
-            )
-            .await
-            {
-                error!(error = %err, "responses stream generation failed");
-            }
-        });
-        return Ok(Either::Right(stream));
+        return Ok(Either::Right(spawn_responses_stream(
+            gen_inputs,
+            active_model_id,
+            messages,
+            images,
+            decode,
+        )));
     }
-    let generation = generate_async(gen_inputs, prompt, images, decode, None).await?;
+    let generation = generate_async(gen_inputs, messages, images, decode, None).await?;
     let created = current_timestamp();
     let response = ResponsesResponse {
         id: format!("resp-{}", Uuid::new_v4()),
@@ -145,8 +120,8 @@ pub async fn chat_completions_endpoint(
     req: Json<ChatCompletionRequest>,
 ) -> Result<Either<Json<ChatCompletionResponse>, BoxEventStream>, ApiError> {
     let (gen_inputs, active_model_id) = state.prepare_generation(&req.model)?;
-    let (prompt, images) = convert_messages(gen_inputs.kind, &req.messages)?;
-    if prompt_missing_image(&prompt) {
+    let parsed = collect_prompt_inputs(&req.messages)?;
+    if prompt_inputs_missing_image(&parsed) {
         let fallback = missing_image_markdown();
         if req.stream.unwrap_or(false) {
             return Ok(Either::Right(stream_fallback_chat(
@@ -158,46 +133,20 @@ pub async fn chat_completions_endpoint(
         let response = fallback_chat_response(active_model_id, &fallback);
         return Ok(Either::Left(Json(response)));
     }
-    debug!(prompt = %prompt, "Prepared chat prompt");
-    let max_tokens = req.max_tokens.unwrap_or(gen_inputs.defaults.max_new_tokens);
-    let decode = (gen_inputs.defaults.clone()
-        + &deepseek_ocr_core::DecodeParametersPatch {
-            max_new_tokens: Some(max_tokens),
-            ..Default::default()
-        })
-        + &req.decode;
+    let messages = parsed.messages;
+    let images = parsed.images;
+    debug!(message_count = messages.len(), "Prepared chat prompt messages");
+    let decode = merge_decode(&gen_inputs.defaults, req.max_tokens, &req.decode);
     if req.stream.unwrap_or(false) {
-        let stream_inputs = gen_inputs.clone();
-        let decode_for_task = decode.clone();
-        let created = current_timestamp();
-        let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
-        let (sender, rx) = mpsc::unbounded_channel();
-        let stream = into_event_stream(rx);
-        let context = StreamContext {
-            sender,
-            kind: StreamKind::Chat {
-                completion_id: completion_id.clone(),
-                model: active_model_id.clone(),
-                created,
-            },
-        };
-        let task_context = context.clone();
-        rocket::tokio::spawn(async move {
-            if let Err(err) = generate_async(
-                stream_inputs,
-                prompt,
-                images,
-                decode_for_task,
-                Some(task_context),
-            )
-            .await
-            {
-                error!(error = %err, "chat stream generation failed");
-            }
-        });
-        return Ok(Either::Right(stream));
+        return Ok(Either::Right(spawn_chat_stream(
+            gen_inputs,
+            active_model_id,
+            messages,
+            images,
+            decode,
+        )));
     }
-    let generation = generate_async(gen_inputs, prompt, images, decode, None).await?;
+    let generation = generate_async(gen_inputs, messages, images, decode, None).await?;
     let created = current_timestamp();
     let response = ChatCompletionResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
@@ -236,10 +185,6 @@ fn current_timestamp() -> i64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|dur| dur.as_secs() as i64)
         .unwrap_or_default()
-}
-
-fn prompt_missing_image(prompt: &str) -> bool {
-    !prompt.contains("<image>")
 }
 
 fn missing_image_markdown() -> String {
@@ -335,4 +280,82 @@ fn stream_fallback_chat(text: String, inputs: &GenerationInputs, model: String) 
     controller.send_initial();
     controller.emit_fallback(&text);
     stream
+}
+
+fn spawn_responses_stream(
+    inputs: GenerationInputs,
+    model: String,
+    messages: Vec<OcrPromptMessage>,
+    images: Vec<DynamicImage>,
+    decode: DecodeParameters,
+) -> BoxEventStream {
+    let created = current_timestamp();
+    let response_id = format!("resp-{}", Uuid::new_v4());
+    let output_id = format!("msg-{}", Uuid::new_v4());
+    let (sender, rx) = mpsc::unbounded_channel();
+    let stream = into_event_stream(rx);
+    let context = StreamContext {
+        sender,
+        kind: StreamKind::Responses {
+            response_id,
+            output_id,
+            model,
+            created,
+        },
+    };
+    let task_context = context.clone();
+    rocket::tokio::spawn(async move {
+        if let Err(err) = generate_async(inputs, messages, images, decode, Some(task_context)).await
+        {
+            error!(error = %err, "responses stream generation failed");
+        }
+    });
+    stream
+}
+
+fn spawn_chat_stream(
+    inputs: GenerationInputs,
+    model: String,
+    messages: Vec<OcrPromptMessage>,
+    images: Vec<DynamicImage>,
+    decode: DecodeParameters,
+) -> BoxEventStream {
+    let created = current_timestamp();
+    let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
+    let (sender, rx) = mpsc::unbounded_channel();
+    let stream = into_event_stream(rx);
+    let context = StreamContext {
+        sender,
+        kind: StreamKind::Chat {
+            completion_id,
+            model,
+            created,
+        },
+    };
+    let task_context = context.clone();
+    rocket::tokio::spawn(async move {
+        if let Err(err) = generate_async(inputs, messages, images, decode, Some(task_context)).await
+        {
+            error!(error = %err, "chat stream generation failed");
+        }
+    });
+    stream
+}
+
+fn prompt_inputs_missing_image(parsed: &ParsedPromptInputs) -> bool {
+    parsed.images.is_empty()
+}
+
+fn merge_decode(
+    defaults: &DecodeParameters,
+    max_tokens: Option<usize>,
+    decode_patch: &DecodeParametersPatch,
+) -> DecodeParameters {
+    let max_new_tokens = max_tokens.unwrap_or(defaults.max_new_tokens);
+    (defaults.clone()
+        + &DecodeParametersPatch {
+            max_new_tokens: Some(max_new_tokens),
+            ..Default::default()
+        })
+        + decode_patch
 }
