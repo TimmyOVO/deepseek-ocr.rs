@@ -6,22 +6,22 @@ use std::{collections::HashMap, fs};
 #[cfg(feature = "bench-metrics")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(feature = "bench-metrics"))]
+use anyhow::bail;
 #[cfg(feature = "bench-metrics")]
 use anyhow::Context;
 use anyhow::Result;
-#[cfg(not(feature = "bench-metrics"))]
-use anyhow::bail;
-use deepseek_ocr_core::benchmark::BenchEvent;
+use deepseek_ocr_pipeline::deepseek_ocr_core::benchmark::BenchEvent;
 #[cfg(feature = "bench-metrics")]
-use deepseek_ocr_core::benchmark::BenchRecorder;
+use deepseek_ocr_pipeline::deepseek_ocr_core::benchmark::BenchRecorder;
 #[cfg(feature = "bench-metrics")]
-use deepseek_ocr_core::benchmark::BenchValue;
+use deepseek_ocr_pipeline::deepseek_ocr_core::benchmark::BenchValue;
 #[cfg(feature = "bench-metrics")]
 use serde_json::json;
 use tracing::info;
 
 #[cfg(feature = "bench-metrics")]
-use deepseek_ocr_core::benchmark::set_recorder;
+use deepseek_ocr_pipeline::deepseek_ocr_core::benchmark::set_recorder;
 
 #[derive(Debug, Clone)]
 pub struct StageTotal {
@@ -90,7 +90,7 @@ impl Drop for Session {
 #[cfg(not(feature = "bench-metrics"))]
 impl Session {
     fn new(_output: Option<PathBuf>) -> Result<Self> {
-        bail!("Benchmarking requires compiling with --features bench-metrics on deepseek-ocr-core");
+        bail!("Benchmarking requires compiling deepseek-ocr-cli with --features bench-metrics");
     }
 
     #[allow(unused)]
@@ -198,12 +198,11 @@ impl BenchRecorder for Collector {
 
 #[cfg(feature = "bench-metrics")]
 fn write_report(path: &PathBuf, events: &[BenchEvent]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create benchmark directory {}", parent.display())
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create benchmark directory {}", parent.display()))?;
     }
     let totals = totals_for_events(events);
     let value = json!({

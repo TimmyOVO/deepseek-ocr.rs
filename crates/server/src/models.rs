@@ -1,4 +1,4 @@
-use deepseek_ocr_core::DecodeParametersPatch;
+use deepseek_ocr_pipeline::deepseek_ocr_core::DecodeParametersPatch;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]

@@ -1,11 +1,95 @@
 use std::path::PathBuf;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
-use deepseek_ocr_config::{
-    CommonInferenceArgs, CommonModelArgs, ConfigOverrides, build_config_overrides,
-};
+use deepseek_ocr_pipeline::{DecodeParametersPatch, DeviceKind, OcrConfigPatch, Precision};
 
 use crate::debug::DebugArgs;
+
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub struct CommonModelArgs {
+    /// Optional path to a configuration file (defaults to platform config dir).
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    pub config: Option<PathBuf>,
+
+    /// Select model entry from configuration.
+    #[arg(long, value_name = "ID", help_heading = "Application")]
+    pub model: Option<String>,
+
+    /// Override the model configuration JSON path.
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    pub model_config: Option<PathBuf>,
+
+    /// Override tokenizer path.
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    pub tokenizer: Option<PathBuf>,
+
+    /// Override weights path.
+    #[arg(long, value_name = "PATH", help_heading = "Application")]
+    pub weights: Option<PathBuf>,
+}
+
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub struct CommonInferenceArgs {
+    /// Device backend (cpu/metal/cuda).
+    #[arg(long, help_heading = "Inference")]
+    pub device: Option<DeviceKind>,
+
+    /// Numeric precision override.
+    #[arg(long, help_heading = "Inference")]
+    pub dtype: Option<Precision>,
+
+    /// Conversation template.
+    #[arg(long, help_heading = "Inference")]
+    pub template: Option<String>,
+
+    /// Global view resolution.
+    #[arg(long, help_heading = "Inference")]
+    pub base_size: Option<u32>,
+
+    /// Local crop resolution.
+    #[arg(long, help_heading = "Inference")]
+    pub image_size: Option<u32>,
+
+    /// Enable dynamic crop mode.
+    #[arg(long, help_heading = "Inference")]
+    pub crop_mode: Option<bool>,
+
+    /// Default max tokens budget.
+    #[arg(long, help_heading = "Inference")]
+    pub max_new_tokens: Option<usize>,
+
+    /// Disable KV-cache usage during decoding.
+    #[arg(long, help_heading = "Inference")]
+    pub no_cache: bool,
+
+    /// Enable sampling during decoding.
+    #[arg(long, help_heading = "Inference", value_name = "BOOL")]
+    pub do_sample: Option<bool>,
+
+    /// Softmax temperature.
+    #[arg(long, help_heading = "Inference")]
+    pub temperature: Option<f64>,
+
+    /// Nucleus sampling probability mass.
+    #[arg(long, help_heading = "Inference")]
+    pub top_p: Option<f64>,
+
+    /// Top-k sampling cutoff.
+    #[arg(long, help_heading = "Inference")]
+    pub top_k: Option<usize>,
+
+    /// Repetition penalty.
+    #[arg(long, help_heading = "Inference")]
+    pub repetition_penalty: Option<f32>,
+
+    /// No-repeat n-gram size.
+    #[arg(long, help_heading = "Inference")]
+    pub no_repeat_ngram_size: Option<usize>,
+
+    /// RNG seed.
+    #[arg(long, help_heading = "Inference")]
+    pub seed: Option<u64>,
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "DeepSeek-OCR CLI", long_about = None)]
@@ -94,8 +178,44 @@ pub struct InferArgs {
     pub quiet: bool,
 }
 
-impl From<&InferArgs> for ConfigOverrides {
+impl From<&InferArgs> for OcrConfigPatch {
     fn from(args: &InferArgs) -> Self {
-        build_config_overrides(&args.model, &args.inference, None)
+        OcrConfigPatch {
+            config_path: args.model.config.clone(),
+            fs: None,
+            model: deepseek_ocr_pipeline::OcrModelPatch {
+                id: args
+                    .model
+                    .model
+                    .as_deref()
+                    .and_then(|value| deepseek_ocr_pipeline::OcrModelId::try_from(value).ok()),
+                config: args.model.model_config.clone(),
+                tokenizer: args.model.tokenizer.clone(),
+                weights: args.model.weights.clone(),
+                snapshot: None,
+            },
+            inference: deepseek_ocr_pipeline::OcrInferencePatch {
+                device: args.inference.device,
+                precision: args.inference.dtype,
+                template: args.inference.template.clone(),
+                vision: deepseek_ocr_pipeline::OcrVisionPatch {
+                    base_size: args.inference.base_size,
+                    image_size: args.inference.image_size,
+                    crop_mode: args.inference.crop_mode,
+                },
+                decode: DecodeParametersPatch {
+                    max_new_tokens: args.inference.max_new_tokens,
+                    do_sample: args.inference.do_sample,
+                    temperature: args.inference.temperature,
+                    top_p: args.inference.top_p,
+                    top_k: args.inference.top_k,
+                    repetition_penalty: args.inference.repetition_penalty,
+                    no_repeat_ngram_size: args.inference.no_repeat_ngram_size,
+                    seed: args.inference.seed,
+                    use_cache: args.inference.no_cache.then_some(false),
+                },
+            },
+            server: deepseek_ocr_pipeline::OcrServerPatch::default(),
+        }
     }
 }

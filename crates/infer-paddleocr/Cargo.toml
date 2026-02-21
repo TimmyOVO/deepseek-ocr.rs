@@ -17,14 +17,16 @@ tokenizers = { workspace = true }
 memmap2 = "0.9"
 safetensors = "0.4"
 rand = { version = "0.8", features = ["std"] }
-candle-flash-attn = { version = "0.9", default-features = false, optional = true }
 deepseek-ocr-dsq-runtime = { path = "../dsq-runtime" }
 deepseek-ocr-dsq-models = { path = "../dsq-models" }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+candle-flash-attn = { version = "0.9", default-features = false, optional = true }
 
 [features]
 default = []
 memlog = ["deepseek-ocr-core/memlog"]
-flash-attn = ["candle-flash-attn"]
+flash-attn = ["dep:candle-flash-attn"]
 metal = []
 accelerate = []
 cuda = []

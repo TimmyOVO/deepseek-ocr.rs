@@ -1,30 +1,25 @@
 use std::{
     sync::{Arc, Mutex},
-    time::Instant,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Result, anyhow};
 use candle_core::{DType, Device};
 use tokenizers::Tokenizer;
-use tracing::info;
-
-use deepseek_ocr_config::{
-    AppConfig, InferenceOverride, InferenceSettings, LocalFileSystem, prepare_model_paths,
+use deepseek_ocr_pipeline::{
+    DecodeParameters, DecodeParametersPatch, ModelKind, OcrConfig, OcrConfigPatch,
+    OcrConfigResolver, OcrConfigSource, OcrInferencePatch, OcrModelId, OcrPatchLayer,
+    OcrPipelineHandle, OcrRuntime, OcrRuntimeBuilder, VisionSettings,
 };
-use deepseek_ocr_core::{
-    DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, OcrInferenceEngine, VisionSettings,
-};
-use deepseek_ocr_infer_deepseek::load_model as load_deepseek_model;
-use deepseek_ocr_infer_dots::load_model as load_dots_model;
-use deepseek_ocr_infer_glm::load_model as load_glm_model;
-use deepseek_ocr_infer_paddleocr::load_model as load_paddle_model;
 
+use crate::args::Args;
 use crate::error::ApiError;
 
-pub type SharedModel = Arc<Mutex<Box<dyn OcrEngine>>>;
+pub type SharedModel = Arc<Mutex<Box<dyn deepseek_ocr_pipeline::deepseek_ocr_core::OcrEngine>>>;
+
 type LoadedModelHandles = (
+    OcrPipelineHandle,
     SharedModel,
-    Arc<OcrInferenceEngine>,
+    Arc<deepseek_ocr_pipeline::deepseek_ocr_core::OcrInferenceEngine>,
     Arc<Tokenizer>,
     String,
 );
@@ -36,17 +31,19 @@ pub struct ModelListing {
 }
 
 pub struct AppState {
-    manager: ModelManager,
+    runtime: OcrRuntime,
     current: Mutex<Option<LoadedModel>>,
-    base_inference: InferenceSettings,
-    inference_overrides: InferenceOverride,
+    base_config: Arc<OcrConfig>,
+    runtime_config: Arc<OcrConfig>,
+    runtime_inference_patch: OcrInferencePatch,
     available_models: Vec<ModelListing>,
 }
 
 #[derive(Clone)]
 pub struct GenerationInputs {
+    pub handle: OcrPipelineHandle,
     pub model: SharedModel,
-    pub engine: Arc<OcrInferenceEngine>,
+    pub engine: Arc<deepseek_ocr_pipeline::deepseek_ocr_core::OcrInferenceEngine>,
     pub tokenizer: Arc<Tokenizer>,
     pub template: String,
     pub vision: VisionSettings,
@@ -54,15 +51,47 @@ pub struct GenerationInputs {
 }
 
 impl AppState {
-    pub fn bootstrap(
-        fs: LocalFileSystem,
-        config: Arc<AppConfig>,
-        device: Device,
-        dtype: DType,
-        base_inference: InferenceSettings,
-        inference_overrides: InferenceOverride,
-    ) -> Result<Self> {
-        let available_models = config
+    pub fn bootstrap(args: &Args, defaults_layer: Option<OcrConfigPatch>) -> Result<Self> {
+        let config_file_layer = OcrConfigPatch {
+            config_path: args.model.config.clone(),
+            ..Default::default()
+        };
+        let cli_args_layer = cli_patch_from_args(args)?;
+
+        let mut base_resolver = OcrConfigResolver::new();
+        if let Some(defaults) = defaults_layer.clone() {
+            base_resolver.push_layer(OcrPatchLayer::new(OcrConfigSource::Defaults, defaults));
+        }
+        base_resolver.push_layer(OcrPatchLayer::new(
+            OcrConfigSource::ConfigFile,
+            config_file_layer.clone(),
+        ));
+        let base_config = Arc::new(base_resolver.resolve()?);
+
+        let mut runtime_resolver = OcrConfigResolver::new();
+        if let Some(defaults) = defaults_layer.clone() {
+            runtime_resolver.push_layer(OcrPatchLayer::new(OcrConfigSource::Defaults, defaults));
+        }
+        runtime_resolver.push_layer(OcrPatchLayer::new(
+            OcrConfigSource::ConfigFile,
+            config_file_layer.clone(),
+        ));
+        runtime_resolver.push_layer(OcrPatchLayer::new(
+            OcrConfigSource::CliArgs,
+            cli_args_layer.clone(),
+        ));
+        let runtime_config = Arc::new(runtime_resolver.resolve()?);
+
+        let mut runtime_builder = OcrRuntimeBuilder::new();
+        if let Some(defaults) = defaults_layer {
+            runtime_builder = runtime_builder.with_defaults_layer(defaults);
+        }
+        runtime_builder = runtime_builder
+            .with_config_file_layer(config_file_layer)
+            .with_cli_args_layer(cli_args_layer.clone());
+        let runtime = runtime_builder.build()?;
+
+        let available_models = runtime_config
             .models
             .entries
             .iter()
@@ -72,13 +101,12 @@ impl AppState {
             })
             .collect::<Vec<_>>();
 
-        let manager = ModelManager::new(fs, config, device, dtype);
-
         Ok(Self {
-            manager,
+            runtime,
             current: Mutex::new(None),
-            base_inference,
-            inference_overrides,
+            base_config,
+            runtime_config,
+            runtime_inference_patch: cli_args_layer.inference,
             available_models,
         })
     }
@@ -91,14 +119,42 @@ impl AppState {
         &self,
         model_id: &str,
     ) -> Result<(VisionSettings, DecodeParameters, String), ApiError> {
-        let base_config = self.manager.config.as_ref();
-        let effective = base_config
-            .effective_inference_for_model(
-                model_id,
-                &self.base_inference,
-                &self.inference_overrides,
-            )
-            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+        let entry = self
+            .runtime_config
+            .models
+            .entries
+            .get(model_id)
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!("requested model `{model_id}` is not available"))
+            })?;
+
+        let mut effective = self.base_config.inference.clone();
+        effective += &entry.defaults.inference;
+
+        if let Some(template) = self.runtime_inference_patch.template.as_ref() {
+            effective.template = template.clone();
+        }
+        if let Some(base_size) = self.runtime_inference_patch.vision.base_size {
+            effective.base_size = base_size;
+        }
+        if let Some(image_size) = self.runtime_inference_patch.vision.image_size {
+            effective.image_size = image_size;
+        }
+        if let Some(crop_mode) = self.runtime_inference_patch.vision.crop_mode {
+            effective.crop_mode = crop_mode;
+        }
+        effective.decode = effective.decode.clone()
+            + &DecodeParametersPatch {
+                max_new_tokens: self.runtime_inference_patch.decode.max_new_tokens,
+                do_sample: self.runtime_inference_patch.decode.do_sample,
+                temperature: self.runtime_inference_patch.decode.temperature,
+                top_p: self.runtime_inference_patch.decode.top_p,
+                top_k: self.runtime_inference_patch.decode.top_k,
+                repetition_penalty: self.runtime_inference_patch.decode.repetition_penalty,
+                no_repeat_ngram_size: self.runtime_inference_patch.decode.no_repeat_ngram_size,
+                seed: self.runtime_inference_patch.decode.seed,
+                use_cache: self.runtime_inference_patch.decode.use_cache,
+            };
 
         let decode = effective.decode.clone();
         let vision = effective.to_vision_settings();
@@ -112,10 +168,12 @@ impl AppState {
         requested_model: &str,
     ) -> Result<(GenerationInputs, String), ApiError> {
         self.validate_model(requested_model)?;
-        let (shared_model, engine, tokenizer, model_id) = self.ensure_model_loaded(requested_model)?;
+        let (handle, model, engine, tokenizer, model_id) =
+            self.ensure_model_loaded(requested_model)?;
         let (vision, defaults, template) = self.per_model_inference_settings(requested_model)?;
         let inputs = GenerationInputs {
-            model: shared_model,
+            handle,
+            model,
             engine,
             tokenizer,
             template,
@@ -149,6 +207,7 @@ impl AppState {
                 && loaded.id == model_id
             {
                 return Ok((
+                    loaded.handle.clone(),
                     Arc::clone(&loaded.model),
                     Arc::clone(&loaded.engine),
                     Arc::clone(&loaded.tokenizer),
@@ -157,16 +216,45 @@ impl AppState {
             }
         }
 
+        let typed_model_id =
+            OcrModelId::try_from(model_id).map_err(|err| ApiError::BadRequest(err.to_string()))?;
+
         let loaded = self
-            .manager
-            .load_model(model_id)
+            .runtime
+            .manager()
+            .load(&typed_model_id)
             .map_err(|err| ApiError::Internal(err.to_string()))?;
+
+        let tokenizer = Arc::new(
+            loaded
+                .pipeline()
+                .tokenizer()
+                .map_err(|err| ApiError::Internal(err.to_string()))?
+                .clone(),
+        );
+        let kind = self
+            .available_models
+            .iter()
+            .find(|entry| entry.id == model_id)
+            .map(|entry| entry.kind)
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!("requested model `{model_id}` is not available"))
+            })?;
+        let (model, engine) = compatibility_handles(kind);
+
         let mut guard = self.current.lock().expect("model mutex poisoning detected");
-        *guard = Some(loaded);
+        *guard = Some(LoadedModel {
+            id: model_id.to_string(),
+            handle: loaded.clone(),
+            model: Arc::clone(&model),
+            engine: Arc::clone(&engine),
+            tokenizer: Arc::clone(&tokenizer),
+        });
         let loaded = guard
             .as_ref()
             .expect("loaded model missing after assignment");
         Ok((
+            loaded.handle.clone(),
             Arc::clone(&loaded.model),
             Arc::clone(&loaded.engine),
             Arc::clone(&loaded.tokenizer),
@@ -177,81 +265,106 @@ impl AppState {
 
 struct LoadedModel {
     id: String,
+    handle: OcrPipelineHandle,
     model: SharedModel,
-    engine: Arc<OcrInferenceEngine>,
+    engine: Arc<deepseek_ocr_pipeline::deepseek_ocr_core::OcrInferenceEngine>,
     tokenizer: Arc<Tokenizer>,
 }
 
-struct ModelManager {
-    fs: LocalFileSystem,
-    config: Arc<AppConfig>,
+#[derive(Debug)]
+struct PipelineHandleEngine {
+    kind: ModelKind,
     device: Device,
     dtype: DType,
 }
 
-impl ModelManager {
-    fn new(fs: LocalFileSystem, config: Arc<AppConfig>, device: Device, dtype: DType) -> Self {
-        Self {
-            fs,
-            config,
-            device,
-            dtype,
-        }
+impl deepseek_ocr_pipeline::deepseek_ocr_core::OcrEngine for PipelineHandleEngine {
+    fn kind(&self) -> ModelKind {
+        self.kind
     }
 
-    fn load_model(&self, model_id: &str) -> Result<LoadedModel> {
-        let resources = self
-            .config
-            .model_resources(&self.fs, model_id)
-            .with_context(|| format!("model `{model_id}` not found in configuration"))?;
-        let prepared = prepare_model_paths(
-            &self.fs,
-            &resources.id,
-            &resources.config,
-            &resources.tokenizer,
-            &resources.weights,
-            resources.snapshot.as_ref(),
-        )?;
-        let config_path = prepared.config;
-        let tokenizer_path = prepared.tokenizer;
-        let weights_path = prepared.weights;
-        let snapshot_path = prepared.snapshot;
-
-        let load_args = ModelLoadArgs {
-            kind: resources.kind,
-            config_path: Some(&config_path),
-            weights_path: Some(&weights_path),
-            snapshot_path: snapshot_path.as_deref(),
-            device: self.device.clone(),
-            dtype: self.dtype,
-        };
-        let start = Instant::now();
-        let model = match resources.kind {
-            ModelKind::Deepseek => load_deepseek_model(load_args)?,
-            ModelKind::PaddleOcrVl => load_paddle_model(load_args)?,
-            ModelKind::DotsOcr => load_dots_model(load_args)?,
-            ModelKind::GlmOcr => load_glm_model(load_args)?,
-        };
-        info!(
-            "Model `{}` loaded in {:.2?} (kind={:?}, flash-attn: {}, weights={})",
-            model_id,
-            start.elapsed(),
-            model.kind(),
-            model.flash_attention_enabled(),
-            weights_path.display()
-        );
-        let tokenizer = Arc::new(Tokenizer::from_file(&tokenizer_path).map_err(|err| {
-            anyhow::anyhow!(
-                "failed to load tokenizer from {}: {err}",
-                tokenizer_path.display()
-            )
-        })?);
-        let engine = Arc::new(OcrInferenceEngine::with_default_semantics(resources.kind));
-        Ok(LoadedModel {
-            id: model_id.to_string(),
-            model: Arc::new(Mutex::new(model)),
-            engine,
-            tokenizer,
-        })
+    fn device(&self) -> &Device {
+        &self.device
     }
+
+    fn dtype(&self) -> DType {
+        self.dtype
+    }
+
+    fn decode(
+        &self,
+        _tokenizer: &Tokenizer,
+        _prompt: &str,
+        _images: &[image::DynamicImage],
+        _vision: VisionSettings,
+        _params: &DecodeParameters,
+        _stream: deepseek_ocr_pipeline::deepseek_ocr_core::inference::StreamCallback,
+    ) -> Result<deepseek_ocr_pipeline::deepseek_ocr_core::DecodeOutcome> {
+        anyhow::bail!(
+            "legacy engine path is unavailable after server state migration; use OcrPipelineHandle"
+        )
+    }
+}
+
+fn compatibility_handles(
+    kind: ModelKind,
+) -> (
+    SharedModel,
+    Arc<deepseek_ocr_pipeline::deepseek_ocr_core::OcrInferenceEngine>,
+) {
+    let model: SharedModel = Arc::new(Mutex::new(Box::new(PipelineHandleEngine {
+        kind,
+        device: Device::Cpu,
+        dtype: DType::F32,
+    })));
+    let engine = Arc::new(
+        deepseek_ocr_pipeline::deepseek_ocr_core::OcrInferenceEngine::with_default_semantics(kind),
+    );
+    (model, engine)
+}
+
+fn cli_patch_from_args(args: &Args) -> Result<OcrConfigPatch> {
+    let model_id = match args.model.model.as_deref() {
+        Some(raw) => Some(
+            OcrModelId::try_from(raw)
+                .map_err(|err| anyhow!("invalid --model `{raw}`: {err}"))?,
+        ),
+        None => None,
+    };
+
+    Ok(OcrConfigPatch {
+        model: deepseek_ocr_pipeline::OcrModelPatch {
+            id: model_id,
+            config: args.model.model_config.clone(),
+            tokenizer: args.model.tokenizer.clone(),
+            weights: args.model.weights.clone(),
+            snapshot: None,
+        },
+        inference: OcrInferencePatch {
+            device: args.inference.device,
+            precision: args.inference.dtype,
+            template: args.inference.template.clone(),
+            vision: deepseek_ocr_pipeline::OcrVisionPatch {
+                base_size: args.inference.base_size,
+                image_size: args.inference.image_size,
+                crop_mode: args.inference.crop_mode,
+            },
+            decode: DecodeParametersPatch {
+                max_new_tokens: args.inference.max_new_tokens,
+                do_sample: args.inference.do_sample,
+                temperature: args.inference.temperature,
+                top_p: args.inference.top_p,
+                top_k: args.inference.top_k,
+                repetition_penalty: args.inference.repetition_penalty,
+                no_repeat_ngram_size: args.inference.no_repeat_ngram_size,
+                seed: args.inference.seed,
+                use_cache: args.inference.no_cache.then_some(false),
+            },
+        },
+        server: deepseek_ocr_pipeline::OcrServerPatch {
+            host: args.bind.host.clone(),
+            port: args.bind.port,
+        },
+        ..Default::default()
+    })
 }

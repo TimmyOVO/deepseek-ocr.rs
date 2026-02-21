@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::SystemTime};
 
-use deepseek_ocr_core::{
+use deepseek_ocr_pipeline::deepseek_ocr_core::{
     DecodeParameters, DecodeParametersPatch, ModelKind, ocr_inference_engine::OcrPromptMessage,
 };
 use image::DynamicImage;

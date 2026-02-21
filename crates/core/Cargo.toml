@@ -14,16 +14,18 @@ clap = { workspace = true }
 tracing = { workspace = true }
 once_cell = "1.19"
 dhat = "0.3.3"
-candle-flash-attn = { version = "0.9", default-features = false, optional = true }
 tokenizers = { version = "0.22", default-features = true }
 rayon = "1.10"
 rand = { version = "0.8.5", features = ["std"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+candle-flash-attn = { version = "0.9", default-features = false, optional = true }
 
 [features]
 default = []
 dhat-heap = []
 memlog = []
-flash-attn = ["candle-flash-attn"]
+flash-attn = ["dep:candle-flash-attn"]
 bench-metrics = []
 metal = [
     "candle-core/metal",
@@ -33,14 +35,8 @@ accelerate = [
     "candle-core/accelerate",
     "candle-nn/accelerate",
 ]
-cuda = [
-    "candle-core/cuda",
-    "candle-nn/cuda",
-]
-mkl = [
-    "candle-core/mkl",
-    "candle-nn/mkl",
-]
+cuda = []
+mkl = []
 
 [dev-dependencies]
 ndarray = "0.16"

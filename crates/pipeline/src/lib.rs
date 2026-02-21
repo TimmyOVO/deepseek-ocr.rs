@@ -1,70 +1,55 @@
-use std::path::Path;
+//! OCR Pipeline
+//!
+//! `deepseek-ocr-pipeline` 是一个“高层封装（facade）”crate：
+//!
+//! - 目标是让应用层（CLI/Server/第三方调用者）只依赖这一层。
+//! - 内部再去组合 `deepseek-ocr-config`/`deepseek-ocr-assets`/`deepseek-ocr-core`
+//!   以及各个 `deepseek-ocr-infer-*` 后端实现。
+//! - 对外尽量暴露**少量且稳定**的入口对象与语义接口（类似 Transformers 的
+//!   `from_pretrained` / `generate` 风格）。
+//!
+//! 当前处于“API 龙骨阶段” ：
+//! - 重点是把能力边界与扩展点定下来，供 code review；
+//! - 具体实现会在评审通过后逐步迁移落地；
+//! - 因此部分方法会以 `todo!()`/`bail!()` 占位。
 
-use anyhow::{Result, anyhow};
-use candle_core::{DType, Device};
-use deepseek_ocr_config::{ModelResources, PreparedModelPaths, VirtualFileSystem, prepare_model_paths};
-use deepseek_ocr_core::{ModelKind, ModelLoadArgs, OcrEngine, ocr_inference_engine::OcrInferenceEngine};
-use tokenizers::Tokenizer;
+mod api;
+mod config;
+mod ext;
+mod fs;
+mod manager;
+mod model;
+mod observer;
+mod pipeline;
+mod runtime;
 
-pub struct LoadedOcrModel {
-    pub resources: ModelResources,
-    pub prepared: PreparedModelPaths,
-    pub model: Box<dyn OcrEngine>,
-    pub tokenizer: Tokenizer,
-    pub engine: OcrInferenceEngine,
-}
+pub mod prelude;
 
-pub fn load_tokenizer(path: &Path) -> Result<Tokenizer> {
-    Tokenizer::from_file(path)
-        .map_err(|err| anyhow!("failed to load tokenizer from {}: {err}", path.display()))
-}
+pub use api::{OcrMessage, OcrPrompt, OcrRequest, OcrResponse, OcrRole, OcrStreamCallback};
 
-pub fn load_engine(kind: ModelKind) -> OcrInferenceEngine {
-    OcrInferenceEngine::with_default_semantics(kind)
-}
+pub use config::{
+    OcrConfig, OcrConfigLayer, OcrConfigPatch, OcrConfigResolver, OcrConfigSource,
+    OcrInferencePatch, OcrModelPatch, OcrPatchLayer, OcrServerPatch, OcrVisionPatch,
+};
 
-pub fn load_model(args: ModelLoadArgs<'_>) -> Result<Box<dyn OcrEngine>> {
-    match args.kind {
-        ModelKind::Deepseek => deepseek_ocr_infer_deepseek::load_model(args),
-        ModelKind::PaddleOcrVl => deepseek_ocr_infer_paddleocr::load_model(args),
-        ModelKind::DotsOcr => deepseek_ocr_infer_dots::load_model(args),
-        ModelKind::GlmOcr => deepseek_ocr_infer_glm::load_model(args),
-    }
-}
+pub use fs::OcrFsOptions;
 
-pub fn load_model_with_resources(
-    fs: &impl VirtualFileSystem,
-    resources: ModelResources,
-    device: Device,
-    dtype: DType,
-) -> Result<LoadedOcrModel> {
-    let prepared = prepare_model_paths(
-        fs,
-        &resources.id,
-        &resources.config,
-        &resources.tokenizer,
-        &resources.weights,
-        resources.snapshot.as_ref(),
-    )?;
+pub use manager::{OcrModelListing, OcrModelManager};
 
-    let load_args = ModelLoadArgs {
-        kind: resources.kind,
-        config_path: Some(&prepared.config),
-        weights_path: Some(&prepared.weights),
-        snapshot_path: prepared.snapshot.as_deref(),
-        device,
-        dtype,
-    };
+pub use model::OcrModelId;
 
-    let model = load_model(load_args)?;
-    let tokenizer = load_tokenizer(&prepared.tokenizer)?;
-    let engine = load_engine(resources.kind);
+pub use observer::{OcrPipelineEvent, OcrPipelineObserver};
 
-    Ok(LoadedOcrModel {
-        resources,
-        prepared,
-        model,
-        tokenizer,
-        engine,
-    })
-}
+pub use pipeline::{OcrPipeline, OcrPipelineHandle};
+
+pub use runtime::{OcrRuntime, OcrRuntimeBuilder, OcrRuntimeOptions};
+
+// Re-export small, stable enums/structs needed by callers.
+//
+// NOTE: 这些类型当前复用 `deepseek-ocr-core` 的定义，以避免重复维护；
+// 未来如需稳定 ABI/semver 边界，可以在 pipeline 内引入自有类型并做适配。
+pub use deepseek_ocr_core::{DecodeParameters, DecodeParametersPatch, ModelKind, VisionSettings};
+
+pub use deepseek_ocr_config;
+pub use deepseek_ocr_core;
+pub use deepseek_ocr_core::runtime::{DeviceKind, Precision};

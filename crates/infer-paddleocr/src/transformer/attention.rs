@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, IndexOp, Tensor, shape::D};
-#[cfg(feature = "flash-attn")]
+#[cfg(all(feature = "flash-attn", any(target_os = "linux", target_os = "windows")))]
 use candle_flash_attn::flash_attn;
 use candle_nn::ops::softmax;
 use deepseek_ocr_core::attention::{
@@ -22,7 +22,7 @@ pub struct AttentionContext<'a> {
 }
 
 pub fn supports_flash_attention(cfg: &PaddleOcrVlConfig, device: &Device, dtype: DType) -> bool {
-    #[cfg(feature = "flash-attn")]
+    #[cfg(all(feature = "flash-attn", any(target_os = "linux", target_os = "windows")))]
     {
         if !cfg.use_flash_attention {
             return false;
@@ -38,7 +38,7 @@ pub fn supports_flash_attention(cfg: &PaddleOcrVlConfig, device: &Device, dtype:
                 .num_attention_heads
                 .is_multiple_of(cfg.resolved_num_key_value_heads())
     }
-    #[cfg(not(feature = "flash-attn"))]
+    #[cfg(not(all(feature = "flash-attn", any(target_os = "linux", target_os = "windows"))))]
     {
         let _ = (cfg, device, dtype);
         false
@@ -229,7 +229,7 @@ fn flash_attention_forward(
     past_key_value: Option<&KvCacheEntry>,
     use_cache: bool,
 ) -> Result<Option<(Tensor, Option<KvCacheChunk>)>> {
-    #[cfg(not(feature = "flash-attn"))]
+    #[cfg(not(all(feature = "flash-attn", any(target_os = "linux", target_os = "windows"))))]
     {
         let _ = (
             ctx,
@@ -243,7 +243,7 @@ fn flash_attention_forward(
         );
         Ok(None)
     }
-    #[cfg(feature = "flash-attn")]
+    #[cfg(all(feature = "flash-attn", any(target_os = "linux", target_os = "windows")))]
     {
         if attn_bias.is_some() || past_key_value.is_some() {
             return Ok(None);

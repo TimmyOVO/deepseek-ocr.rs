@@ -1,6 +1,6 @@
 use clap::Parser;
-use deepseek_ocr_config::{
-    CommonInferenceArgs, CommonModelArgs, ConfigOverrides, ServerBindArgs, build_config_overrides,
+use deepseek_ocr_pipeline::deepseek_ocr_config::{
+    build_config_overrides, CommonInferenceArgs, CommonModelArgs, ConfigOverrides, ServerBindArgs,
 };
 
 #[derive(Parser, Debug)]

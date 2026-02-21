@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use deepseek_ocr_core::streaming::DeltaTracker;
+use deepseek_ocr_pipeline::deepseek_ocr_core::streaming::DeltaTracker;
 use rocket::{
     response::stream::{Event, EventStream},
     tokio::sync::mpsc,

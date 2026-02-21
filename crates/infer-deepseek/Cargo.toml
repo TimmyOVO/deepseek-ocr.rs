@@ -17,6 +17,8 @@ once_cell = "1.19"
 tokenizers = { workspace = true }
 rayon = "1.10"
 rand = { version = "0.8.5", features = ["std"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 candle-flash-attn = { version = "0.9", default-features = false, optional = true }
 
 [features]
@@ -24,7 +26,7 @@ default = []
 cli-debug = []
 dhat-heap = ["deepseek-ocr-core/dhat-heap"]
 memlog = ["deepseek-ocr-core/memlog"]
-flash-attn = ["candle-flash-attn"]
+flash-attn = ["dep:candle-flash-attn"]
 metal = [
     "candle-core/metal",
     "candle-nn/metal",
@@ -33,14 +35,8 @@ accelerate = [
     "candle-core/accelerate",
     "candle-nn/accelerate",
 ]
-cuda = [
-    "candle-core/cuda",
-    "candle-nn/cuda",
-]
-mkl = [
-    "candle-core/mkl",
-    "candle-nn/mkl",
-]
+cuda = []
+mkl = []
 qtensor-bytes = ["deepseek-ocr-dsq-runtime/qtensor-bytes"]
 
 [dev-dependencies]

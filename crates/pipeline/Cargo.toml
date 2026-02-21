@@ -9,7 +9,10 @@ image = { workspace = true }
 tokenizers = { workspace = true }
 candle-core = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
+# Internal building blocks (pipeline is a facade over these crates)
 deepseek-ocr-core = { workspace = true }
 deepseek-ocr-config = { workspace = true }
 
@@ -24,6 +27,12 @@ deepseek-ocr-infer-glm = { path = "../infer-glm" }
 default = []
 
 # Forward common runtime features so CLI/Server can depend on a single crate.
+dhat-heap = ["deepseek-ocr-core/dhat-heap"]
+bench-metrics = ["deepseek-ocr-core/bench-metrics"]
+
+# Debug-only feature used by CLI.
+cli-debug = ["deepseek-ocr-infer-deepseek/cli-debug"]
+
 memlog = [
     "deepseek-ocr-core/memlog",
     "deepseek-ocr-infer-deepseek/memlog",

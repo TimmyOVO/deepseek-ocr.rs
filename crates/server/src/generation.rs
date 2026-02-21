@@ -1,9 +1,9 @@
 use std::{convert::TryFrom, sync::Arc};
 
 use base64::Engine;
-use deepseek_ocr_core::{
-    DecodeOutcome, DecodeParameters, VisionSettings,
-    ocr_inference_engine::{OcrInferenceEngine, OcrInferenceRequest, OcrPromptInput, OcrPromptMessage},
+use deepseek_ocr_pipeline::{
+    DecodeParameters, OcrMessage, OcrPrompt, OcrRequest, OcrRole, OcrResponse, VisionSettings,
+    deepseek_ocr_core::ocr_inference_engine::{OcrPromptMessage, OcrPromptRole},
 };
 use image::DynamicImage;
 use reqwest::blocking::Client;
@@ -14,7 +14,7 @@ use tracing::{error, info};
 use crate::{
     error::ApiError,
     models::{ApiMessage, ImagePayload, MessageContent, MessagePart},
-    state::{GenerationInputs, SharedModel},
+    state::GenerationInputs,
     stream::{StreamContext, StreamController},
 };
 
@@ -37,8 +37,7 @@ pub struct ParsedPromptInputs {
 }
 
 struct GenerateBlockingArgs {
-    model: SharedModel,
-    engine: Arc<OcrInferenceEngine>,
+    handle: deepseek_ocr_pipeline::OcrPipelineHandle,
     template: String,
     tokenizer: Arc<Tokenizer>,
     messages: Vec<OcrPromptMessage>,
@@ -57,8 +56,7 @@ pub async fn generate_async(
 ) -> Result<GenerationResult, ApiError> {
     let stream_for_block = stream.clone();
     let args = GenerateBlockingArgs {
-        model: Arc::clone(&inputs.model),
-        engine: Arc::clone(&inputs.engine),
+        handle: inputs.handle.clone(),
         template: inputs.template.clone(),
         tokenizer: Arc::clone(&inputs.tokenizer),
         messages,
@@ -98,8 +96,7 @@ pub async fn generate_async(
 
 fn generate_blocking(args: GenerateBlockingArgs) -> Result<GenerationResult, ApiError> {
     let GenerateBlockingArgs {
-        model,
-        engine,
+        handle,
         template,
         tokenizer,
         messages,
@@ -109,9 +106,6 @@ fn generate_blocking(args: GenerateBlockingArgs) -> Result<GenerationResult, Api
         stream,
     } = args;
 
-    let guard = model
-        .lock()
-        .map_err(|_| ApiError::Internal("model lock poisoned".into()))?;
     let tokenizer_ref = tokenizer.as_ref();
     let stream_controller = stream.map(|ctx| StreamController::new(Arc::clone(&tokenizer), ctx));
     let mut callback_box: Option<StreamCallback> = None;
@@ -121,26 +115,21 @@ fn generate_blocking(args: GenerateBlockingArgs) -> Result<GenerationResult, Api
         callback_box = Some(Box::new(callback));
     }
 
-    let decode_result = engine.generate(
-        guard.as_ref(),
-        tokenizer_ref,
-        &OcrInferenceRequest {
-            prompt: OcrPromptInput::Messages(&messages),
-            template: &template,
-            system_prompt: "",
-            images: &images,
-            vision,
-            decode: &params,
-        },
-        None,
-        callback_box.as_deref(),
-    );
+    let request = OcrRequest {
+        prompt: OcrPrompt::Messages(convert_prompt_messages(&messages)),
+        template,
+        system_prompt: String::new(),
+        images,
+        vision,
+        decode: params,
+    };
+
+    let decode_result = handle.generate(&request, None, callback_box.as_deref());
     drop(callback_box);
 
     let outcome = match decode_result {
         Ok(output) => output,
         Err(err) => {
-            drop(guard);
             let message = err.to_string();
             if is_bad_request_generation_error(&message) {
                 return Err(ApiError::BadRequest(message));
@@ -149,19 +138,13 @@ fn generate_blocking(args: GenerateBlockingArgs) -> Result<GenerationResult, Api
         }
     };
 
-    drop(guard);
-
-    let DecodeOutcome {
+    let OcrResponse {
         text: normalized,
+        rendered_prompt,
         prompt_tokens,
         response_tokens,
         generated_tokens,
-    } = DecodeOutcome {
-        text: outcome.text,
-        prompt_tokens: outcome.prompt_tokens,
-        response_tokens: outcome.response_tokens,
-        generated_tokens: outcome.generated_tokens,
-    };
+    } = outcome;
 
     let decoded = tokenizer_ref
         .decode(
@@ -198,10 +181,24 @@ fn generate_blocking(args: GenerateBlockingArgs) -> Result<GenerationResult, Api
 
     Ok(GenerationResult {
         text: normalized,
-        rendered_prompt: outcome.rendered_prompt,
+        rendered_prompt,
         prompt_tokens,
         response_tokens,
     })
+}
+
+fn convert_prompt_messages(messages: &[OcrPromptMessage]) -> Vec<OcrMessage> {
+    messages
+        .iter()
+        .map(|message| OcrMessage {
+            role: match message.role {
+                OcrPromptRole::System => OcrRole::System,
+                OcrPromptRole::User => OcrRole::User,
+                OcrPromptRole::Assistant => OcrRole::Assistant,
+            },
+            content: message.content.clone(),
+        })
+        .collect()
 }
 
 fn is_bad_request_generation_error(message: &str) -> bool {

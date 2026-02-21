@@ -2,27 +2,17 @@ use std::{
     cell::{Cell, RefCell},
     convert::TryFrom,
     io::{self, Write},
+    path::PathBuf,
     rc::Rc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
-use deepseek_ocr_config::{AppConfig, ConfigOverrides, LocalFileSystem, prepare_model_paths};
-use deepseek_ocr_core::{
-    ModelKind, ModelLoadArgs,
-    benchmark::Timer,
-    inference::DecodeOutcome,
-    ocr_inference_engine::{OcrInferenceEngine, OcrInferenceRequest, OcrPromptInput},
-    runtime::{default_dtype_for_device, prepare_device_and_dtype},
-    streaming::DeltaTracker,
+use deepseek_ocr_pipeline::{
+    DeviceKind, ModelKind, OcrConfigResolver, OcrConfigSource, OcrPatchLayer, OcrPipelineEvent,
+    OcrPipelineObserver, OcrPrompt, OcrRequest, OcrRuntimeBuilder, Precision,
 };
-use deepseek_ocr_infer_deepseek::{
-    load_model as load_deepseek_model,
-    quant_snapshot::{SNAPSHOT_SPEC_PATH, qtensor_bytes_supported},
-};
-use deepseek_ocr_infer_dots::load_model as load_dots_model;
-use deepseek_ocr_infer_glm::load_model as load_glm_model;
-use deepseek_ocr_infer_paddleocr::load_model as load_paddle_model;
 use image::DynamicImage;
 use tokenizers::Tokenizer;
 use tracing::info;
@@ -34,11 +24,93 @@ use crate::{
 };
 
 type TokenCallback = Box<dyn Fn(usize, &[i64])>;
+const SNAPSHOT_SPEC_PATH: &str = "docs/quant_snapshot.md";
+
+const fn qtensor_bytes_supported() -> bool {
+    false
+}
 
 #[derive(Default)]
 struct StreamProgress {
     last_count: usize,
-    delta: DeltaTracker,
+    emitted_text: String,
+}
+
+#[derive(Default, Clone)]
+struct LoadMetadataObserver {
+    state: Arc<Mutex<LoadMetadata>>,
+}
+
+#[derive(Default, Clone)]
+struct LoadMetadata {
+    model_id: Option<String>,
+    model_kind: Option<ModelKind>,
+    flash_attention: Option<bool>,
+    config_path: Option<PathBuf>,
+    tokenizer_path: Option<PathBuf>,
+    weights_path: Option<PathBuf>,
+}
+
+impl LoadMetadataObserver {
+    fn snapshot(&self) -> LoadMetadata {
+        self.state.lock().map(|state| state.clone()).unwrap_or_default()
+    }
+}
+
+impl OcrPipelineObserver for LoadMetadataObserver {
+    fn on_event(&self, event: &OcrPipelineEvent) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        match event {
+            OcrPipelineEvent::ResourcesPrepared {
+                model_id,
+                config,
+                tokenizer,
+                weights,
+                ..
+            } => {
+                state.model_id = Some(model_id.to_string());
+                state.config_path = Some(PathBuf::from(config));
+                state.tokenizer_path = Some(PathBuf::from(tokenizer));
+                state.weights_path = Some(PathBuf::from(weights));
+            }
+            OcrPipelineEvent::ModelLoadFinished {
+                kind,
+                flash_attention,
+                ..
+            } => {
+                state.model_kind = Some(*kind);
+                state.flash_attention = Some(*flash_attention);
+            }
+            _ => {}
+        }
+    }
+}
+
+const fn effective_dtype_label(device: DeviceKind, precision: Option<Precision>) -> &'static str {
+    match precision {
+        Some(Precision::F16) => "F16",
+        Some(Precision::F32) => "F32",
+        Some(Precision::Bf16) => "BF16",
+        None => match device {
+            DeviceKind::Cpu => "F32",
+            DeviceKind::Metal | DeviceKind::Cuda => "F16",
+        },
+    }
+}
+
+fn stream_delta(previous: &str, current: &str) -> String {
+    if let Some(suffix) = current.strip_prefix(previous) {
+        return suffix.to_owned();
+    }
+    let prefix_len = previous
+        .chars()
+        .zip(current.chars())
+        .take_while(|(lhs, rhs)| lhs == rhs)
+        .map(|(ch, _)| ch.len_utf8())
+        .sum::<usize>();
+    current[prefix_len..].to_owned()
 }
 
 pub fn run_inference(args: InferArgs) -> Result<()> {
@@ -55,84 +127,61 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
         load_prompt(&args)?
     };
 
-    let fs = LocalFileSystem::new("deepseek-ocr");
-    let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.model.config.as_deref())?;
-    let overrides = ConfigOverrides::from(&args);
-    app_config.apply_overrides(&overrides);
-    app_config.normalise(&fs)?;
-    let resources = app_config.active_model_resources(&fs)?;
+    if let Some(model_id) = args.model.model.as_deref() {
+        deepseek_ocr_pipeline::OcrModelId::try_from(model_id)
+            .with_context(|| format!("invalid model id `{model_id}`"))?;
+    }
+
+    let cli_patch = deepseek_ocr_pipeline::OcrConfigPatch::from(&args);
+    let mut resolver = OcrConfigResolver::new();
+    resolver.push_layer(OcrPatchLayer::new(OcrConfigSource::CliArgs, cli_patch.clone()));
+    let app_config = resolver.resolve()?;
 
     info!(
         "Using configuration {} (active model `{}`)",
-        descriptor.location.display_with(&fs)?,
+        args.model
+            .config
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<platform-default>".to_string()),
         app_config.models.active
     );
 
-    let prepared = prepare_model_paths(
-        &fs,
-        &resources.id,
-        &resources.config,
-        &resources.tokenizer,
-        &resources.weights,
-        resources.snapshot.as_ref(),
-    )?;
-    let config_path = prepared.config;
-    let tokenizer_path = prepared.tokenizer;
-    let weights_path = prepared.weights;
-    let snapshot_path = prepared.snapshot;
-
-    let (device, maybe_precision) =
-        prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
-    let dtype = maybe_precision.unwrap_or_else(|| default_dtype_for_device(&device));
+    let observer = LoadMetadataObserver::default();
+    let runtime = OcrRuntimeBuilder::new()
+        .with_observer(Arc::new(observer.clone()))
+        .with_cli_args_layer(cli_patch)
+        .build()?;
+    let manager = runtime.manager();
+    let device = manager.device_kind();
+    let dtype = effective_dtype_label(device, manager.precision());
+    let model_id = manager
+        .active_model_id()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| app_config.models.active.clone());
 
     info!(
-        "Loading model `{}` (device={:?}, dtype={:?}) using config {}",
-        app_config.models.active,
+        "Loading model `{}` (device={:?}, dtype={})",
+        model_id,
         device,
         dtype,
-        config_path.display()
     );
 
     let load_start = Instant::now();
-    let load_timer = Timer::new("model.load");
-    let load_args = ModelLoadArgs {
-        kind: resources.kind,
-        config_path: Some(&config_path),
-        weights_path: Some(&weights_path),
-        snapshot_path: snapshot_path.as_deref(),
-        device: device.clone(),
-        dtype,
-    };
-    let model = match resources.kind {
-        ModelKind::Deepseek => load_deepseek_model(load_args)?,
-        ModelKind::PaddleOcrVl => load_paddle_model(load_args)?,
-        ModelKind::DotsOcr => load_dots_model(load_args)?,
-        ModelKind::GlmOcr => load_glm_model(load_args)?,
-    };
+    let pipeline_handle = manager.load_active()?;
     let load_elapsed = load_start.elapsed();
-    load_timer.finish(|event| {
-        event.add_field("model", resources.id.clone());
-        event.add_field("kind", format!("{:?}", resources.kind));
-        event.add_field("device", format!("{:?}", device));
-        event.add_field("dtype", format!("{:?}", dtype));
-        event.add_field("ms", load_elapsed.as_secs_f64() * 1e3);
-    });
+    let metadata = observer.snapshot();
+    let model_kind = metadata.model_kind.unwrap_or(ModelKind::Deepseek);
+    let flash_attention = metadata.flash_attention.unwrap_or(false);
+    let weights_path = metadata.weights_path.unwrap_or_default();
     info!(
         "Model ready in {:.2?} (kind={:?}, flash-attn: {}, weights={})",
         load_elapsed,
-        model.kind(),
-        model.flash_attention_enabled(),
+        model_kind,
+        flash_attention,
         weights_path.display()
     );
 
-    let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|err| {
-        anyhow::anyhow!(
-            "failed to load tokenizer from {}: {err}",
-            tokenizer_path.display()
-        )
-    })?;
-
-    let inference_engine = OcrInferenceEngine::with_default_semantics(resources.kind);
     let prompt_user = prompt_raw.clone();
 
     let images: Vec<DynamicImage> = args
@@ -145,6 +194,16 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
 
     let vision_settings = app_config.inference.to_vision_settings();
     let decode_params = app_config.inference.decode.clone();
+    let request = OcrRequest {
+        prompt: OcrPrompt::Raw(prompt_raw.clone()),
+        template: app_config.inference.template.clone(),
+        system_prompt: String::new(),
+        images,
+        vision: vision_settings,
+        decode: decode_params,
+    };
+
+    let tokenizer: Tokenizer = pipeline_handle.pipeline().tokenizer()?.clone();
 
     let tokenizer_for_stream = tokenizer.clone();
     let progress_state = Rc::new(RefCell::new(StreamProgress::default()));
@@ -183,10 +242,11 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
             }
 
             if let Ok(full_text) = tokenizer_for_stream.decode(&token_slice, true) {
-                let delta = state.delta.advance(&full_text, false);
+                let delta = stream_delta(&state.emitted_text, &full_text);
                 if !delta.is_empty() {
                     delta_to_emit = Some(delta);
                 }
+                state.emitted_text = full_text;
             }
 
             state.last_count = count;
@@ -206,41 +266,21 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
 
     info!(
         "Starting generation with requested budget {} tokens",
-        app_config.inference.decode.max_new_tokens
+        request.decode.max_new_tokens
     );
     info!("--- Generation start ---");
     let gen_start = Instant::now();
     start_time_cell.set(Some(gen_start));
-    let outcome = inference_engine
-        .generate(
-            model.as_ref(),
-            &tokenizer,
-            &OcrInferenceRequest {
-                prompt: OcrPromptInput::Raw(&prompt_raw),
-                template: &app_config.inference.template,
-                system_prompt: "",
-                images: &images,
-                vision: vision_settings,
-                decode: &decode_params,
-            },
-            None,
-            callback_holder.as_deref(),
-        )
+    let outcome = pipeline_handle
+        .generate(&request, None, callback_holder.as_deref())
         .context("generation failed")?;
     let elapsed = gen_start.elapsed();
     info!("--- Generation done in {:.2?} ---", elapsed);
 
-    let DecodeOutcome {
-        text: normalized,
-        prompt_tokens,
-        response_tokens,
-        generated_tokens,
-    } = DecodeOutcome {
-        text: outcome.text,
-        prompt_tokens: outcome.prompt_tokens,
-        response_tokens: outcome.response_tokens,
-        generated_tokens: outcome.generated_tokens,
-    };
+    let normalized = outcome.text;
+    let prompt_tokens = outcome.prompt_tokens;
+    let response_tokens = outcome.response_tokens;
+    let generated_tokens = outcome.generated_tokens;
     let rendered_prompt = outcome.rendered_prompt;
 
     info!(
@@ -261,16 +301,18 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
 
     if debug::wants_output_json(&args.debug) {
         let device_label = format!("{device:?}");
-        let dtype_label = format!("{dtype:?}");
+        let dtype_label = dtype.to_string();
         let image_paths: Vec<String> = args
             .images
             .iter()
             .map(|p| p.display().to_string())
             .collect();
+        let model_id = metadata.model_id.unwrap_or(model_id);
+        let tokenizer_path = metadata.tokenizer_path.unwrap_or_default();
         debug::write_output_json(
             &args.debug,
             debug::DebugOutput {
-                model_id: &resources.id,
+                model_id: &model_id,
                 weights_path: &weights_path,
                 tokenizer_path: &tokenizer_path,
                 device: &device_label,
@@ -301,7 +343,9 @@ pub fn run_inference(args: InferArgs) -> Result<()> {
         let final_delta = {
             let mut state = progress_state.borrow_mut();
             state.last_count = generated_tokens.len();
-            state.delta.advance(&decoded, true)
+            let delta = stream_delta(&state.emitted_text, &decoded);
+            state.emitted_text = decoded.clone();
+            delta
         };
         if !final_delta.is_empty() {
             let mut handle = stdout.borrow_mut();

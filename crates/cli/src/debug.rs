@@ -73,7 +73,7 @@ pub fn load_prompt_override(args: &DebugArgs) -> Result<Option<String>> {
             .with_context(|| format!("failed to read prompt json {}", path.display()))?;
         let parsed: PromptJson = serde_json::from_slice(&bytes)
             .with_context(|| format!("failed to parse prompt json {}", path.display()))?;
-        return Ok(Some(parsed.rendered_prompt));
+        Ok(Some(parsed.rendered_prompt))
     }
 
     #[cfg(not(feature = "cli-debug"))]
@@ -163,7 +163,7 @@ pub fn write_output_json(args: &DebugArgs, out: DebugOutput<'_>) -> Result<()> {
         }
         std::fs::write(path, bytes)
             .with_context(|| format!("failed to write output json {}", path.display()))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(feature = "cli-debug"))]

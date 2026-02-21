@@ -1,0 +1,5 @@
+    Checking deepseek-ocr-assets v0.1.0 (/Users/timmyovo/Desktop/SynologyDrive/IdeaProjects/deepseek-ocr.rs/crates/assets)
+    Checking deepseek-ocr-config v0.1.0 (/Users/timmyovo/Desktop/SynologyDrive/IdeaProjects/deepseek-ocr.rs/crates/config)
+    Checking deepseek-ocr-pipeline v0.1.0 (/Users/timmyovo/Desktop/SynologyDrive/IdeaProjects/deepseek-ocr.rs/crates/pipeline)
+    Checking deepseek-ocr-cli v0.5.1 (/Users/timmyovo/Desktop/SynologyDrive/IdeaProjects/deepseek-ocr.rs/crates/cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.91s

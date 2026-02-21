@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use anyhow::Result;
-use deepseek_ocr_config::{AppConfig, ConfigOverrides, LocalFileSystem};
-use deepseek_ocr_core::runtime::{default_dtype_for_device, prepare_device_and_dtype};
+use deepseek_ocr_pipeline::deepseek_ocr_config::{AppConfig, ConfigOverrides, LocalFileSystem};
+use deepseek_ocr_pipeline::OcrConfigPatch;
 use rocket::{Config, data::ToByteUnit};
 use tracing::info;
 
@@ -11,7 +9,6 @@ use crate::{args::Args, routes, state::AppState};
 pub async fn run(args: Args) -> Result<()> {
     let fs = LocalFileSystem::new("deepseek-ocr");
     let (mut app_config, descriptor) = AppConfig::load_or_init(&fs, args.model.config.as_deref())?;
-    let base_inference = app_config.inference.clone();
     let overrides = ConfigOverrides::from(&args);
     app_config.apply_overrides(&overrides);
     app_config.normalise(&fs)?;
@@ -21,20 +18,8 @@ pub async fn run(args: Args) -> Result<()> {
         app_config.models.active
     );
 
-    let (device, maybe_dtype) =
-        prepare_device_and_dtype(app_config.inference.device, app_config.inference.precision)?;
-    let dtype = maybe_dtype.unwrap_or_else(|| default_dtype_for_device(&device));
-
-    let inference_overrides = overrides.inference.clone();
-
-    let state = AppState::bootstrap(
-        fs.clone(),
-        Arc::new(app_config.clone()),
-        device.clone(),
-        dtype,
-        base_inference,
-        inference_overrides,
-    )?;
+    let defaults_layer: Option<OcrConfigPatch> = None;
+    let state = AppState::bootstrap(&args, defaults_layer)?;
 
     let figment = Config::figment()
         .merge(("port", app_config.server.port))

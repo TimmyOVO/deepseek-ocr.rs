@@ -1955,11 +1955,10 @@ impl DeepseekOcrModel {
         if let (Some(cfg), Some(path)) = (
             debug_logits_config_from_env(),
             debug_logits_json_path_from_env(),
-        ) {
-            if cfg.step == 0 {
-                let info = logits_top2_at_step(0, &last_logits)?;
-                write_debug_logits_json(&path, &info, current)?;
-            }
+        ) && cfg.step == 0
+        {
+            let info = logits_top2_at_step(0, &last_logits)?;
+            write_debug_logits_json(&path, &info, current)?;
         }
         if let Some(eos) = options.eos_token_id
             && current == eos
@@ -2022,11 +2021,10 @@ impl DeepseekOcrModel {
             if let (Some(cfg), Some(path)) = (
                 debug_logits_config_from_env(),
                 debug_logits_json_path_from_env(),
-            ) {
-                if cfg.step == step + 1 {
-                    let info = logits_top2_at_step(cfg.step, &next_logits)?;
-                    write_debug_logits_json(&path, &info, current)?;
-                }
+            ) && cfg.step == step + 1
+            {
+                let info = logits_top2_at_step(cfg.step, &next_logits)?;
+                write_debug_logits_json(&path, &info, current)?;
             }
             if let Some(eos) = options.eos_token_id
                 && current == eos

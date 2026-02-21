@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/behavior_contract_test.rs (target/debug/deps/behavior_contract_test-bc42241a55df5a35)
+
+running 3 tests
+test mismatched_image_slots_exits_with_contract_message ... ok
+test missing_prompt_exits_with_required_prompt_error ... ok
+test bench_flag_without_feature_exits_with_actionable_error ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.96s
+

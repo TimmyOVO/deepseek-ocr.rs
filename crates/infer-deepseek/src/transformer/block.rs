@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use candle_core::{DType, Device, Tensor, shape::D};
-#[cfg(feature = "flash-attn")]
+#[cfg(all(feature = "flash-attn", any(target_os = "linux", target_os = "windows")))]
 use candle_flash_attn::flash_attn;
 use candle_nn::ops::{rms_norm_slow, sigmoid, softmax};
 use deepseek_ocr_core::tensor::{into_dtype_if_needed, into_dtype_vec_if_needed, to_dtype_if_needed};
@@ -904,7 +904,7 @@ fn flash_attention_forward(
     past_key_value: Option<&KvCacheEntry>,
     use_cache: bool,
 ) -> Result<Option<(Tensor, Option<KvCacheChunk>)>> {
-    #[cfg(not(feature = "flash-attn"))]
+    #[cfg(not(all(feature = "flash-attn", any(target_os = "linux", target_os = "windows"))))]
     {
         let _ = (
             hidden_states,
@@ -917,7 +917,7 @@ fn flash_attention_forward(
         );
         Ok(None)
     }
-    #[cfg(feature = "flash-attn")]
+    #[cfg(all(feature = "flash-attn", any(target_os = "linux", target_os = "windows")))]
     {
         if additive_attn_bias.is_some() || past_key_value.is_some() || use_cache {
             return Ok(None);
