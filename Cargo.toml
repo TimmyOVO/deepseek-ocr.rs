@@ -44,3 +44,11 @@ fast_image_resize = "5.3"
 # opt-level = 3
 # lto = true
 # codegen-units = 1
+[patch.crates-io]
+candle-core = { git = "https://github.com/huggingface/candle", branch = "main" }
+candle-nn = { git = "https://github.com/huggingface/candle", branch = "main" }
+candle-transformers = { git = "https://github.com/huggingface/candle", branch = "main" }
+candle-flash-attn = { git = "https://github.com/huggingface/candle", branch = "main" }
+
+# Force cudarc to a version that supports CUDA 13
+cudarc = { git = "https://github.com/coreylowman/cudarc", branch = "main" }

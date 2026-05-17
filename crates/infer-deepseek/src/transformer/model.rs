@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use candle_core::{DType, IndexOp, Tensor, quantized::QMatMul};
+use candle_core::{DType, Device, IndexOp, Tensor, quantized::QMatMul};
 use candle_nn::ops::{rms_norm, rms_norm_slow};
 use deepseek_ocr_core::tensor::gather_token_embeddings;
 
@@ -110,6 +110,13 @@ impl DeepseekLanguageModel {
 
     pub fn flash_attention_enabled(&self) -> bool {
         self.decoder.flash_attention_enabled()
+    }
+
+    /// Move the token embedding tensor to the given device.
+    /// Useful on CUDA to keep the embedding on CPU and save VRAM for activations.
+    pub fn move_token_embedding_to(&mut self, device: &Device) -> Result<()> {
+        self.token_embedding = self.token_embedding.to_device(device)?;
+        Ok(())
     }
 
     /// Lookup token embeddings for the provided input ids.

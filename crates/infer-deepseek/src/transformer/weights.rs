@@ -64,7 +64,7 @@ impl LinearWeights {
             .with_context(|| format!("missing linear weight `{label}`"))?
             .contiguous()?;
         let mut weight = Some(weight_init.clone());
-        let weight_f32 = if matches!(weight_init.dtype(), DType::F16 | DType::BF16) {
+        let mut weight_f32 = if matches!(weight_init.dtype(), DType::F16 | DType::BF16) {
             Some(weight_init.to_dtype(DType::F32)?.contiguous()?)
         } else {
             None
@@ -101,6 +101,7 @@ impl LinearWeights {
                     bias_tensor = bias;
                     qmatmul = Some(qm);
                     weight = None;
+                    weight_f32 = None;
                 }
                 SnapshotLinear::Float {
                     weight: snapshot_weight,
@@ -121,6 +122,7 @@ impl LinearWeights {
                     quant.record_attempt(module, QuantizationOutcome::Fallback);
                     bias_tensor = bias;
                     weight = Some(snapshot_weight);
+                    weight_f32 = None;
                 }
             }
         }

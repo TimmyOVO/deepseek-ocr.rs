@@ -527,6 +527,7 @@ struct VisionContext<'a> {
     projector: &'a ImageProjector,
     vision: &'a VisionModules,
     device: &'a Device,
+    vision_device: Device,
     dtype: DType,
     parallel: bool,
 }
@@ -561,11 +562,18 @@ impl<'a> VisionContext<'a> {
         projector: &'a ImageProjector,
         dtype: DType,
     ) -> Self {
-        let parallel = matches!(model.device(), Device::Cpu);
+        let device = model.device();
+        let parallel = matches!(device, Device::Cpu);
+        let vision_device = if device.is_cuda() {
+            Device::Cpu
+        } else {
+            device.clone()
+        };
         Self {
             projector,
             vision,
-            device: model.device(),
+            device,
+            vision_device,
             dtype,
             parallel,
         }
@@ -584,7 +592,7 @@ impl<'a> VisionContext<'a> {
     }
 
     fn prepare_image_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        prepare_image_tensor_for_device(tensor, self.device, self.dtype)
+        prepare_image_tensor_for_device(tensor, &self.vision_device, self.dtype)
     }
 
     fn append_row_breaks(&self, grid: Tensor, newline: &Tensor) -> Result<Tensor> {
@@ -772,6 +780,11 @@ impl<'a> VisionContext<'a> {
             .context("concat global clip+sam tokens")?
             .contiguous()
             .context("global pre tokens not contiguous")?;
+        let global_pre = if !global_pre.device().same_device(self.device) {
+            global_pre.to_device(self.device)?
+        } else {
+            global_pre
+        };
         let global_post = self
             .projector
             .project(&global_pre)
@@ -867,6 +880,11 @@ impl<'a> VisionContext<'a> {
             .context("concat local clip+sam tokens")?
             .contiguous()
             .context("local pre tokens not contiguous")?;
+        let local_pre = if !local_pre.device().same_device(self.device) {
+            local_pre.to_device(self.device)?
+        } else {
+            local_pre
+        };
         let local_post = self
             .projector
             .project(&local_pre)
@@ -990,7 +1008,7 @@ impl DeepseekOcrModel {
         .context("failed to load language model")?;
 
         let low_precision = matches!(dtype, DType::F16 | DType::BF16);
-        if low_precision {
+        if low_precision && !device.is_cuda() {
             let vb_f32_lang = unsafe {
                 VarBuilder::from_mmaped_safetensors(
                     &[resolved_weights.as_path()],
@@ -1036,7 +1054,7 @@ impl DeepseekOcrModel {
         let projector = ImageProjector::load(&vb, projector_cfg.as_ref(), snapshot.as_deref())
             .context("failed to load image projector")?;
         let low_precision = matches!(dtype, DType::F16 | DType::BF16);
-        let (projector_f32, vision_f32, vision_ocr2_f32) = if low_precision {
+        let (projector_f32, vision_f32, vision_ocr2_f32) = if low_precision && !device.is_cuda() {
             let vb_f32 = unsafe {
                 VarBuilder::from_mmaped_safetensors(
                     &[resolved_weights.as_path()],
@@ -1074,10 +1092,34 @@ impl DeepseekOcrModel {
         };
         let vision = match variant {
             OcrVariant::Ocr1 => {
-                let sam = SamBackbone::new(cfg.as_ref(), &vb.pp("model").pp("sam_model"))
-                    .context("failed to load SAM backbone")?;
-                let clip = ClipVisionModel::load(cfg.as_ref(), &vb.pp("model").pp("vision_model"))
-                    .context("failed to load CLIP vision model")?;
+                let (sam, clip) = if device.is_cuda() {
+                    let vb_cpu = unsafe {
+                        VarBuilder::from_mmaped_safetensors(
+                            &[resolved_weights.as_path()],
+                            dtype,
+                            &Device::Cpu,
+                        )
+                    }
+                    .with_context(|| {
+                        format!(
+                            "failed to mmap cpu weights for vision at {}",
+                            resolved_weights.display()
+                        )
+                    })?;
+                    let sam = SamBackbone::new(cfg.as_ref(), &vb_cpu.pp("model").pp("sam_model"))
+                        .context("failed to load SAM backbone on CPU")?;
+                    let clip =
+                        ClipVisionModel::load(cfg.as_ref(), &vb_cpu.pp("model").pp("vision_model"))
+                            .context("failed to load CLIP vision model on CPU")?;
+                    (sam, clip)
+                } else {
+                    let sam = SamBackbone::new(cfg.as_ref(), &vb.pp("model").pp("sam_model"))
+                        .context("failed to load SAM backbone")?;
+                    let clip =
+                        ClipVisionModel::load(cfg.as_ref(), &vb.pp("model").pp("vision_model"))
+                            .context("failed to load CLIP vision model")?;
+                    (sam, clip)
+                };
                 VisionBackend::Ocr1(Box::new(VisionModules { sam, clip }))
             }
             OcrVariant::Ocr2 => VisionBackend::Ocr2(Box::new(
@@ -1087,6 +1129,13 @@ impl DeepseekOcrModel {
         };
         // Log quantization summary after all quantizable modules (language + projector) are loaded.
         QuantizationState::global().log_summary(&device);
+
+        // On CUDA, keep the token embedding on CPU to free VRAM for inference activations.
+        if device.is_cuda() {
+            language
+                .move_token_embedding_to(&Device::Cpu)
+                .context("failed to move token embedding to CPU")?;
+        }
 
         Ok(Self {
             cfg,
@@ -1989,6 +2038,7 @@ impl DeepseekOcrModel {
                 .language
                 .token_embedding_for_id(token_index)
                 .context("failed to gather embedding for decode token")?
+                .to_device(self.device())?
                 .unsqueeze(0)?
                 .unsqueeze(0)?;
             decode_inputs = cast_dtype_owned(
