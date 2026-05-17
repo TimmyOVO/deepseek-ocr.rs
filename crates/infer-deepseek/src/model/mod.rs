@@ -13,6 +13,8 @@ use rayon::prelude::*;
 use tokenizers::Tokenizer;
 use tracing::{info, trace};
 
+mod swap;
+
 use crate::{
     config::{DeepseekOcrConfig, ProjectorConfig, load_ocr_config},
     quant_snapshot::{LinearSpec, QuantizedSnapshot, SnapshotLinear, SnapshotLoadPlan},
@@ -525,7 +527,8 @@ struct VisionModules {
 
 struct VisionContext<'a> {
     projector: &'a ImageProjector,
-    vision: &'a VisionModules,
+    sam: &'a SamBackbone,
+    clip: &'a ClipVisionModel,
     device: &'a Device,
     vision_device: Device,
     dtype: DType,
@@ -558,7 +561,8 @@ fn prepare_image_tensor_for_device(
 impl<'a> VisionContext<'a> {
     fn new_with_dtype(
         model: &'a DeepseekOcrModel,
-        vision: &'a VisionModules,
+        sam: &'a SamBackbone,
+        clip: &'a ClipVisionModel,
         projector: &'a ImageProjector,
         dtype: DType,
     ) -> Self {
@@ -571,11 +575,32 @@ impl<'a> VisionContext<'a> {
         };
         Self {
             projector,
-            vision,
+            sam,
+            clip,
             device,
             vision_device,
             dtype,
             parallel,
+        }
+    }
+
+    /// Create a VisionContext with an explicit vision device (e.g. CUDA for swapped models).
+    fn new_with_explicit_device(
+        model: &'a DeepseekOcrModel,
+        sam: &'a SamBackbone,
+        clip: &'a ClipVisionModel,
+        projector: &'a ImageProjector,
+        dtype: DType,
+        vision_device: Device,
+    ) -> Self {
+        Self {
+            projector,
+            sam,
+            clip,
+            device: model.device(),
+            vision_device,
+            dtype,
+            parallel: false,
         }
     }
 
@@ -766,12 +791,10 @@ impl<'a> VisionContext<'a> {
             .prepare_image_tensor(input.global)
             .context("invalid global image tensor")?;
         let sam_global = self
-            .vision
             .sam
             .forward(&global)
             .context("sam forward (global)")?;
         let clip_global = self
-            .vision
             .clip
             .forward(&global, Some(&sam_global))
             .context("clip forward (global)")?;
@@ -864,16 +887,18 @@ impl<'a> VisionContext<'a> {
         self.process_patch_batch(&chunk)
     }
 
-    fn process_patch_batch(&self, batch: &Tensor) -> Result<(Tensor, Tensor)> {
+    /// Process a single image through SAM → CLIP → projector.
+    /// Used by `process_patch_batch` to avoid batching multiple images through
+    /// SAM at once, which would multiply activation memory and cause OOM on
+    /// low-VRAM GPUs.
+    fn process_single_image(&self, image: &Tensor) -> Result<(Tensor, Tensor)> {
         let sam_local = self
-            .vision
             .sam
-            .forward(batch)
+            .forward(image)
             .context("sam forward (local)")?;
         let clip_local = self
-            .vision
             .clip
-            .forward(batch, Some(&sam_local))
+            .forward(image, Some(&sam_local))
             .context("clip forward (local)")?;
         let local_pre = self
             .build_clip_sam_tokens(&clip_local, &sam_local)
@@ -891,6 +916,31 @@ impl<'a> VisionContext<'a> {
             .context("project local features")?
             .contiguous()
             .context("local post tokens not contiguous")?;
+        Ok((local_pre, local_post))
+    }
+
+    fn process_patch_batch(&self, batch: &Tensor) -> Result<(Tensor, Tensor)> {
+        let batch_size = batch.shape().dims4().map(|d| d.0).unwrap_or(0);
+        if batch_size <= 1 {
+            return self.process_single_image(batch);
+        }
+        // Process each patch individually to limit peak SAM activation memory
+        let chunks = batch.chunk(batch_size, 0)?;
+        let results: Result<Vec<_>> = chunks
+            .into_iter()
+            .map(|chunk| self.process_single_image(&chunk))
+            .collect();
+        let (pre_list, post_list): (Vec<_>, Vec<_>) = results?
+            .into_iter()
+            .unzip();
+        let pre_refs: Vec<_> = pre_list.iter().collect();
+        let post_refs: Vec<_> = post_list.iter().collect();
+        let local_pre = Tensor::cat(&pre_refs, 0)?
+            .contiguous()
+            .context("batched local pre tokens not contiguous")?;
+        let local_post = Tensor::cat(&post_refs, 0)?
+            .contiguous()
+            .context("batched local post tokens not contiguous")?;
         Ok((local_pre, local_post))
     }
 
@@ -1322,44 +1372,18 @@ impl DeepseekOcrModel {
         )
     }
 
+    /// Compute image embeddings using the model's stored vision modules.
     pub fn compute_image_embeddings(
         &self,
         inputs: &[Option<VisionInput<'_>>],
     ) -> Result<Vec<Tensor>> {
         match &self.vision {
             VisionBackend::Ocr1(_vision) => {
+                let vision = self.vision_modules().context("vision modules missing")?;
                 let compute_dtype = low_precision_compute_dtype(self.dtype);
-                let vision_native = self.vision_modules().context("vision modules missing")?;
-                let vision = select_f32(compute_dtype, vision_native, self.vision_modules_f32());
+                let vision = select_f32(compute_dtype, vision, self.vision_modules_f32());
                 let projector = self.projector_for_dtype(compute_dtype);
-                let ctx = VisionContext::new_with_dtype(self, vision, projector, compute_dtype);
-                let hidden = ctx.hidden_size();
-                let device = ctx.device();
-                if ctx.parallel_enabled() {
-                    inputs
-                        .par_iter()
-                        .map(|input| {
-                            if let Some(vision_input) = input {
-                                ctx.process_input(vision_input)
-                            } else {
-                                Tensor::zeros((0, hidden), compute_dtype, device)
-                                    .map_err(Into::into)
-                            }
-                        })
-                        .collect::<Result<Vec<_>>>()
-                } else {
-                    inputs
-                        .iter()
-                        .map(|input| {
-                            if let Some(vision_input) = input {
-                                ctx.process_input(vision_input)
-                            } else {
-                                Tensor::zeros((0, hidden), compute_dtype, device)
-                                    .map_err(Into::into)
-                            }
-                        })
-                        .collect::<Result<Vec<_>>>()
-                }
+                self.compute_image_embeddings_with(inputs, &vision.sam, &vision.clip, projector, &Device::Cpu)
             }
             VisionBackend::Ocr2(vision) => {
                 let hidden = self.projector.hidden_size();
@@ -1422,6 +1446,46 @@ impl DeepseekOcrModel {
                         .collect()
                 }
             }
+        }
+    }
+
+    /// Compute image embeddings using an explicit vision module and vision device.
+    fn compute_image_embeddings_with(
+        &self,
+        inputs: &[Option<VisionInput<'_>>],
+        sam: &SamBackbone,
+        clip: &ClipVisionModel,
+        projector: &ImageProjector,
+        vision_device: &Device,
+    ) -> Result<Vec<Tensor>> {
+        let compute_dtype = low_precision_compute_dtype(self.dtype);
+        let ctx = VisionContext::new_with_explicit_device(self, sam, clip, projector, compute_dtype, vision_device.clone());
+        let hidden = ctx.hidden_size();
+        let device = ctx.device();
+        if ctx.parallel_enabled() {
+            inputs
+                .par_iter()
+                .map(|input| {
+                    if let Some(vision_input) = input {
+                        ctx.process_input(vision_input)
+                    } else {
+                        Tensor::zeros((0, hidden), compute_dtype, device)
+                            .map_err(Into::into)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()
+        } else {
+            inputs
+                .iter()
+                .map(|input| {
+                    if let Some(vision_input) = input {
+                        ctx.process_input(vision_input)
+                    } else {
+                        Tensor::zeros((0, hidden), compute_dtype, device)
+                            .map_err(Into::into)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()
         }
     }
 
@@ -1739,7 +1803,7 @@ impl DeepseekOcrModel {
                 let dtype = low_precision_compute_dtype(self.dtype);
                 let vision = select_f32(dtype, vision.as_ref(), self.vision_modules_f32());
                 let projector = self.projector_for_dtype(dtype);
-                VisionContext::new_with_dtype(self, vision, projector, dtype)
+                VisionContext::new_with_dtype(self, &vision.sam, &vision.clip, projector, dtype)
                     .process_input_full(input)
             }
             VisionBackend::Ocr2(_) => {
@@ -2557,6 +2621,10 @@ fn compute_image_embeddings(
         .map(|owned| Some(owned.as_ref()))
         .collect();
     trace!("Computing image embeddings for {} image(s)...", refs.len());
+    // Vision models (SAM, CLIP) are kept on CPU permanently because SAM's global
+    // attention requires ~1GB of temporary activation memory that exceeds the
+    // available VRAM on consumer GPUs when combined with the LM and SAM weights.
+    // The CPU vision pipeline is slower (~92s for 6 crops) but stable.
     let outputs = model.compute_image_embeddings(&refs);
     match &outputs {
         Ok(values) => {
