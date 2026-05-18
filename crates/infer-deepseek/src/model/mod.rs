@@ -14,6 +14,7 @@ use tokenizers::Tokenizer;
 use tracing::{info, trace};
 
 mod swap;
+use swap::{SequentialVramSwap, should_use_vram_swap};
 
 use crate::{
     config::{DeepseekOcrConfig, ProjectorConfig, load_ocr_config},
@@ -1379,6 +1380,10 @@ impl DeepseekOcrModel {
     ) -> Result<Vec<Tensor>> {
         match &self.vision {
             VisionBackend::Ocr1(_vision) => {
+                if should_use_vram_swap(self.device()) {
+                    info!("Low VRAM device — sequential swap mode for vision");
+                    return self.compute_image_embeddings_with_swap(inputs);
+                }
                 let vision = self.vision_modules().context("vision modules missing")?;
                 let compute_dtype = low_precision_compute_dtype(self.dtype);
                 let vision = select_f32(compute_dtype, vision, self.vision_modules_f32());
@@ -1487,6 +1492,199 @@ impl DeepseekOcrModel {
                 })
                 .collect::<Result<Vec<_>>>()
         }
+    }
+
+    /// Compute image embeddings using hybrid swap: global on CPU, patches on CUDA.
+    ///
+    /// The global view runs on CPU (identical to CPU path) to guarantee correct
+    /// token count. Patch crops run on CUDA via SequentialVramSwap (SAM→CLIP→
+    /// Projector, one model at a time) for significant speedup over CPU.
+    fn compute_image_embeddings_with_swap(
+        &self,
+        inputs: &[Option<VisionInput<'_>>],
+    ) -> Result<Vec<Tensor>> {
+        let vision = self.vision_modules().context("vision modules missing")?;
+        let compute_dtype = low_precision_compute_dtype(self.dtype);
+        let projector = self.projector_for_dtype(compute_dtype);
+        let device = self.device();
+        let swap = SequentialVramSwap::new(
+            &self.weights_path,
+            self.cfg.clone(),
+            self.dtype,
+            device,
+        );
+        let hidden_size = projector.hidden_size();
+        let newline = projector.image_newline_token(compute_dtype, device)?;
+        let view_sep = projector.view_separator_token(compute_dtype, device)?;
+
+        let mut results = Vec::with_capacity(inputs.len());
+
+        for input in inputs {
+            let result = match input {
+                Some(vi) => {
+                    // ================================================================
+                    // Global view (CPU — identical to CPU path for correct token count)
+                    // ================================================================
+                    let global = prepare_image_tensor_for_device(
+                        vi.global, &Device::Cpu, compute_dtype,
+                    )?;
+                    let sam_global = vision
+                        .sam
+                        .forward(&global)
+                        .context("global SAM forward (CPU)")?;
+                    let clip_global = vision
+                        .clip
+                        .forward(&global, Some(&sam_global))
+                        .context("global CLIP forward (CPU)")?;
+
+                    let combined_global = {
+                        let (_, clip_seq, _) = clip_global.shape().dims3()?;
+                        let clip_tokens = clip_global
+                            .narrow(D::Minus2, 1, clip_seq - 1)?
+                            .contiguous()?;
+                        let (_, sc, sh, sw) = sam_global.shape().dims4()?;
+                        let sam_tokens = sam_global
+                            .reshape((1, sc, sh * sw))?
+                            .transpose(1, 2)?
+                            .contiguous()?;
+                        Tensor::cat(&[clip_tokens, sam_tokens], D::Minus1)?
+                    };
+                    let combined_global_cuda = combined_global.to_device(device)?;
+                    let projected_global = projector
+                        .project(&combined_global_cuda)
+                        .context("projector forward (global)")?;
+
+                    let global_tokens = {
+                        let nl = cast_dtype(&newline, projected_global.dtype(), "nl")?;
+                        let (bs, seq, hd) = projected_global.shape().dims3()?;
+                        ensure!(bs == 1, "global batch must be 1, got {bs}");
+                        let side = (seq as f64).sqrt() as usize;
+                        ensure!(side * side == seq, "global tokens {seq} not square");
+                        let grid = projected_global
+                            .get(0)?
+                            .reshape((side, side, hd))?
+                            .contiguous()?;
+                        let nl_exp = nl
+                            .reshape((1, 1, hd))?
+                            .expand((side, 1, hd))?
+                            .contiguous()?;
+                        Tensor::cat(&[grid, nl_exp], 1)?
+                            .reshape((side * (side + 1), hd))?
+                    };
+
+                    // ================================================================
+                    // Local patches (CUDA via sequential swap)
+                    // ================================================================
+                    let local_tokens_opt = if let Some(patches) = vi.patches {
+                        let (batch, _, _, _) = patches.shape().dims4()?;
+                        let patches_cpu = prepare_image_tensor_for_device(
+                            patches, &Device::Cpu, compute_dtype,
+                        )?;
+                        let chunks = patches_cpu.chunk(batch, 0)?;
+
+                        // Phase A — SAM on CUDA for all patch crops
+                        info!("Loading SAM on CUDA for patches");
+                        let sam_cuda = swap.load_sam_on_cuda()?;
+                        let mut sam_patches = Vec::with_capacity(batch);
+                        for chunk in &chunks {
+                            let chunk_cuda = chunk.to_device(device)?;
+                            let out = sam_cuda
+                                .forward(&chunk_cuda)
+                                .context("patch SAM forward (CUDA)")?;
+                            sam_patches.push(out.to_device(&Device::Cpu)?.contiguous()?);
+                        }
+                        drop(sam_cuda);
+
+                        // Phase B — CLIP + Projector on CUDA for all patch crops
+                        info!("Loading CLIP on CUDA for patches");
+                        let clip_cuda = swap.load_clip_on_cuda()?;
+                        let mut projected_patches = Vec::with_capacity(batch);
+                        for (chunk, sam_patch_cpu) in chunks.iter().zip(sam_patches.iter()) {
+                            let chunk_cuda = chunk.to_device(device)?;
+                            let sam_patch_cuda = sam_patch_cpu.to_device(device)?;
+                            let clip_out = clip_cuda
+                                .forward(&chunk_cuda, Some(&sam_patch_cuda))
+                                .context("patch CLIP forward (CUDA)")?;
+
+                            let combined = {
+                                let (_, clip_seq, _) = clip_out.shape().dims3()?;
+                                let clip_tokens = clip_out
+                                    .narrow(D::Minus2, 1, clip_seq - 1)?
+                                    .contiguous()?;
+                                let (_, sc, sh, sw) = sam_patch_cuda.shape().dims4()?;
+                                let sam_toks = sam_patch_cuda
+                                    .reshape((1, sc, sh * sw))?
+                                    .transpose(1, 2)?
+                                    .contiguous()?;
+                                Tensor::cat(&[clip_tokens, sam_toks], D::Minus1)?
+                            };
+                            let proj = projector
+                                .project(&combined)
+                                .context("projector forward (patch)")?;
+                            projected_patches.push(proj);
+                        }
+                        drop(clip_cuda);
+
+                        // Format local tokens
+                        let crop_shape = vi.crop_shape.unwrap_or((1, batch));
+                        let (width_crops, height_crops) = crop_shape;
+                        let proj_refs: Vec<&Tensor> = projected_patches.iter().collect();
+                        let stacked = Tensor::cat(&proj_refs, 0)?;
+                        let nl = cast_dtype(&newline, stacked.dtype(), "local nl")?;
+                        let (n_patches, seq, hd) = stacked.shape().dims3()?;
+                        ensure!(
+                            n_patches == width_crops * height_crops,
+                            "patch count {} != crop grid {}x{}",
+                            n_patches, width_crops, height_crops,
+                        );
+                        let side = (seq as f64).sqrt() as usize;
+                        ensure!(side * side == seq, "local tokens {seq} not square");
+                        let grid = stacked
+                            .reshape((height_crops, width_crops, side, side, hd))?
+                            .permute((0, 2, 1, 3, 4))?
+                            .reshape((height_crops * side, width_crops * side, hd))?
+                            .contiguous()?;
+                        let (rows, cols, _) = grid.shape().dims3()?;
+                        let nl_exp = nl
+                            .reshape((1, 1, hd))?
+                            .expand((rows, 1, hd))?
+                            .contiguous()?;
+                        let with_breaks = Tensor::cat(&[grid, nl_exp], 1)?;
+                        Some(with_breaks.reshape((rows * (cols + 1), hd))?)
+                    } else {
+                        None
+                    };
+
+                    // ================================================================
+                    // Assemble final fused tokens
+                    // ================================================================
+                    let target_dtype = global_tokens.dtype();
+                    let mut segments = Vec::new();
+                    if let Some(lt) = local_tokens_opt {
+                        segments.push(cast_dtype_owned(
+                            lt,
+                            target_dtype,
+                            "local dtype cast",
+                        )?);
+                    }
+                    segments.push(global_tokens);
+                    let view_sep_tok = view_sep
+                        .reshape((1, hidden_size))?
+                        .contiguous()?;
+                    segments.push(cast_dtype_owned(
+                        view_sep_tok,
+                        target_dtype,
+                        "view sep dtype cast",
+                    )?);
+                    Tensor::cat(&segments, 0)?
+                }
+                None => Tensor::zeros((0, hidden_size), compute_dtype, device)?,
+            };
+            results.push(result);
+        }
+
+        info!("Image embeddings computed via hybrid swap (global CPU, patches CUDA)");
+        Ok(results)
     }
 
     pub fn compute_vision_projection(
