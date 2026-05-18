@@ -1580,58 +1580,67 @@ impl DeepseekOcrModel {
                         let patches_cpu = prepare_image_tensor_for_device(
                             patches, &Device::Cpu, compute_dtype,
                         )?;
-                        let chunks = patches_cpu.chunk(batch, 0)?;
 
-                        // Phase A — SAM on CUDA for all patch crops
+                        // Process patches in mini-batches to fit activation VRAM
+                        const CHUNK_SIZE: usize = 2;
+                        let num_chunks = (batch + CHUNK_SIZE - 1) / CHUNK_SIZE;
+                        let patch_chunks = patches_cpu.chunk(num_chunks, 0)?;
+                        info!(
+                            "Processing {} patches in {} chunk(s) of {}",
+                            batch, num_chunks, CHUNK_SIZE,
+                        );
+
+                        // Phase A — SAM on CUDA for each chunk, output to CPU
                         info!("Loading SAM on CUDA for patches");
                         let sam_cuda = swap.load_sam_on_cuda()?;
-                        let mut sam_patches = Vec::with_capacity(batch);
-                        for chunk in &chunks {
+                        let mut sam_outputs_cpu = Vec::with_capacity(num_chunks);
+                        for chunk in &patch_chunks {
                             let chunk_cuda = chunk.to_device(device)?;
                             let out = sam_cuda
                                 .forward(&chunk_cuda)
                                 .context("patch SAM forward (CUDA)")?;
-                            sam_patches.push(out.to_device(&Device::Cpu)?.contiguous()?);
+                            sam_outputs_cpu.push(out.to_device(&Device::Cpu)?.contiguous()?);
                         }
                         drop(sam_cuda);
 
-                        // Phase B — CLIP + Projector on CUDA for all patch crops
+                        // Phase B — CLIP + Projector on CUDA for each chunk
                         info!("Loading CLIP on CUDA for patches");
                         let clip_cuda = swap.load_clip_on_cuda()?;
-                        let mut projected_patches = Vec::with_capacity(batch);
-                        for (chunk, sam_patch_cpu) in chunks.iter().zip(sam_patches.iter()) {
-                            let chunk_cuda = chunk.to_device(device)?;
-                            let sam_patch_cuda = sam_patch_cpu.to_device(device)?;
+                        let mut all_projected = Vec::with_capacity(num_chunks);
+                        for (patch_chunk, sam_cpu) in
+                            patch_chunks.iter().zip(sam_outputs_cpu.iter())
+                        {
+                            let chunk_cuda = patch_chunk.to_device(device)?;
+                            let sam_cuda_t = sam_cpu.to_device(device)?;
                             let clip_out = clip_cuda
-                                .forward(&chunk_cuda, Some(&sam_patch_cuda))
+                                .forward(&chunk_cuda, Some(&sam_cuda_t))
                                 .context("patch CLIP forward (CUDA)")?;
 
-                            let combined = {
-                                let (_, clip_seq, _) = clip_out.shape().dims3()?;
-                                let clip_tokens = clip_out
-                                    .narrow(D::Minus2, 1, clip_seq - 1)?
-                                    .contiguous()?;
-                                let (_, sc, sh, sw) = sam_patch_cuda.shape().dims4()?;
-                                let sam_toks = sam_patch_cuda
-                                    .reshape((1, sc, sh * sw))?
-                                    .transpose(1, 2)?
-                                    .contiguous()?;
-                                Tensor::cat(&[clip_tokens, sam_toks], D::Minus1)?
-                            };
+                            let (_, clip_seq, _) = clip_out.shape().dims3()?;
+                            let clip_tokens = clip_out
+                                .narrow(D::Minus2, 1, clip_seq - 1)?
+                                .contiguous()?;
+                            let (_, sc, sh, sw) = sam_cuda_t.shape().dims4()?;
+                            let sam_tokens = sam_cuda_t
+                                .reshape((patch_chunk.dims()[0], sc, sh * sw))?
+                                .transpose(1, 2)?
+                                .contiguous()?;
+                            let combined =
+                                Tensor::cat(&[clip_tokens, sam_tokens], D::Minus1)?;
                             let proj = projector
                                 .project(&combined)
                                 .context("projector forward (patch)")?;
-                            projected_patches.push(proj);
+                            all_projected.push(proj);
                         }
                         drop(clip_cuda);
 
-                        // Format local tokens
+                        // Cat all projected chunks and format
+                        let proj_refs: Vec<&Tensor> = all_projected.iter().collect();
+                        let projected = Tensor::cat(&proj_refs, 0)?;
                         let crop_shape = vi.crop_shape.unwrap_or((1, batch));
                         let (width_crops, height_crops) = crop_shape;
-                        let proj_refs: Vec<&Tensor> = projected_patches.iter().collect();
-                        let stacked = Tensor::cat(&proj_refs, 0)?;
-                        let nl = cast_dtype(&newline, stacked.dtype(), "local nl")?;
-                        let (n_patches, seq, hd) = stacked.shape().dims3()?;
+                        let nl = cast_dtype(&newline, projected.dtype(), "local nl")?;
+                        let (n_patches, seq, hd) = projected.shape().dims3()?;
                         ensure!(
                             n_patches == width_crops * height_crops,
                             "patch count {} != crop grid {}x{}",
@@ -1639,7 +1648,7 @@ impl DeepseekOcrModel {
                         );
                         let side = (seq as f64).sqrt() as usize;
                         ensure!(side * side == seq, "local tokens {seq} not square");
-                        let grid = stacked
+                        let grid = projected
                             .reshape((height_crops, width_crops, side, side, hd))?
                             .permute((0, 2, 1, 3, 4))?
                             .reshape((height_crops * side, width_crops * side, hd))?
