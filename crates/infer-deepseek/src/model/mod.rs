@@ -1797,14 +1797,9 @@ impl DeepseekOcrModel {
         inputs: &[Option<VisionInput<'_>>],
         chunk_size: usize,
     ) -> Result<Vec<Tensor>> {
-        // Evict LM from CUDA so patches have the full VRAM budget.
-        // Safety: no language_model() access during the vision-only scope below.
-        unsafe {
-            self.move_language_to_device(&Device::Cpu)
-                .context("failed to evict LM from CUDA before vision")?;
-        }
-
-        // Use model-native F16 to keep activations lean.
+        // LM stays on CUDA (~950MB). Global SAM+CLIP on CPU. Patches on CUDA in
+        // mini-batches via SequentialVramSwap (~200MB SAM + ~200MB CLIP temporary).
+        // Peak VRAM: ~1.6GB — fits on 4GB without eviction.
         let compute_dtype = self.dtype;
         let projector = self.projector_for_dtype(compute_dtype);
         let device = self.device();
@@ -1951,12 +1946,6 @@ impl DeepseekOcrModel {
                 None => Tensor::zeros((0, hidden_size), compute_dtype, device)?,
             };
             results.push(result);
-        }
-
-        // Restore LM to CUDA now that vision processing is complete.
-        unsafe {
-            self.move_language_to_device(self.device())
-                .context("failed to restore LM to CUDA after vision")?;
         }
 
         info!("Image embeddings computed (global on CPU, patches on CUDA via swap)");
@@ -3022,6 +3011,8 @@ impl OcrEngine for DeepseekOcrModel {
             .into_iter()
             .next()
             .unwrap_or_default();
+        let gen_first: Vec<i64> = generated_tokens.iter().take(20).copied().collect();
+        trace!("decode: first 20 generated tokens = {gen_first:?}");
         let decoded = tokenizer
             .decode(
                 &generated_tokens
@@ -3031,6 +3022,7 @@ impl OcrEngine for DeepseekOcrModel {
                 true,
             )
             .unwrap_or_default();
+        trace!("decode: decoded text length = {} bytes", decoded.len());
         let normalized = normalize_text(&decoded);
 
         Ok(DecodeOutcome {
