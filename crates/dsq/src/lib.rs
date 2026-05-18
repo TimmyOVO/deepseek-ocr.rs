@@ -50,6 +50,8 @@ pub struct DsqHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DsqTensorDType {
     Q8_0,
+    Q2K,
+    Q3K,
     Q4K,
     Q6K,
     F16,
@@ -61,6 +63,8 @@ impl DsqTensorDType {
     pub fn as_u32(self) -> u32 {
         match self {
             Self::Q8_0 => 8,
+            Self::Q2K => 10,
+            Self::Q3K => 11,
             Self::Q4K => 12,
             Self::Q6K => 14,
             Self::F16 => 1,
@@ -72,6 +76,8 @@ impl DsqTensorDType {
     pub fn block_size(self) -> Option<usize> {
         match self {
             Self::Q8_0 => Some(32),
+            Self::Q2K => Some(256),
+            Self::Q3K => Some(256),
             Self::Q4K => Some(256),
             Self::Q6K => Some(256),
             Self::F16 | Self::BF16 | Self::F32 => None,
@@ -97,6 +103,8 @@ impl TryFrom<u32> for DsqTensorDType {
     fn try_from(value: u32) -> Result<Self> {
         match value {
             8 => Ok(Self::Q8_0),
+            10 => Ok(Self::Q2K),
+            11 => Ok(Self::Q3K),
             12 => Ok(Self::Q4K),
             14 => Ok(Self::Q6K),
             1 => Ok(Self::F16),
@@ -113,6 +121,8 @@ impl fmt::Display for DsqTensorDType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Q8_0 => f.write_str("Q8_0"),
+            Self::Q2K => f.write_str("Q2_K"),
+            Self::Q3K => f.write_str("Q3_K"),
             Self::Q4K => f.write_str("Q4_K"),
             Self::Q6K => f.write_str("Q6_K"),
             Self::F16 => f.write_str("F16"),

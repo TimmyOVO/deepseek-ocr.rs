@@ -100,6 +100,26 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
 
 pub const QUANTIZED_MODEL_ASSETS: &[QuantizedModelAsset] = &[
     QuantizedModelAsset {
+        id: "deepseek-ocr-q2k",
+        kind: ModelKind::Deepseek,
+        baseline_id: "deepseek-ocr",
+        snapshot: SnapshotAsset {
+            dtype: "Q2_K",
+            repo_id: "TimmyOVO/deepseek-ocr.rs",
+            filename: "DeepSeek-OCR.Q2_K.dsq",
+        },
+    },
+    QuantizedModelAsset {
+        id: "deepseek-ocr-q3k",
+        kind: ModelKind::Deepseek,
+        baseline_id: "deepseek-ocr",
+        snapshot: SnapshotAsset {
+            dtype: "Q3_K",
+            repo_id: "TimmyOVO/deepseek-ocr.rs",
+            filename: "DeepSeek-OCR.Q3_K.dsq",
+        },
+    },
+    QuantizedModelAsset {
         id: "deepseek-ocr-q4k",
         kind: ModelKind::Deepseek,
         baseline_id: "deepseek-ocr",

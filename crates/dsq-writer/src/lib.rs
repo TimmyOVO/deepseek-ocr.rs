@@ -6,7 +6,7 @@ use std::{
     slice,
 };
 
-use candle_core::quantized::k_quants::{BlockQ4K, BlockQ6K, GgmlType as CandleGgmlType};
+use candle_core::quantized::k_quants::{BlockQ2K, BlockQ3K, BlockQ4K, BlockQ6K, GgmlType as CandleGgmlType};
 
 use deepseek_ocr_dsq::{DsqBiasDType, DsqTensorDType};
 use half::{bf16, f16};
@@ -16,6 +16,10 @@ use thiserror::Error;
 const DSQ_MAGIC: &[u8; 7] = b"DSQSNAP";
 const DSQ_VERSION: u32 = 1;
 const Q8_BLOCK: usize = 32;
+const Q2K_BLOCK: usize = 256;
+const Q2K_BLOCK_BYTES: usize = mem::size_of::<BlockQ2K>();
+const Q3K_BLOCK: usize = 256;
+const Q3K_BLOCK_BYTES: usize = mem::size_of::<BlockQ3K>();
 const Q4K_BLOCK: usize = 256;
 const Q4K_BLOCK_BYTES: usize = mem::size_of::<BlockQ4K>(); // 144 bytes per block (K-scale layout)
 const Q6K_BLOCK: usize = 256;
@@ -160,6 +164,116 @@ impl DsqWriter {
             out_dim,
             in_dim,
             DsqTensorDType::Q8_0,
+            &qbytes,
+            bias_bytes
+                .as_deref()
+                .map(|slice| (slice, DsqBiasDType::F32)),
+        )
+    }
+
+    /// Quantize a dense matrix into Q2_K blocks and append it as a tensor record.
+    pub fn add_q2k_tensor(
+        &mut self,
+        name: impl Into<String>,
+        out_dim: usize,
+        in_dim: usize,
+        weights: &[f32],
+        bias: Option<&[f32]>,
+    ) -> Result<()> {
+        let name = name.into();
+        if self.records.iter().any(|rec| rec.name == name) {
+            return Err(DsqWriterError::DuplicateTensor(name.clone()));
+        }
+        if !in_dim.is_multiple_of(Q2K_BLOCK) {
+            return Err(DsqWriterError::InvalidBlock {
+                name: name.clone(),
+                in_dim,
+                block: Q2K_BLOCK,
+            });
+        }
+        let expected = out_dim
+            .checked_mul(in_dim)
+            .ok_or(DsqWriterError::ValueOverflow {
+                what: "tensor elements",
+            })?;
+        if weights.len() != expected {
+            return Err(DsqWriterError::DimensionMismatch {
+                name: name.clone(),
+                expected,
+                found: weights.len(),
+            });
+        }
+        if let Some(bias_vals) = bias {
+            if bias_vals.len() != out_dim {
+                return Err(DsqWriterError::BiasLengthMismatch {
+                    name: name.clone(),
+                    out_dim,
+                    found: bias_vals.len(),
+                });
+            }
+        }
+        let qbytes = quantize_q2k(weights, out_dim, in_dim)?;
+        let bias_bytes = bias.map(encode_bias_values);
+        self.add_quantized_tensor_internal(
+            name,
+            out_dim,
+            in_dim,
+            DsqTensorDType::Q2K,
+            &qbytes,
+            bias_bytes
+                .as_deref()
+                .map(|slice| (slice, DsqBiasDType::F32)),
+        )
+    }
+
+    /// Quantize a dense matrix into Q3_K blocks and append it as a tensor record.
+    pub fn add_q3k_tensor(
+        &mut self,
+        name: impl Into<String>,
+        out_dim: usize,
+        in_dim: usize,
+        weights: &[f32],
+        bias: Option<&[f32]>,
+    ) -> Result<()> {
+        let name = name.into();
+        if self.records.iter().any(|rec| rec.name == name) {
+            return Err(DsqWriterError::DuplicateTensor(name.clone()));
+        }
+        if !in_dim.is_multiple_of(Q3K_BLOCK) {
+            return Err(DsqWriterError::InvalidBlock {
+                name: name.clone(),
+                in_dim,
+                block: Q3K_BLOCK,
+            });
+        }
+        let expected = out_dim
+            .checked_mul(in_dim)
+            .ok_or(DsqWriterError::ValueOverflow {
+                what: "tensor elements",
+            })?;
+        if weights.len() != expected {
+            return Err(DsqWriterError::DimensionMismatch {
+                name: name.clone(),
+                expected,
+                found: weights.len(),
+            });
+        }
+        if let Some(bias_vals) = bias {
+            if bias_vals.len() != out_dim {
+                return Err(DsqWriterError::BiasLengthMismatch {
+                    name: name.clone(),
+                    out_dim,
+                    found: bias_vals.len(),
+                });
+            }
+        }
+        let qbytes = quantize_q3k(weights, out_dim, in_dim)?;
+        let bias_bytes = bias.map(encode_bias_values);
+        self.add_quantized_tensor_internal(
+            name,
+            out_dim,
+            in_dim,
+            DsqTensorDType::Q3K,
             &qbytes,
             bias_bytes
                 .as_deref()
@@ -597,6 +711,72 @@ pub fn quantize_q8_0(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8
     Ok(result)
 }
 
+pub fn quantize_q2k(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8>> {
+    if !cols.is_multiple_of(Q2K_BLOCK) {
+        return Err(DsqWriterError::InvalidBlock {
+            name: "quantize_q2k".into(),
+            in_dim: cols,
+            block: Q2K_BLOCK,
+        });
+    }
+    if weights.len() != rows * cols {
+        return Err(DsqWriterError::DimensionMismatch {
+            name: "quantize_q2k".into(),
+            expected: rows * cols,
+            found: weights.len(),
+        });
+    }
+    let blocks_per_row = cols / Q2K_BLOCK;
+    let total_blocks = rows
+        .checked_mul(blocks_per_row)
+        .ok_or(DsqWriterError::ValueOverflow { what: "q2k blocks" })?;
+    let mut result = Vec::with_capacity(total_blocks * Q2K_BLOCK_BYTES);
+    for row in 0..rows {
+        let start = row * cols;
+        let row_slice = &weights[start..start + cols];
+        let mut blocks = vec![<BlockQ2K as CandleGgmlType>::zeros(); blocks_per_row];
+        <BlockQ2K as CandleGgmlType>::from_float(row_slice, &mut blocks);
+        let bytes = unsafe {
+            slice::from_raw_parts(blocks.as_ptr() as *const u8, blocks.len() * Q2K_BLOCK_BYTES)
+        };
+        result.extend_from_slice(bytes);
+    }
+    Ok(result)
+}
+
+pub fn quantize_q3k(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8>> {
+    if !cols.is_multiple_of(Q3K_BLOCK) {
+        return Err(DsqWriterError::InvalidBlock {
+            name: "quantize_q3k".into(),
+            in_dim: cols,
+            block: Q3K_BLOCK,
+        });
+    }
+    if weights.len() != rows * cols {
+        return Err(DsqWriterError::DimensionMismatch {
+            name: "quantize_q3k".into(),
+            expected: rows * cols,
+            found: weights.len(),
+        });
+    }
+    let blocks_per_row = cols / Q3K_BLOCK;
+    let total_blocks = rows
+        .checked_mul(blocks_per_row)
+        .ok_or(DsqWriterError::ValueOverflow { what: "q3k blocks" })?;
+    let mut result = Vec::with_capacity(total_blocks * Q3K_BLOCK_BYTES);
+    for row in 0..rows {
+        let start = row * cols;
+        let row_slice = &weights[start..start + cols];
+        let mut blocks = vec![<BlockQ3K as CandleGgmlType>::zeros(); blocks_per_row];
+        <BlockQ3K as CandleGgmlType>::from_float(row_slice, &mut blocks);
+        let bytes = unsafe {
+            slice::from_raw_parts(blocks.as_ptr() as *const u8, blocks.len() * Q3K_BLOCK_BYTES)
+        };
+        result.extend_from_slice(bytes);
+    }
+    Ok(result)
+}
+
 pub fn quantize_q4k(weights: &[f32], rows: usize, cols: usize) -> Result<Vec<u8>> {
     if !cols.is_multiple_of(Q4K_BLOCK) {
         return Err(DsqWriterError::InvalidBlock {
@@ -688,6 +868,8 @@ fn expected_qbyte_len(
     let blocks_per_row = in_dim / block;
     let per_block = match dtype {
         DsqTensorDType::Q8_0 => Q8_BLOCK_BYTES,
+        DsqTensorDType::Q2K => Q2K_BLOCK_BYTES,
+        DsqTensorDType::Q3K => Q3K_BLOCK_BYTES,
         DsqTensorDType::Q4K => Q4K_BLOCK_BYTES,
         DsqTensorDType::Q6K => Q6K_BLOCK_BYTES,
         other => unreachable!("expected quantized dtype, got {other:?}"),

@@ -49,7 +49,7 @@ pub struct SnapshotArgs {
         long,
         value_name = "DTYPE",
         default_value = "Q8_0",
-        value_parser = ["Q8_0", "Q4_K", "Q6_K"],
+        value_parser = ["Q8_0", "Q2_K", "Q3_K", "Q4_K", "Q6_K"],
         help_heading = "Snapshot"
     )]
     pub dtype: String,

@@ -336,7 +336,11 @@ impl QuantizedSnapshot {
         let qweight_bytes = self.reader.tensor_bytes(record)?;
         let bias = self.load_bias(record, name, device)?;
         match record.q_dtype {
-            DsqTensorDType::Q8_0 | DsqTensorDType::Q4K | DsqTensorDType::Q6K => {
+            DsqTensorDType::Q8_0
+            | DsqTensorDType::Q2K
+            | DsqTensorDType::Q3K
+            | DsqTensorDType::Q4K
+            | DsqTensorDType::Q6K => {
                 let ggml_dtype = ggml_from_snapshot_dtype(record.q_dtype)?;
                 let qtensor = qtensor_from_ggml(
                     ggml_dtype,
@@ -580,6 +584,8 @@ impl QuantizedSnapshot {
 fn ggml_from_snapshot_dtype(dtype: DsqTensorDType) -> Result<GgmlDType> {
     match dtype {
         DsqTensorDType::Q8_0 => Ok(GgmlDType::Q8_0),
+        DsqTensorDType::Q2K => Ok(GgmlDType::Q2K),
+        DsqTensorDType::Q3K => Ok(GgmlDType::Q3K),
         DsqTensorDType::Q4K => Ok(GgmlDType::Q4K),
         DsqTensorDType::Q6K => Ok(GgmlDType::Q6K),
         other => bail!("snapshot dtype {:?} does not map to ggml", other),
@@ -588,7 +594,11 @@ fn ggml_from_snapshot_dtype(dtype: DsqTensorDType) -> Result<GgmlDType> {
 
 fn ensure_supported_snapshot_dtype(dtype: DsqTensorDType) -> Result<()> {
     match dtype {
-        DsqTensorDType::Q8_0 | DsqTensorDType::Q4K | DsqTensorDType::Q6K => Ok(()),
+        DsqTensorDType::Q8_0
+        | DsqTensorDType::Q2K
+        | DsqTensorDType::Q3K
+        | DsqTensorDType::Q4K
+        | DsqTensorDType::Q6K => Ok(()),
         DsqTensorDType::F16 | DsqTensorDType::BF16 | DsqTensorDType::F32 => Ok(()),
     }
 }
