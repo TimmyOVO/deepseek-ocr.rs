@@ -202,6 +202,8 @@ pub struct InferenceSettings {
     pub base_size: u32,
     pub image_size: u32,
     pub crop_mode: bool,
+    pub vision_swap: bool,
+    pub patches_per_batch: usize,
     #[serde(flatten)]
     pub decode: DecodeParameters,
 }
@@ -215,6 +217,8 @@ impl Default for InferenceSettings {
             base_size: 1024,
             image_size: 640,
             crop_mode: true,
+            vision_swap: true,
+            patches_per_batch: 2,
             decode: DecodeParameters::default(),
         }
     }
@@ -526,6 +530,8 @@ pub struct InferenceOverride {
     pub base_size: Option<u32>,
     pub image_size: Option<u32>,
     pub crop_mode: Option<bool>,
+    pub vision_swap: Option<bool>,
+    pub patches_per_batch: Option<usize>,
     #[serde(flatten)]
     pub decode: DecodeParametersPatch,
 }
@@ -550,6 +556,12 @@ impl std::ops::AddAssign<&InferenceOverride> for InferenceSettings {
         if let Some(crop_mode) = rhs.crop_mode {
             self.crop_mode = crop_mode;
         }
+        if let Some(vision_swap) = rhs.vision_swap {
+            self.vision_swap = vision_swap;
+        }
+        if let Some(patches_per_batch) = rhs.patches_per_batch {
+            self.patches_per_batch = patches_per_batch;
+        }
 
         self.decode += &rhs.decode;
     }
@@ -561,6 +573,8 @@ impl InferenceSettings {
             base_size: self.base_size,
             image_size: self.image_size,
             crop_mode: self.crop_mode,
+            vision_swap: self.vision_swap,
+            patches_per_batch: self.patches_per_batch,
         }
     }
 }

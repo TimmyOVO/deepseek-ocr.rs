@@ -253,6 +253,7 @@ fn run_one_baseline(baseline_dir: &Path) -> Result<()> {
             base_size,
             image_size,
             crop_mode,
+            ..Default::default()
         };
 
         let outcome = model.decode(

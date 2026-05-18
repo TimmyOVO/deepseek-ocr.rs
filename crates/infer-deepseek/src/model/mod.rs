@@ -1374,15 +1374,26 @@ impl DeepseekOcrModel {
     }
 
     /// Compute image embeddings using the model's stored vision modules.
+    /// Uses auto-detection for VRAM swap (same as passing vision_swap=true, patches_per_batch=2).
     pub fn compute_image_embeddings(
         &self,
         inputs: &[Option<VisionInput<'_>>],
     ) -> Result<Vec<Tensor>> {
+        self.compute_image_embeddings_impl(inputs, true, 2)
+    }
+
+    /// Internal implementation with explicit swap control.
+    fn compute_image_embeddings_impl(
+        &self,
+        inputs: &[Option<VisionInput<'_>>],
+        vision_swap: bool,
+        patches_per_batch: usize,
+    ) -> Result<Vec<Tensor>> {
         match &self.vision {
             VisionBackend::Ocr1(_vision) => {
-                if should_use_vram_swap(self.device()) {
+                if vision_swap && should_use_vram_swap(self.device()) {
                     info!("Low VRAM device — sequential swap mode for vision");
-                    return self.compute_image_embeddings_with_swap(inputs);
+                    return self.compute_image_embeddings_with_swap(inputs, patches_per_batch);
                 }
                 let vision = self.vision_modules().context("vision modules missing")?;
                 let compute_dtype = low_precision_compute_dtype(self.dtype);
@@ -1502,6 +1513,7 @@ impl DeepseekOcrModel {
     fn compute_image_embeddings_with_swap(
         &self,
         inputs: &[Option<VisionInput<'_>>],
+        chunk_size: usize,
     ) -> Result<Vec<Tensor>> {
         let vision = self.vision_modules().context("vision modules missing")?;
         let compute_dtype = low_precision_compute_dtype(self.dtype);
@@ -1562,8 +1574,7 @@ impl DeepseekOcrModel {
                             let swap = SequentialVramSwap::new(
                                 &wp, cfg, dt, device,
                             );
-                            const CHUNK_SIZE: usize = 2;
-                            let num = (batch + CHUNK_SIZE - 1) / CHUNK_SIZE;
+                            let num = (batch + chunk_size - 1) / chunk_size;
                             let pcs = patches.chunk(num, 0)?;
 
                             let sam_cuda = swap
@@ -2688,7 +2699,7 @@ impl OcrEngine for DeepseekOcrModel {
             vision.crop_mode,
         )
         .with_context(|| "vision input failed")?;
-        let embeddings = compute_image_embeddings(self, &owned_inputs)
+        let embeddings = compute_image_embeddings(self, &owned_inputs, vision)
             .with_context(|| "image embedding failed")?;
         let (input_ids_vec, mask_vec) = build_prompt_tokens(
             tokenizer,
@@ -2798,6 +2809,7 @@ fn prepare_vision_inputs(
 fn compute_image_embeddings(
     model: &DeepseekOcrModel,
     owned_inputs: &[OwnedVisionInput],
+    vision: VisionSettings,
 ) -> Result<Vec<Tensor>> {
     let timer = Timer::new("vision.compute_embeddings");
     if owned_inputs.is_empty() {
@@ -2811,11 +2823,7 @@ fn compute_image_embeddings(
         .map(|owned| Some(owned.as_ref()))
         .collect();
     trace!("Computing image embeddings for {} image(s)...", refs.len());
-    // Vision models (SAM, CLIP) are kept on CPU permanently because SAM's global
-    // attention requires ~1GB of temporary activation memory that exceeds the
-    // available VRAM on consumer GPUs when combined with the LM and SAM weights.
-    // The CPU vision pipeline is slower (~92s for 6 crops) but stable.
-    let outputs = model.compute_image_embeddings(&refs);
+    let outputs = model.compute_image_embeddings_impl(&refs, vision.vision_swap, vision.patches_per_batch);
     match &outputs {
         Ok(values) => {
             let tokens_total: u64 = values

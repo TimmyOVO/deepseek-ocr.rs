@@ -54,6 +54,14 @@ pub struct CommonInferenceArgs {
     #[arg(long, help_heading = "Inference")]
     pub crop_mode: Option<bool>,
 
+    /// Enable VRAM swap for vision models (auto-detect by default).
+    #[arg(long, help_heading = "Inference")]
+    pub vision_swap: Option<bool>,
+
+    /// Patch batch size for VRAM swap (default: 2).
+    #[arg(long, help_heading = "Inference")]
+    pub patches_per_batch: Option<usize>,
+
     /// Default max tokens budget.
     #[arg(long, help_heading = "Inference")]
     pub max_new_tokens: Option<usize>,
@@ -111,6 +119,8 @@ impl From<&CommonInferenceArgs> for crate::InferenceOverride {
             base_size: value.base_size,
             image_size: value.image_size,
             crop_mode: value.crop_mode,
+            vision_swap: value.vision_swap,
+            patches_per_batch: value.patches_per_batch,
             decode: deepseek_ocr_core::DecodeParametersPatch {
                 max_new_tokens: value.max_new_tokens,
                 do_sample: value.do_sample,

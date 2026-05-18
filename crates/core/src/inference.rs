@@ -15,6 +15,24 @@ pub struct VisionSettings {
     pub base_size: u32,
     pub image_size: u32,
     pub crop_mode: bool,
+    /// Enable VRAM swap for vision models (default: true = auto-detect).
+    /// Set to false to force SAM/CLIP on CPU.
+    pub vision_swap: bool,
+    /// Patch batch size for VRAM swap (default: 2).
+    /// Smaller values use less VRAM but are slower.
+    pub patches_per_batch: usize,
+}
+
+impl Default for VisionSettings {
+    fn default() -> Self {
+        Self {
+            base_size: 1024,
+            image_size: 640,
+            crop_mode: true,
+            vision_swap: true,
+            patches_per_batch: 2,
+        }
+    }
 }
 
 /// Decoding parameters that map directly onto generation options.
