@@ -149,6 +149,14 @@ impl ModelAdapter for DeepSeekOcrAdapter {
         }
         match tensor {
             "lm_head.weight" | "model.projector.layers.weight" => Some(DsqTensorDType::Q8_0),
+            // gate_proj and up_proj form the gating pathway — very sensitive to
+            // precision loss.  When the primary dtype is Q2_K, promote them to
+            // Q4_K to preserve the expert routing signal inside each MoE layer.
+            name if ctx.primary == DsqTensorDType::Q2K
+                && (name.contains("gate_proj") || name.contains("up_proj")) =>
+            {
+                Some(DsqTensorDType::Q4K)
+            }
             _ => None,
         }
     }
