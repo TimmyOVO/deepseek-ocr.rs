@@ -3,6 +3,11 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::{Context, Result, ensure};
+use candle_core::{DType, Device, Tensor, quantized::{QMatMul, QStorage, QTensor}};
+use candle_nn::VarBuilder;
+use tracing::trace;
+
 use crate::{
     config::DeepseekV2Config,
     quant_snapshot::{
@@ -12,10 +17,6 @@ use crate::{
         LinearLayerGroup, QuantModule, QuantizationOutcome, QuantizationState, backend_label,
     },
 };
-use anyhow::{Context, Result, ensure};
-use candle_core::{DType, Tensor, quantized::QMatMul};
-use candle_nn::VarBuilder;
-use tracing::trace;
 
 /// Fully connected layer weights captured directly from safetensors via [`VarBuilder`].
 #[derive(Clone)]
@@ -639,3 +640,163 @@ pub(crate) fn qualified_name(vb: &VarBuilder, tensor: &str) -> String {
 }
 
 // Runtime quantization path removed: no `maybe_quantize_linear` fallback.
+
+// ---------------------------------------------------------------------------
+// Device transfer: used by the VRAM-swap path to move LM weights between CPU
+// and GPU while preserving quantization (QMatMul::QTensor reconstructed via
+// raw byte transfer).
+// ---------------------------------------------------------------------------
+
+/// Copy a [`QMatMul`] to another device, preserving its quantized form when
+/// possible (the `QTensor` variant gets reconstructed from raw bytes).
+pub(crate) fn qmatmul_to_device(qm: &QMatMul, device: &Device) -> Result<QMatMul> {
+    match qm {
+        QMatMul::QTensor(qt) => {
+            let data = qt.data()?;
+            let dtype = qt.dtype();
+            let shape = qt.shape().clone();
+            let storage = QStorage::from_data(data, device, dtype)?;
+            let qt_new = QTensor::new(storage, shape)?;
+            Ok(QMatMul::QTensor(Arc::new(qt_new)))
+        }
+        QMatMul::Tensor(t) => Ok(QMatMul::Tensor(t.to_device(device)?)),
+        QMatMul::TensorF16(t) => Ok(QMatMul::TensorF16(t.to_device(device)?)),
+    }
+}
+
+impl LinearWeights {
+    pub fn to_device(&self, device: &Device) -> Result<Self> {
+        Ok(Self {
+            weight: self
+                .weight
+                .as_ref()
+                .map(|w| w.to_device(device))
+                .transpose()?,
+            weight_f32: self
+                .weight_f32
+                .as_ref()
+                .map(|w| w.to_device(device))
+                .transpose()?,
+            bias: self
+                .bias
+                .as_ref()
+                .map(|b| b.to_device(device))
+                .transpose()?,
+            qmatmul: self
+                .qmatmul
+                .as_ref()
+                .map(|qm| Ok::<_, anyhow::Error>(Arc::new(qmatmul_to_device(qm, device)?)))
+                .transpose()?,
+            out_dim: self.out_dim,
+            in_dim: self.in_dim,
+            label: self.label.clone(),
+        })
+    }
+}
+
+impl RmsNormWeights {
+    pub fn to_device(&self, device: &Device) -> Result<Self> {
+        Ok(Self {
+            weight: self.weight.to_device(device)?,
+        })
+    }
+}
+
+impl AttentionWeights {
+    pub fn to_device(&self, device: &Device) -> Result<Self> {
+        Ok(Self {
+            q_proj: self.q_proj.to_device(device)?,
+            k_proj: self.k_proj.to_device(device)?,
+            v_proj: self.v_proj.to_device(device)?,
+            o_proj: self.o_proj.to_device(device)?,
+        })
+    }
+}
+
+impl DenseMlpWeights {
+    pub fn to_device(&self, device: &Device) -> Result<Self> {
+        Ok(Self {
+            gate_proj: self.gate_proj.to_device(device)?,
+            up_proj: self.up_proj.to_device(device)?,
+            down_proj: self.down_proj.to_device(device)?,
+        })
+    }
+}
+
+impl MoeWeights {
+    pub fn to_device(&self, device: &Device) -> Result<Self> {
+        Ok(Self {
+            gate_weight: self.gate_weight.to_device(device)?,
+            experts: self
+                .experts
+                .iter()
+                .map(|e| e.to_device(device))
+                .collect::<Result<Vec<_>>>()?,
+            shared_experts: self
+                .shared_experts
+                .as_ref()
+                .map(|s| s.to_device(device))
+                .transpose()?,
+            aux_bias: self
+                .aux_bias
+                .as_ref()
+                .map(|b| b.to_device(device))
+                .transpose()?,
+        })
+    }
+}
+
+impl MlpWeights {
+    pub fn to_device(&self, device: &Device) -> Result<Self> {
+        match self {
+            Self::Dense(d) => Ok(Self::Dense(d.to_device(device)?)),
+            Self::Moe(m) => Ok(Self::Moe(m.to_device(device)?)),
+        }
+    }
+}
+
+impl TransformerBlockWeights {
+    pub fn to_device(&self, device: &Device) -> Result<Self> {
+        Ok(Self {
+            attention: self.attention.to_device(device)?,
+            mlp: self.mlp.to_device(device)?,
+            input_layernorm: self.input_layernorm.to_device(device)?,
+            post_attention_layernorm: self.post_attention_layernorm.to_device(device)?,
+        })
+    }
+}
+
+impl TransformerWeights {
+    pub fn to_device(&self, device: &Device) -> Result<Self> {
+        Ok(Self {
+            layers: self
+                .layers
+                .iter()
+                .map(|l| l.to_device(device))
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl DeepseekLanguageModelWeights {
+    pub fn to_device(&self, device: &Device) -> Result<Self> {
+        Ok(Self {
+            token_embedding: self.token_embedding.to_device(device)?,
+            transformer: self.transformer.to_device(device)?,
+            final_layernorm: self.final_layernorm.to_device(device)?,
+            lm_head_weight: self
+                .lm_head_weight
+                .as_ref()
+                .map(|w| w.to_device(device))
+                .transpose()?,
+            lm_head_q: self
+                .lm_head_q
+                .as_ref()
+                .map(|qm| Ok::<_, anyhow::Error>(Arc::new(qmatmul_to_device(qm, device)?)))
+                .transpose()?,
+            lm_out_dim: self.lm_out_dim,
+            lm_in_dim: self.lm_in_dim,
+            lm_head_label: self.lm_head_label.clone(),
+        })
+    }
+}

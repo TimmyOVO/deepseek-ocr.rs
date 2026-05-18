@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use deepseek_ocr_core::{
     DecodeParameters, DecodeParametersPatch, ModelKind,
-    runtime::{DeviceKind, Precision},
+    runtime::{DeviceKind, Precision, VisionOffload},
 };
 use serde::{Deserialize, Serialize};
 
@@ -204,6 +204,8 @@ pub struct InferenceSettings {
     pub crop_mode: bool,
     pub vision_swap: bool,
     pub patches_per_batch: usize,
+    pub cpu_patches: usize,
+    pub vision_offload: VisionOffload,
     #[serde(flatten)]
     pub decode: DecodeParameters,
 }
@@ -219,6 +221,8 @@ impl Default for InferenceSettings {
             crop_mode: true,
             vision_swap: true,
             patches_per_batch: 2,
+            vision_offload: VisionOffload::default(),
+            cpu_patches: 0,
             decode: DecodeParameters::default(),
         }
     }
@@ -532,6 +536,8 @@ pub struct InferenceOverride {
     pub crop_mode: Option<bool>,
     pub vision_swap: Option<bool>,
     pub patches_per_batch: Option<usize>,
+    pub vision_offload: Option<VisionOffload>,
+    pub cpu_patches: Option<usize>,
     #[serde(flatten)]
     pub decode: DecodeParametersPatch,
 }
@@ -562,6 +568,12 @@ impl std::ops::AddAssign<&InferenceOverride> for InferenceSettings {
         if let Some(patches_per_batch) = rhs.patches_per_batch {
             self.patches_per_batch = patches_per_batch;
         }
+        if let Some(vision_offload) = rhs.vision_offload {
+            self.vision_offload = vision_offload;
+        }
+        if let Some(cpu_patches) = rhs.cpu_patches {
+            self.cpu_patches = cpu_patches;
+        }
 
         self.decode += &rhs.decode;
     }
@@ -575,6 +587,8 @@ impl InferenceSettings {
             crop_mode: self.crop_mode,
             vision_swap: self.vision_swap,
             patches_per_batch: self.patches_per_batch,
+            cpu_patches: self.cpu_patches,
+            vision_offload: self.vision_offload,
         }
     }
 }

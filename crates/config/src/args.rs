@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use deepseek_ocr_core::runtime::{DeviceKind, Precision};
+use deepseek_ocr_core::runtime::{DeviceKind, Precision, VisionOffload};
 
 use crate::config::{ConfigOverrides, ServerOverride};
 
@@ -62,6 +62,14 @@ pub struct CommonInferenceArgs {
     #[arg(long, help_heading = "Inference")]
     pub patches_per_batch: Option<usize>,
 
+    /// Number of patches to process on CPU in sequential mode (default: 0 = all on GPU).
+    #[arg(long, help_heading = "Inference")]
+    pub cpu_patches: Option<usize>,
+
+    /// Vision offload strategy (auto, sequential, full-gpu, cpu).
+    #[arg(long, help_heading = "Inference")]
+    pub vision_offload: Option<VisionOffload>,
+
     /// Default max tokens budget.
     #[arg(long, help_heading = "Inference")]
     pub max_new_tokens: Option<usize>,
@@ -121,6 +129,8 @@ impl From<&CommonInferenceArgs> for crate::InferenceOverride {
             crop_mode: value.crop_mode,
             vision_swap: value.vision_swap,
             patches_per_batch: value.patches_per_batch,
+            cpu_patches: value.cpu_patches,
+            vision_offload: value.vision_offload,
             decode: deepseek_ocr_core::DecodeParametersPatch {
                 max_new_tokens: value.max_new_tokens,
                 do_sample: value.do_sample,

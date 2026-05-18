@@ -19,6 +19,20 @@ pub enum Precision {
     Bf16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionOffload {
+    /// Auto-detect based on VRAM: use Sequential on <6GB, normal on >=6GB.
+    #[default]
+    Auto,
+    /// Hybrid: global view on CPU, patch crops on CUDA (current swap behavior).
+    Sequential,
+    /// Full GPU: load SAM then CLIP sequentially on CUDA for all vision.
+    FullGpu,
+    /// Force all vision on CPU (no VRAM swap).
+    Cpu,
+}
+
 pub fn prepare_device_and_dtype(
     device: DeviceKind,
     precision: Option<Precision>,
