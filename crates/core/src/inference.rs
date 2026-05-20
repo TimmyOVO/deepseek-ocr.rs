@@ -4,7 +4,7 @@ use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 
-use crate::{benchmark::Timer, conversation::get_conv_template, sampling::TokenSelectionParams};
+use crate::{benchmark::Timer, conversation::get_conv_template, runtime::VisionOffload, sampling::TokenSelectionParams};
 
 /// Callback used to stream decoded token pieces.
 pub type StreamCallback<'a> = Option<&'a dyn Fn(usize, &[i64])>;
@@ -15,6 +15,31 @@ pub struct VisionSettings {
     pub base_size: u32,
     pub image_size: u32,
     pub crop_mode: bool,
+    /// Enable VRAM swap for vision models (default: true = auto-detect).
+    /// Set to false to force SAM/CLIP on CPU.
+    pub vision_swap: bool,
+    /// Patch batch size for VRAM swap (default: 2).
+    /// Smaller values use less VRAM but are slower.
+    pub patches_per_batch: usize,
+    /// Vision offload strategy (overrides vision_swap when non-Auto).
+    pub vision_offload: VisionOffload,
+    /// Number of patches to process on CPU in sequential mode (default: 0 = all on GPU).
+    /// First `cpu_patches` patches run on CPU alongside global view; the rest use VRAM swap on GPU.
+    pub cpu_patches: usize,
+}
+
+impl Default for VisionSettings {
+    fn default() -> Self {
+        Self {
+            base_size: 1024,
+            image_size: 640,
+            crop_mode: true,
+            vision_swap: true,
+            patches_per_batch: 2,
+            vision_offload: VisionOffload::Auto,
+            cpu_patches: 0,
+        }
+    }
 }
 
 /// Decoding parameters that map directly onto generation options.

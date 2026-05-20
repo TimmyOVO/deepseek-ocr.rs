@@ -50,7 +50,7 @@ The original DeepSeek-OCR ships as a Python + Transformers stack—powerful, but
 - **One repo, two entrypoints** – a batteries-included CLI for batch jobs and a Rocket-based server that speaks `/v1/responses` and `/v1/chat/completions`.
 - **Works out of the box** – pulls model weights, configs, and tokenizer from whichever of Hugging Face or ModelScope responds fastest on first run.
 - **Optimised for Apple Silicon** – optional Metal backend with FP16 execution for real-time OCR on laptops.
-- **CUDA (alpha)** – experimental support via `--features cuda` + `--device cuda --dtype f16`; expect rough edges while we finish kernel coverage.
+- **CUDA** – NVIDIA GPU acceleration via `--features cuda` + `--device cuda --dtype f16`. VRAM swap (`--vision-offload sequential`) brings DeepSeek‑OCR Q4K down to **~2.3GB VRAM peak** on low-end GPUs (RTX 3050 4GB, GTX 1060, etc.). Full GPU vision mode (`--vision-offload full-gpu`) available for higher-VRAM cards. See the [VRAM swap section](#vram-swap--low-vram-gpus) for details.
 - **Intel MKL (preview)** – faster BLAS on x86 via `--features mkl` (install Intel oneMKL beforehand).
 - **OpenAI client compatibility** – drop-in replacement for popular SDKs; the server automatically collapses chat history to the latest user turn for OCR-friendly prompts.
 
@@ -81,7 +81,7 @@ The workspace exposes three base model IDs plus DSQ-quantized variants for DeepS
 - Rust 1.78+ (edition 2024 support)
 - Git
 - Optional: Apple Silicon running macOS 13+ for Metal acceleration
-- Optional: CUDA 12.2+ toolkit + driver for experimental NVIDIA GPU acceleration on Linux/Windows
+- Optional: CUDA 12.2+ toolkit + driver for NVIDIA GPU acceleration on Linux/Windows
 - Optional: Intel oneAPI MKL for preview x86 acceleration (see below)
 - (Recommended) Hugging Face account with `HF_TOKEN` when pulling from the `deepseek-ai/DeepSeek-OCR` repo (ModelScope is used automatically when it’s faster/reachable).
 
@@ -132,6 +132,9 @@ template = "plain"
 base_size = 1024
 image_size = 640
 crop_mode = true
+vision_swap = true
+patches_per_batch = 2
+vision_offload = "auto"
 max_new_tokens = 512
 use_cache = true
 
@@ -141,7 +144,7 @@ port = 8000
 ```
 
 - `[models]` picks the active model and lets you add more entries (each entry can point to its own config/tokenizer/weights).
-- `[inference]` controls notebook-friendly defaults shared by the CLI and server (device, template, vision sizing, decoding budget, cache usage).
+- `[inference]` controls notebook-friendly defaults shared by the CLI and server (device, template, vision sizing, decoding budget, cache usage, VRAM swap settings).
 - `[server]` sets the network binding and the model identifier reported by `/v1/models`.
 
 See `crates/cli/README.md` and `crates/server/README.md` for concise override tables.
@@ -175,7 +178,7 @@ cargo run -p deepseek-ocr-cli --release -- \
 
 > macOS tip: append `--features metal` to the `cargo run`/`cargo build` commands to compile with Accelerate + Metal backends.
 >
-> CUDA tip (Linux/Windows): append `--features cuda` and run with `--device cuda --dtype f16` to target NVIDIA GPUs—feature is still alpha, so be ready for quirks.
+> CUDA tip (Linux/Windows): append `--features cuda` and run with `--device cuda --dtype f16` to target NVIDIA GPUs. Add `--vision-offload sequential` for low-VRAM cards.
 >
 > Intel MKL preview: install Intel oneMKL, then build with `--features mkl` for faster CPU matmuls on x86.
 
@@ -195,6 +198,10 @@ Key flags:
 - Sampling controls: `--do-sample`, `--temperature`, `--top-p`, `--top-k`, `--repetition-penalty`, `--no-repeat-ngram-size`, `--seed`
   - By default decoding stays deterministic (`do_sample=false`, `temperature=0.0`, `no_repeat_ngram_size=20`)
   - To use stochastic sampling set `--do-sample true --temperature 0.8` (and optionally adjust the other knobs)
+- VRAM swap flags (CUDA only, DeepSeek‑OCR):
+  - `--vision-offload <STRATEGY>` – choose vision offloading mode: `auto` (default), `sequential`, `full-gpu`, `cpu`
+  - `--vision-swap <BOOL>` – enable/disable VRAM-aware loading (overridden by `--vision-offload`)
+  - `--patches-per-batch <N>` – patch batch size for CUDA processing (default: 2; smaller = less VRAM)
 
 ### Switching Models
 
@@ -241,10 +248,44 @@ Notes:
 ## GPU Acceleration ⚡
 
 - **Metal (macOS 13+ Apple Silicon)** – pass `--device metal --dtype f16` and build binaries with `--features metal` so Candle links against Accelerate + Metal.
-- **CUDA (alpha, NVIDIA GPUs)** – install CUDA 12.2+ toolkits, build with `--features cuda`, and launch the CLI/server with `--device cuda --dtype f16`; still experimental.
+- **CUDA (NVIDIA GPUs)** – install CUDA 12.2+ toolkits, build with `--features cuda`, and launch the CLI/server with `--device cuda --dtype f16`. Includes VRAM swap support for low-memory GPUs (RTX 3050 4GB, GTX 1060, etc.) and full-GPU vision mode for larger cards. See [VRAM Swap](#vram-swap--low-vram-gpus) below.
 - **Intel MKL (preview)** – install Intel oneMKL and build with `--features mkl` to speed up CPU workloads on x86.
 - For either backend, prefer release builds (e.g. `cargo build --release -p deepseek-ocr-cli --features metal|cuda`) to maximise throughput.
 - Combine GPU runs with `--max-new-tokens` and crop tuning flags to balance latency vs. quality.
+
+## VRAM Swap & Low-VRAM GPUs 🔄
+
+DeepSeek‑OCR with Q4K quantisation (`deepseek-ocr-q4k`) fits in **~950 MB** on CUDA, but the SAM+CLIP vision models require an additional **~2.1 GB**. On low-VRAM GPUs (≤6 GB), a **VRAM swap** mode loads one vision model at a time:
+
+| Mode | `--vision-offload` | Global View | Patch Crops | Peak VRAM (Q4K) |
+|------|-------------------|-------------|-------------|-----------------|
+| **Auto** (default) | `auto` | Auto-detects: uses Sequential on <6 GB | | ~2.3 GB |
+| **Sequential** | `sequential` | CPU (always) | CUDA (chunked) | ~2.3 GB |
+| **Full GPU** | `full-gpu` | CUDA | CUDA (chunked) | ~3.2 GB |
+| **CPU only** | `cpu` | CPU | CPU | ~1 GB |
+
+**Sequential mode** runs the global view on CPU while patch crops process on CUDA in parallel (scoped threads), giving the best VRAM/speed trade-off on tight GPUs.
+
+**Full GPU mode** keeps all vision on CUDA: loads SAM → processes all images → drops SAM → loads CLIP → processes with cached SAM outputs. Offers faster vision prefill when VRAM allows (~3.2 GB peak).
+
+Fine-tune VRAM vs. throughput with `--patches-per-batch`:
+```bash
+# Minimum VRAM (processes one patch at a time on CUDA)
+cargo run --release --features cuda -- --device cuda --dtype f16 --model deepseek-ocr-q4k \
+  --vision-offload sequential --patches-per-batch 1 --prompt "<image> OCR" --image doc.png
+
+# Faster (batches 4 patches per CUDA forward)
+cargo run --release --features cuda -- --device cuda --dtype f16 --model deepseek-ocr-q4k \
+  --vision-offload sequential --patches-per-batch 4 --prompt "<image> OCR" --image doc.png
+```
+
+Disable swap entirely (force CPU vision) when you have enough RAM:
+```bash
+cargo run --release --features cuda -- --device cuda --dtype f16 --model deepseek-ocr-q4k \
+  --vision-offload cpu --prompt "<image> OCR" --image doc.png
+```
+
+> **Note:** VRAM swap is only relevant for the DeepSeek‑OCR vision pipeline (SAM+CLIP). PaddleOCR‑VL and DotsOCR do not benefit since they use lighter or different vision towers.
 
 ## Repository Layout 🗂️
 
@@ -265,7 +306,8 @@ Detailed CLI usage lives in [`crates/cli/README.md`](crates/cli/README.md). The 
 ## Roadmap 🗺️
 
 - ✅ Apple Metal backend with FP16 support and CLI/server parity on macOS.
-- ✅ NVIDIA CUDA backend (alpha) – build with `--features cuda`, run with `--device cuda --dtype f16` for Linux/Windows GPUs; polishing in progress.
+- ✅ NVIDIA CUDA backend – build with `--features cuda`, run with `--device cuda --dtype f16` for Linux/Windows GPUs. VRAM swap brings DeepSeek‑OCR Q4K down to ~2.3 GB on RTX 3050 4 GB.
+- ✅ **VRAM Swap** – sequential vision offload for low-VRAM CUDA GPUs via `--vision-offload sequential`, full-GPU mode via `--vision-offload full-gpu`, CPU-only mode via `--vision-offload cpu`.
 - 🔄 **Parity polish** – finish projector normalisation + crop tiling alignment; extend intermediate-tensor diff suite beyond the current sample baseline.
 - 🔄 **Grounding & streaming** – port the Python post-processing helpers (box extraction, markdown polish) and refine SSE streaming ergonomics.
 - 🔄 **Cross-platform acceleration** – continue tuning CUDA kernels, add automatic device detection across CPU/Metal/CUDA, and publish opt-in GPU benchmarks.

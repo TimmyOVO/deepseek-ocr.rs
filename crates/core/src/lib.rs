@@ -11,6 +11,7 @@ pub use inference::{
     DecodeOutcome, DecodeParameters, DecodeParametersPatch, ModelKind, ModelLoadArgs, OcrEngine,
     VisionSettings, normalize_text, render_prompt,
 };
+pub use runtime::{DeviceKind, Precision, VisionOffload, default_dtype_for_device, dtype_from_precision, prepare_device_and_dtype};
 
 // #[cfg(feature = "mkl")]
 // extern crate intel_mkl_src;

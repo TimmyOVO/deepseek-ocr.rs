@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use deepseek_ocr_core::{
     DecodeParameters, DecodeParametersPatch, ModelKind,
-    runtime::{DeviceKind, Precision},
+    runtime::{DeviceKind, Precision, VisionOffload},
 };
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +62,12 @@ fn ensure_default_model_entries(entries: &mut BTreeMap<String, ModelEntry>) {
     entries
         .entry("glm-ocr".to_string())
         .or_insert_with(glm_ocr_entry);
+    entries
+        .entry("deepseek-ocr-q2k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q2_K", "deepseek-ocr"));
+    entries
+        .entry("deepseek-ocr-q3k".to_string())
+        .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q3_K", "deepseek-ocr"));
     entries
         .entry("deepseek-ocr-q4k".to_string())
         .or_insert_with(|| quantized_entry(ModelKind::Deepseek, "Q4_K", "deepseek-ocr"));
@@ -139,7 +145,13 @@ fn ensure_model_defaults(entries: &mut BTreeMap<String, ModelEntry>) {
         fill_missing_model_defaults(entry, &ocr2_defaults);
     }
 
-    let quantized_deepseek_ids = ["deepseek-ocr-q4k", "deepseek-ocr-q6k", "deepseek-ocr-q8k"];
+    let quantized_deepseek_ids = [
+        "deepseek-ocr-q2k",
+        "deepseek-ocr-q3k",
+        "deepseek-ocr-q4k",
+        "deepseek-ocr-q6k",
+        "deepseek-ocr-q8k",
+    ];
     for model_id in quantized_deepseek_ids {
         if let Some(entry) = entries.get_mut(model_id) {
             fill_missing_model_defaults(entry, &ocr1_defaults);
@@ -202,6 +214,10 @@ pub struct InferenceSettings {
     pub base_size: u32,
     pub image_size: u32,
     pub crop_mode: bool,
+    pub vision_swap: bool,
+    pub patches_per_batch: usize,
+    pub cpu_patches: usize,
+    pub vision_offload: VisionOffload,
     #[serde(flatten)]
     pub decode: DecodeParameters,
 }
@@ -215,6 +231,10 @@ impl Default for InferenceSettings {
             base_size: 1024,
             image_size: 640,
             crop_mode: true,
+            vision_swap: true,
+            patches_per_batch: 2,
+            vision_offload: VisionOffload::default(),
+            cpu_patches: 0,
             decode: DecodeParameters::default(),
         }
     }
@@ -526,6 +546,10 @@ pub struct InferenceOverride {
     pub base_size: Option<u32>,
     pub image_size: Option<u32>,
     pub crop_mode: Option<bool>,
+    pub vision_swap: Option<bool>,
+    pub patches_per_batch: Option<usize>,
+    pub vision_offload: Option<VisionOffload>,
+    pub cpu_patches: Option<usize>,
     #[serde(flatten)]
     pub decode: DecodeParametersPatch,
 }
@@ -550,6 +574,18 @@ impl std::ops::AddAssign<&InferenceOverride> for InferenceSettings {
         if let Some(crop_mode) = rhs.crop_mode {
             self.crop_mode = crop_mode;
         }
+        if let Some(vision_swap) = rhs.vision_swap {
+            self.vision_swap = vision_swap;
+        }
+        if let Some(patches_per_batch) = rhs.patches_per_batch {
+            self.patches_per_batch = patches_per_batch;
+        }
+        if let Some(vision_offload) = rhs.vision_offload {
+            self.vision_offload = vision_offload;
+        }
+        if let Some(cpu_patches) = rhs.cpu_patches {
+            self.cpu_patches = cpu_patches;
+        }
 
         self.decode += &rhs.decode;
     }
@@ -561,6 +597,10 @@ impl InferenceSettings {
             base_size: self.base_size,
             image_size: self.image_size,
             crop_mode: self.crop_mode,
+            vision_swap: self.vision_swap,
+            patches_per_batch: self.patches_per_batch,
+            cpu_patches: self.cpu_patches,
+            vision_offload: self.vision_offload,
         }
     }
 }

@@ -1,4 +1,5 @@
 use std::{
+    cell::UnsafeCell,
     convert::TryFrom,
     path::{Path, PathBuf},
     sync::Arc,
@@ -12,6 +13,9 @@ use image::{DynamicImage, Rgb, RgbImage, imageops};
 use rayon::prelude::*;
 use tokenizers::Tokenizer;
 use tracing::{info, trace};
+
+mod swap;
+use swap::{SequentialVramSwap, should_use_vram_swap};
 
 use crate::{
     config::{DeepseekOcrConfig, ProjectorConfig, load_ocr_config},
@@ -35,6 +39,7 @@ use deepseek_ocr_core::{
         DecodeOutcome, DecodeParameters, ModelKind, ModelLoadArgs, OcrEngine, VisionSettings,
         normalize_text,
     },
+    runtime::VisionOffload,
     sampling::{TokenSelectionParams, init_rng, select_token_id},
 };
 
@@ -485,7 +490,7 @@ impl ImageProjector {
 /// language model. For now it wires the language stack so we can exercise text-only inference.
 pub struct DeepseekOcrModel {
     cfg: Arc<DeepseekOcrConfig>,
-    language: DeepseekLanguageModel,
+    language: UnsafeCell<DeepseekLanguageModel>,
     projector_cfg: Arc<ProjectorConfig>,
     projector: ImageProjector,
     projector_f32: Option<ImageProjector>,
@@ -525,8 +530,10 @@ struct VisionModules {
 
 struct VisionContext<'a> {
     projector: &'a ImageProjector,
-    vision: &'a VisionModules,
+    sam: &'a SamBackbone,
+    clip: &'a ClipVisionModel,
     device: &'a Device,
+    vision_device: Device,
     dtype: DType,
     parallel: bool,
 }
@@ -557,17 +564,46 @@ fn prepare_image_tensor_for_device(
 impl<'a> VisionContext<'a> {
     fn new_with_dtype(
         model: &'a DeepseekOcrModel,
-        vision: &'a VisionModules,
+        sam: &'a SamBackbone,
+        clip: &'a ClipVisionModel,
         projector: &'a ImageProjector,
         dtype: DType,
     ) -> Self {
-        let parallel = matches!(model.device(), Device::Cpu);
+        let device = model.device();
+        let parallel = matches!(device, Device::Cpu);
+        let vision_device = if device.is_cuda() {
+            Device::Cpu
+        } else {
+            device.clone()
+        };
         Self {
             projector,
-            vision,
-            device: model.device(),
+            sam,
+            clip,
+            device,
+            vision_device,
             dtype,
             parallel,
+        }
+    }
+
+    /// Create a VisionContext with an explicit vision device (e.g. CUDA for swapped models).
+    fn new_with_explicit_device(
+        model: &'a DeepseekOcrModel,
+        sam: &'a SamBackbone,
+        clip: &'a ClipVisionModel,
+        projector: &'a ImageProjector,
+        dtype: DType,
+        vision_device: Device,
+    ) -> Self {
+        Self {
+            projector,
+            sam,
+            clip,
+            device: model.device(),
+            vision_device,
+            dtype,
+            parallel: false,
         }
     }
 
@@ -584,7 +620,7 @@ impl<'a> VisionContext<'a> {
     }
 
     fn prepare_image_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        prepare_image_tensor_for_device(tensor, self.device, self.dtype)
+        prepare_image_tensor_for_device(tensor, &self.vision_device, self.dtype)
     }
 
     fn append_row_breaks(&self, grid: Tensor, newline: &Tensor) -> Result<Tensor> {
@@ -758,12 +794,10 @@ impl<'a> VisionContext<'a> {
             .prepare_image_tensor(input.global)
             .context("invalid global image tensor")?;
         let sam_global = self
-            .vision
             .sam
             .forward(&global)
             .context("sam forward (global)")?;
         let clip_global = self
-            .vision
             .clip
             .forward(&global, Some(&sam_global))
             .context("clip forward (global)")?;
@@ -772,6 +806,11 @@ impl<'a> VisionContext<'a> {
             .context("concat global clip+sam tokens")?
             .contiguous()
             .context("global pre tokens not contiguous")?;
+        let global_pre = if !global_pre.device().same_device(self.device) {
+            global_pre.to_device(self.device)?
+        } else {
+            global_pre
+        };
         let global_post = self
             .projector
             .project(&global_pre)
@@ -851,28 +890,60 @@ impl<'a> VisionContext<'a> {
         self.process_patch_batch(&chunk)
     }
 
-    fn process_patch_batch(&self, batch: &Tensor) -> Result<(Tensor, Tensor)> {
+    /// Process a single image through SAM → CLIP → projector.
+    /// Used by `process_patch_batch` to avoid batching multiple images through
+    /// SAM at once, which would multiply activation memory and cause OOM on
+    /// low-VRAM GPUs.
+    fn process_single_image(&self, image: &Tensor) -> Result<(Tensor, Tensor)> {
         let sam_local = self
-            .vision
             .sam
-            .forward(batch)
+            .forward(image)
             .context("sam forward (local)")?;
         let clip_local = self
-            .vision
             .clip
-            .forward(batch, Some(&sam_local))
+            .forward(image, Some(&sam_local))
             .context("clip forward (local)")?;
         let local_pre = self
             .build_clip_sam_tokens(&clip_local, &sam_local)
             .context("concat local clip+sam tokens")?
             .contiguous()
             .context("local pre tokens not contiguous")?;
+        let local_pre = if !local_pre.device().same_device(self.device) {
+            local_pre.to_device(self.device)?
+        } else {
+            local_pre
+        };
         let local_post = self
             .projector
             .project(&local_pre)
             .context("project local features")?
             .contiguous()
             .context("local post tokens not contiguous")?;
+        Ok((local_pre, local_post))
+    }
+
+    fn process_patch_batch(&self, batch: &Tensor) -> Result<(Tensor, Tensor)> {
+        let batch_size = batch.shape().dims4().map(|d| d.0).unwrap_or(0);
+        if batch_size <= 1 {
+            return self.process_single_image(batch);
+        }
+        // Process each patch individually to limit peak SAM activation memory
+        let chunks = batch.chunk(batch_size, 0)?;
+        let results: Result<Vec<_>> = chunks
+            .into_iter()
+            .map(|chunk| self.process_single_image(&chunk))
+            .collect();
+        let (pre_list, post_list): (Vec<_>, Vec<_>) = results?
+            .into_iter()
+            .unzip();
+        let pre_refs: Vec<_> = pre_list.iter().collect();
+        let post_refs: Vec<_> = post_list.iter().collect();
+        let local_pre = Tensor::cat(&pre_refs, 0)?
+            .contiguous()
+            .context("batched local pre tokens not contiguous")?;
+        let local_post = Tensor::cat(&post_refs, 0)?
+            .contiguous()
+            .context("batched local post tokens not contiguous")?;
         Ok((local_pre, local_post))
     }
 
@@ -990,7 +1061,7 @@ impl DeepseekOcrModel {
         .context("failed to load language model")?;
 
         let low_precision = matches!(dtype, DType::F16 | DType::BF16);
-        if low_precision {
+        if low_precision && !device.is_cuda() {
             let vb_f32_lang = unsafe {
                 VarBuilder::from_mmaped_safetensors(
                     &[resolved_weights.as_path()],
@@ -1036,7 +1107,7 @@ impl DeepseekOcrModel {
         let projector = ImageProjector::load(&vb, projector_cfg.as_ref(), snapshot.as_deref())
             .context("failed to load image projector")?;
         let low_precision = matches!(dtype, DType::F16 | DType::BF16);
-        let (projector_f32, vision_f32, vision_ocr2_f32) = if low_precision {
+        let (projector_f32, vision_f32, vision_ocr2_f32) = if low_precision && !device.is_cuda() {
             let vb_f32 = unsafe {
                 VarBuilder::from_mmaped_safetensors(
                     &[resolved_weights.as_path()],
@@ -1074,10 +1145,34 @@ impl DeepseekOcrModel {
         };
         let vision = match variant {
             OcrVariant::Ocr1 => {
-                let sam = SamBackbone::new(cfg.as_ref(), &vb.pp("model").pp("sam_model"))
-                    .context("failed to load SAM backbone")?;
-                let clip = ClipVisionModel::load(cfg.as_ref(), &vb.pp("model").pp("vision_model"))
-                    .context("failed to load CLIP vision model")?;
+                let (sam, clip) = if device.is_cuda() {
+                    let vb_cpu = unsafe {
+                        VarBuilder::from_mmaped_safetensors(
+                            &[resolved_weights.as_path()],
+                            dtype,
+                            &Device::Cpu,
+                        )
+                    }
+                    .with_context(|| {
+                        format!(
+                            "failed to mmap cpu weights for vision at {}",
+                            resolved_weights.display()
+                        )
+                    })?;
+                    let sam = SamBackbone::new(cfg.as_ref(), &vb_cpu.pp("model").pp("sam_model"))
+                        .context("failed to load SAM backbone on CPU")?;
+                    let clip =
+                        ClipVisionModel::load(cfg.as_ref(), &vb_cpu.pp("model").pp("vision_model"))
+                            .context("failed to load CLIP vision model on CPU")?;
+                    (sam, clip)
+                } else {
+                    let sam = SamBackbone::new(cfg.as_ref(), &vb.pp("model").pp("sam_model"))
+                        .context("failed to load SAM backbone")?;
+                    let clip =
+                        ClipVisionModel::load(cfg.as_ref(), &vb.pp("model").pp("vision_model"))
+                            .context("failed to load CLIP vision model")?;
+                    (sam, clip)
+                };
                 VisionBackend::Ocr1(Box::new(VisionModules { sam, clip }))
             }
             OcrVariant::Ocr2 => VisionBackend::Ocr2(Box::new(
@@ -1088,9 +1183,16 @@ impl DeepseekOcrModel {
         // Log quantization summary after all quantizable modules (language + projector) are loaded.
         QuantizationState::global().log_summary(&device);
 
+        // On CUDA, keep the token embedding on CPU to free VRAM for inference activations.
+        if device.is_cuda() {
+            language
+                .move_token_embedding_to(&Device::Cpu)
+                .context("failed to move token embedding to CPU")?;
+        }
+
         Ok(Self {
             cfg,
-            language,
+            language: UnsafeCell::new(language),
             projector_cfg,
             projector,
             projector_f32,
@@ -1126,12 +1228,23 @@ impl DeepseekOcrModel {
 
     /// Borrow the language-only component.
     pub fn language_model(&self) -> &DeepseekLanguageModel {
-        &self.language
+        // SAFETY: language is only mutated during controlled swap operations
+        // (swap_language_for_vision/restore_language) which are single-threaded
+        // and never overlap with read accesses.
+        unsafe { &*self.language.get() }
+    }
+
+    /// Mutably borrow the language model (for device swap during FullGpu vision).
+    /// # Safety
+    /// Caller must ensure no concurrent access via language_model().
+    pub unsafe fn language_model_mut(&self) -> &mut DeepseekLanguageModel {
+        // SAFETY: caller must ensure no concurrent mutable access
+        unsafe { &mut *self.language.get() }
     }
 
     /// Whether flash attention is enabled for the underlying decoder.
     pub fn flash_attention_enabled(&self) -> bool {
-        self.language.flash_attention_enabled()
+        self.language_model().flash_attention_enabled()
     }
 
     /// Access the projector configuration.
@@ -1141,21 +1254,22 @@ impl DeepseekOcrModel {
 
     /// Construct a fresh dynamic cache sized for this model.
     pub fn new_cache(&self) -> DynamicCache {
-        let layers = self.language.transformer_weights().layers.len();
+        let layers = self.language_model().transformer_weights().layers.len();
         DynamicCache::with_num_layers(layers)
     }
 
     /// Construct a fresh dynamic cache sized for this model, matching the model dtype.
     pub fn new_cache_for_dtype(&self, dtype: DType) -> Result<DynamicCache> {
-        let layers = self.language.transformer_weights().layers.len();
+        let lm = self.language_model();
+        let layers = lm.transformer_weights().layers.len();
         let mut cache = DynamicCache::with_num_layers(layers);
         // Pre-seed a zero-length cache entry per layer so cache dtype is deterministic.
         // Low-precision models keep cache storage in f32 to reduce accumulation drift.
         let store_dtype = cache_store_dtype(self.dtype, dtype);
         for layer in 0..layers {
-            let heads = self.language.config().num_attention_heads;
-            let head_dim = self.language.config().hidden_size / heads;
-            let v_head_dim = self.language.config().v_head_dim.unwrap_or(head_dim);
+            let heads = lm.config().num_attention_heads;
+            let head_dim = lm.config().hidden_size / heads;
+            let v_head_dim = lm.config().v_head_dim.unwrap_or(head_dim);
             let device = self.device.clone();
             let key_t =
                 Tensor::zeros((1, heads, head_dim, 0), store_dtype, &device)?.contiguous()?;
@@ -1168,7 +1282,23 @@ impl DeepseekOcrModel {
 
     /// Helper to guard prompt-scoped cache state.
     pub fn prompt_guard<'a>(&'a self, cache: &'a mut DynamicCache) -> PromptCacheGuard<'a> {
-        self.language.prompt_guard(cache)
+        self.language_model().prompt_guard(cache)
+    }
+
+    /// Move the language model to `target` device in-place, freeing its old device memory.
+    ///
+    /// # Safety
+    ///
+    /// No code may access `language_model()` during or between calls to this method.
+    /// Typically called immediately before and after vision processing on a different device.
+    pub unsafe fn move_language_to_device(&self, target: &Device) -> Result<()> {
+        // SAFETY: caller must ensure no concurrent access to self.language
+        let old = unsafe { std::ptr::read(self.language.get()) };
+        let moved = old.to_device(target)?;
+        // `old` is implicitly freed here as `read` gives us ownership.
+        // Overwrite the stale bytes with the new value.
+        unsafe { std::ptr::write(self.language.get(), moved) };
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -1209,7 +1339,7 @@ impl DeepseekOcrModel {
             Some(t) => t.clone(),
             None => {
                 let ids = input_ids.expect("input_ids validity checked above");
-                self.language.embed_tokens(ids)?
+                self.language_model().embed_tokens(ids)?
             }
         };
 
@@ -1238,7 +1368,7 @@ impl DeepseekOcrModel {
             "failed to cast language input embeddings",
         )?;
 
-        let lm_out = self.language.forward(
+        let lm_out = self.language_model().forward(
             None,
             Some(&embeddings),
             attention_mask,
@@ -1273,44 +1403,41 @@ impl DeepseekOcrModel {
         )
     }
 
+    /// Compute image embeddings using the model's stored vision modules.
+    /// Uses auto-detection for VRAM swap (same as default VisionSettings).
     pub fn compute_image_embeddings(
         &self,
         inputs: &[Option<VisionInput<'_>>],
     ) -> Result<Vec<Tensor>> {
+        self.compute_image_embeddings_impl(inputs, &VisionSettings::default())
+    }
+
+    /// Internal implementation with explicit VisionSettings.
+    fn compute_image_embeddings_impl(
+        &self,
+        inputs: &[Option<VisionInput<'_>>],
+        vision: &VisionSettings,
+    ) -> Result<Vec<Tensor>> {
+        let vision_swap = match vision.vision_offload {
+            VisionOffload::Auto => vision.vision_swap,
+            VisionOffload::Sequential | VisionOffload::FullGpu => true,
+            VisionOffload::Cpu => false,
+        };
         match &self.vision {
             VisionBackend::Ocr1(_vision) => {
-                let compute_dtype = low_precision_compute_dtype(self.dtype);
-                let vision_native = self.vision_modules().context("vision modules missing")?;
-                let vision = select_f32(compute_dtype, vision_native, self.vision_modules_f32());
-                let projector = self.projector_for_dtype(compute_dtype);
-                let ctx = VisionContext::new_with_dtype(self, vision, projector, compute_dtype);
-                let hidden = ctx.hidden_size();
-                let device = ctx.device();
-                if ctx.parallel_enabled() {
-                    inputs
-                        .par_iter()
-                        .map(|input| {
-                            if let Some(vision_input) = input {
-                                ctx.process_input(vision_input)
-                            } else {
-                                Tensor::zeros((0, hidden), compute_dtype, device)
-                                    .map_err(Into::into)
-                            }
-                        })
-                        .collect::<Result<Vec<_>>>()
-                } else {
-                    inputs
-                        .iter()
-                        .map(|input| {
-                            if let Some(vision_input) = input {
-                                ctx.process_input(vision_input)
-                            } else {
-                                Tensor::zeros((0, hidden), compute_dtype, device)
-                                    .map_err(Into::into)
-                            }
-                        })
-                        .collect::<Result<Vec<_>>>()
+                if vision.vision_offload == VisionOffload::FullGpu {
+                    info!("Full GPU mode for vision — loading SAM then CLIP sequentially on CUDA");
+                    return self.compute_image_embeddings_full_gpu(inputs, vision.patches_per_batch);
                 }
+                if vision_swap && should_use_vram_swap(self.device()) {
+                    info!("Low VRAM device — sequential swap mode for vision");
+                    return self.compute_image_embeddings_with_swap(inputs, vision.cpu_patches, vision.patches_per_batch);
+                }
+                let vision = self.vision_modules().context("vision modules missing")?;
+                let compute_dtype = low_precision_compute_dtype(self.dtype);
+                let vision = select_f32(compute_dtype, vision, self.vision_modules_f32());
+                let projector = self.projector_for_dtype(compute_dtype);
+                self.compute_image_embeddings_with(inputs, &vision.sam, &vision.clip, projector, &Device::Cpu)
             }
             VisionBackend::Ocr2(vision) => {
                 let hidden = self.projector.hidden_size();
@@ -1374,6 +1501,455 @@ impl DeepseekOcrModel {
                 }
             }
         }
+    }
+
+    /// Compute image embeddings using an explicit vision module and vision device.
+    fn compute_image_embeddings_with(
+        &self,
+        inputs: &[Option<VisionInput<'_>>],
+        sam: &SamBackbone,
+        clip: &ClipVisionModel,
+        projector: &ImageProjector,
+        vision_device: &Device,
+    ) -> Result<Vec<Tensor>> {
+        let compute_dtype = low_precision_compute_dtype(self.dtype);
+        let ctx = VisionContext::new_with_explicit_device(self, sam, clip, projector, compute_dtype, vision_device.clone());
+        let hidden = ctx.hidden_size();
+        let device = ctx.device();
+        if ctx.parallel_enabled() {
+            inputs
+                .par_iter()
+                .map(|input| {
+                    if let Some(vision_input) = input {
+                        ctx.process_input(vision_input)
+                    } else {
+                        Tensor::zeros((0, hidden), compute_dtype, device)
+                            .map_err(Into::into)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()
+        } else {
+            inputs
+                .iter()
+                .map(|input| {
+                    if let Some(vision_input) = input {
+                        ctx.process_input(vision_input)
+                    } else {
+                        Tensor::zeros((0, hidden), compute_dtype, device)
+                            .map_err(Into::into)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()
+        }
+    }
+
+    /// Compute image embeddings using hybrid swap: global on CPU, patches on CUDA.
+    ///
+    /// The global view runs on CPU (identical to CPU path); patch crops run on
+    /// CUDA via SequentialVramSwap. Both execute in parallel via scoped threads
+    /// since they use separate hardware (CPU vs GPU).
+    fn compute_image_embeddings_with_swap(
+        &self,
+        inputs: &[Option<VisionInput<'_>>],
+        cpu_patches: usize,
+        chunk_size: usize,
+    ) -> Result<Vec<Tensor>> {
+        let vision = self.vision_modules().context("vision modules missing")?;
+        let compute_dtype = low_precision_compute_dtype(self.dtype);
+        let projector = self.projector_for_dtype(compute_dtype);
+        let device = self.device();
+        let hidden_size = projector.hidden_size();
+        let newline = projector.image_newline_token(compute_dtype, device)?;
+        let view_sep = projector.view_separator_token(compute_dtype, device)?;
+
+        let mut results = Vec::with_capacity(inputs.len());
+
+        for input in inputs {
+            let result = match input {
+                Some(vi) => {
+                    let global = prepare_image_tensor_for_device(
+                        vi.global, &Device::Cpu, compute_dtype,
+                    )?;
+                    let patches_data = vi.patches.map(|p| {
+                        prepare_image_tensor_for_device(p, &Device::Cpu, compute_dtype)
+                    }).transpose()?;
+
+                    let wp = self.weights_path.clone();
+                    let cfg = self.cfg.clone();
+                    let dt = self.dtype;
+
+                    // Split patches: first cpu_patches on CPU, rest on GPU
+                    let patches_split = patches_data.as_ref().map(|p| -> Result<_> {
+                        let (batch, _, _, _) = p.shape().dims4()?;
+                        let cpu_n = cpu_patches.min(batch);
+                        Ok((cpu_n, batch - cpu_n))
+                    }).transpose()?;
+
+                    // Parallelize CPU tasks (global + cpu patches) and GPU patches via scoped threads.
+                    let (combined_global_cpu, cpu_pre_tokens, gpu_projected) = std::thread::scope(|s| {
+                        // Thread 1 (CPU): global SAM+CLIP + cpu_patches SAM+CLIP
+                        let cpu_handle = s.spawn(|| -> Result<(Tensor, Vec<Tensor>)> {
+                            let sg = vision
+                                .sam
+                                .forward(&global)
+                                .context("global SAM forward (CPU)")?;
+                            let cg = vision
+                                .clip
+                                .forward(&global, Some(&sg))
+                                .context("global CLIP forward (CPU)")?;
+                            let (_, clip_seq, _) = cg.shape().dims3()?;
+                            let ct = cg
+                                .narrow(D::Minus2, 1, clip_seq - 1)?
+                                .contiguous()?;
+                            let (_, sc, sh, sw) = sg.shape().dims4()?;
+                            let st = sg
+                                .reshape((1, sc, sh * sw))?
+                                .transpose(1, 2)?
+                                .contiguous()?;
+                            let combined_global = Tensor::cat(&[ct, st], D::Minus1)
+                                .context("cat global combined")?;
+
+                            // Process cpu_patches on CPU
+                            let mut cpu_pres = Vec::new();
+                            if let Some((cpu_n, _)) = patches_split {
+                                if cpu_n > 0 {
+                                    let p = patches_data.as_ref().unwrap();
+                                    let cpu_p = p.narrow(0, 0, cpu_n)?;
+                                    for i in 0..cpu_n {
+                                        let patch = cpu_p.narrow(0, i, 1)?.contiguous()?;
+                                        let ss = vision.sam.forward(&patch)
+                                            .context("cpu patch SAM forward")?;
+                                        let cc = vision.clip.forward(&patch, Some(&ss))
+                                            .context("cpu patch CLIP forward")?;
+                                        let (_, cs, _) = cc.shape().dims3()?;
+                                        let ct = cc.narrow(D::Minus2, 1, cs - 1)?.contiguous()?;
+                                        let (_, sn, sh, sw) = ss.shape().dims4()?;
+                                        let st = ss
+                                            .reshape((1, sn, sh * sw))?
+                                            .transpose(1, 2)?
+                                            .contiguous()?;
+                                        cpu_pres.push(Tensor::cat(&[ct, st], D::Minus1)?);
+                                    }
+                                }
+                            }
+                            Ok((combined_global, cpu_pres))
+                        });
+
+                        // Thread 2 (GPU): gpu_patches via SequentialVramSwap → projected
+                        let gpu_handle = s.spawn(|| -> Result<Option<Vec<Tensor>>> {
+                            let Some((cpu_n, gpu_n)) = patches_split else {
+                                return Ok(None);
+                            };
+                            if gpu_n == 0 {
+                                return Ok(None);
+                            }
+                            let patches = patches_data.as_ref().unwrap();
+                            let gpu_p = patches.narrow(0, cpu_n, gpu_n)?;
+                            let gpu_batch = gpu_n;
+                            let swap = SequentialVramSwap::new(&wp, cfg, dt, device);
+                            let num = (gpu_batch + chunk_size - 1) / chunk_size;
+                            let pcs = gpu_p.chunk(num, 0)?;
+
+                            let sam_cuda = swap
+                                .load_sam_on_cuda()
+                                .context("load SAM on CUDA for patches")?;
+                            let mut sam_cpu = Vec::with_capacity(num);
+                            for c in &pcs {
+                                let cc = c.to_device(device)?;
+                                let o = sam_cuda
+                                    .forward(&cc)
+                                    .context("patch SAM forward (CUDA)")?;
+                                sam_cpu.push(o.to_device(&Device::Cpu)?.contiguous()?);
+                            }
+                            drop(sam_cuda);
+
+                            let clip_cuda = swap
+                                .load_clip_on_cuda()
+                                .context("load CLIP on CUDA for patches")?;
+                            let mut all_proj = Vec::with_capacity(num);
+                            for (pc, sc) in pcs.iter().zip(sam_cpu.iter()) {
+                                let cc = pc.to_device(device)?;
+                                let st = sc.to_device(device)?;
+                                let co = clip_cuda
+                                    .forward(&cc, Some(&st))
+                                    .context("patch CLIP forward (CUDA)")?;
+                                let (_, cseq, _) = co.shape().dims3()?;
+                                let ct = co
+                                    .narrow(D::Minus2, 1, cseq - 1)?
+                                    .contiguous()?;
+                                let (_, scn, sh, sw) = st.shape().dims4()?;
+                                let sts = st
+                                    .reshape((pc.dims()[0], scn, sh * sw))?
+                                    .transpose(1, 2)?
+                                    .contiguous()?;
+                                let cb = Tensor::cat(&[ct, sts], D::Minus1)?;
+                                all_proj.push(
+                                    projector.project(&cb).context("proj forward (patch)")?,
+                                );
+                            }
+                            drop(clip_cuda);
+                            Ok(Some(all_proj))
+                        });
+
+                        let (combined, cpu_pres) = cpu_handle.join().unwrap()?;
+                        let gpu_res = gpu_handle.join().unwrap()?;
+                        Ok::<_, anyhow::Error>((combined, cpu_pres, gpu_res))
+                    })?;
+                    device.synchronize()?;
+
+                    // Project cpu_pres on CUDA and merge with gpu projected tokens
+                    let mut all_projected: Vec<Tensor> = Vec::new();
+                    for cp in &cpu_pre_tokens {
+                        let cp_cuda = cp.to_device(device)?;
+                        all_projected.push(
+                            projector.project(&cp_cuda).context("proj forward (cpu patch)")?,
+                        );
+                    }
+                    if let Some(gpu_proj) = gpu_projected {
+                        all_projected.extend(gpu_proj);
+                    }
+
+                    // Format local grid if any patches were processed
+                    let local_tokens_opt = if !all_projected.is_empty() {
+                        let refs: Vec<&Tensor> = all_projected.iter().collect();
+                        let proj = Tensor::cat(&refs, 0)?;
+                        let total_batch = if let Some((cpu_n, gpu_n)) = patches_split {
+                            cpu_n + gpu_n
+                        } else {
+                            0
+                        };
+                        let cs = vi.crop_shape.unwrap_or((1, total_batch));
+                        let (wc, hc) = cs;
+                        let nl = cast_dtype(&newline, proj.dtype(), "local nl")?;
+                        let (np, seq, hd) = proj.shape().dims3()?;
+                        ensure!(np == wc * hc);
+                        let side = (seq as f64).sqrt() as usize;
+                        ensure!(side * side == seq);
+                        let grid = proj
+                            .reshape((hc, wc, side, side, hd))?
+                            .permute((0, 2, 1, 3, 4))?
+                            .reshape((hc * side, wc * side, hd))?
+                            .contiguous()?;
+                        let (rows, cols, _) = grid.shape().dims3()?;
+                        let nle = nl
+                            .reshape((1, 1, hd))?
+                            .expand((rows, 1, hd))?
+                            .contiguous()?;
+                        let wb = Tensor::cat(&[grid, nle], 1)?;
+                        Some(wb.reshape((rows * (cols + 1), hd))?)
+                    } else {
+                        None
+                    };
+
+                    // Project + format global
+                    let combined_cuda = combined_global_cpu.to_device(device)?;
+                    let projected_global = projector
+                        .project(&combined_cuda)
+                        .context("projector forward (global)")?;
+                    let global_tokens = {
+                        let nl = cast_dtype(&newline, projected_global.dtype(), "nl")?;
+                        let (bs, seq, hd) = projected_global.shape().dims3()?;
+                        ensure!(bs == 1, "global batch must be 1, got {bs}");
+                        let side = (seq as f64).sqrt() as usize;
+                        ensure!(side * side == seq, "global tokens {seq} not square");
+                        let grid = projected_global
+                            .get(0)?
+                            .reshape((side, side, hd))?
+                            .contiguous()?;
+                        let nle = nl
+                            .reshape((1, 1, hd))?
+                            .expand((side, 1, hd))?
+                            .contiguous()?;
+                        Tensor::cat(&[grid, nle], 1)?
+                            .reshape((side * (side + 1), hd))?
+                    };
+
+                    // Assemble final token sequence
+                    let target_dtype = global_tokens.dtype();
+                    let mut segments = Vec::new();
+                    if let Some(lt) = local_tokens_opt {
+                        segments.push(cast_dtype_owned(
+                            lt, target_dtype, "local dtype cast",
+                        )?);
+                    }
+                    segments.push(global_tokens);
+                    let vst = view_sep.reshape((1, hidden_size))?.contiguous()?;
+                    segments.push(cast_dtype_owned(vst, target_dtype, "sep cast")?);
+                    Tensor::cat(&segments, 0)?
+                }
+                None => Tensor::zeros((0, hidden_size), compute_dtype, device)?,
+            };
+            results.push(result);
+        }
+
+        info!("Image embeddings computed via parallel global CPU + patch CUDA");
+        Ok(results)
+    }
+
+    /// Compute image embeddings entirely on GPU (no CPU offload).
+    ///
+    /// Loads SAM on CUDA, runs global + patches, drops SAM.
+    /// Loads CLIP on CUDA, runs global + patches (with cached SAM outputs), drops CLIP.
+    /// All processing (projector, formatting, assembly) stays on CUDA.
+    /// Uses SequentialVramSwap internally to load one vision model at a time.
+    fn compute_image_embeddings_full_gpu(
+        &self,
+        inputs: &[Option<VisionInput<'_>>],
+        chunk_size: usize,
+    ) -> Result<Vec<Tensor>> {
+        // LM stays on CUDA (~950MB). Global SAM+CLIP on CPU. Patches on CUDA in
+        // mini-batches via SequentialVramSwap (~200MB SAM + ~200MB CLIP temporary).
+        // Peak VRAM: ~1.6GB — fits on 4GB without eviction.
+        let compute_dtype = self.dtype;
+        let projector = self.projector_for_dtype(compute_dtype);
+        let device = self.device();
+        let hidden_size = projector.hidden_size();
+        let newline = projector.image_newline_token(compute_dtype, device)?;
+        let view_sep = projector.view_separator_token(compute_dtype, device)?;
+        let cpu_vision = self.vision_modules().context("vision modules missing")?;
+        let wp = self.weights_path.clone();
+        let cfg = self.cfg.clone();
+        let dt = self.dtype;
+
+        let mut results = Vec::with_capacity(inputs.len());
+
+        for mb_input in inputs {
+            let result = match mb_input {
+                Some(vi) => {
+                    // === Global view: SAM + CLIP on CPU (avoids large attention score on CUDA) ===
+                    let global_cpu = prepare_image_tensor_for_device(
+                        vi.global, &Device::Cpu, compute_dtype,
+                    )?;
+                    let sg = cpu_vision
+                        .sam
+                        .forward(&global_cpu)
+                        .context("global SAM forward (CPU)")?;
+                    let cg = cpu_vision
+                        .clip
+                        .forward(&global_cpu, Some(&sg))
+                        .context("global CLIP forward (CPU)")?;
+                    let (_, clip_seq, _) = cg.shape().dims3()?;
+                    let ct = cg
+                        .narrow(D::Minus2, 1, clip_seq - 1)?
+                        .contiguous()?;
+                    let (_, sc, sh, sw) = sg.shape().dims4()?;
+                    let st = sg
+                        .reshape((1, sc, sh * sw))?
+                        .transpose(1, 2)?
+                        .contiguous()?;
+                    let combined_global = Tensor::cat(&[ct, st], D::Minus1)
+                        .context("cat global combined")?;
+                    // Move to CUDA for projector
+                    let combined_global_gpu = combined_global.to_device(device)?;
+
+                    // === Patches: SAM + CLIP on CUDA via sequential swap ===
+                    let local_tokens_opt: Option<Tensor> = vi
+                        .patches
+                        .as_ref()
+                        .map(|patches| -> Result<Tensor> {
+                            let patches_cpu = prepare_image_tensor_for_device(
+                                patches, &Device::Cpu, compute_dtype,
+                            )?;
+                            let (batch, _, _, _) = patches_cpu.shape().dims4()?;
+                            let swap =
+                                SequentialVramSwap::new(&wp, cfg.clone(), dt, device);
+                            let num = (batch + chunk_size - 1) / chunk_size;
+                            let pcs = patches_cpu.chunk(num, 0)?;
+
+                            let sam_cuda = swap
+                                .load_sam_on_cuda()
+                                .context("load SAM on CUDA for patches")?;
+                            let mut sam_cpu = Vec::with_capacity(num);
+                            for c in &pcs {
+                                let cc = c.to_device(device)?;
+                                let o = sam_cuda
+                                    .forward(&cc)
+                                    .context("patch SAM forward (CUDA)")?;
+                                sam_cpu.push(o.to_device(&Device::Cpu)?.contiguous()?);
+                            }
+                            drop(sam_cuda);
+
+                            let clip_cuda = swap
+                                .load_clip_on_cuda()
+                                .context("load CLIP on CUDA for patches")?;
+                            let mut all_proj = Vec::with_capacity(num);
+                            for (pc, sc) in pcs.iter().zip(sam_cpu.iter()) {
+                                let cc = pc.to_device(device)?;
+                                let st_cuda = sc.to_device(device)?;
+                                let co = clip_cuda
+                                    .forward(&cc, Some(&st_cuda))
+                                    .context("patch CLIP forward (CUDA)")?;
+                                let (_, cseq, _) = co.shape().dims3()?;
+                                let pct = co
+                                    .narrow(D::Minus2, 1, cseq - 1)?
+                                    .contiguous()?;
+                                let (_, scn, sh, sw) = st_cuda.shape().dims4()?;
+                                let pst = st_cuda
+                                    .reshape((cc.dims()[0], scn, sh * sw))?
+                                    .transpose(1, 2)?
+                                    .contiguous()?;
+                                let cb = Tensor::cat(&[pct, pst], D::Minus1)?;
+                                all_proj.push(projector.project(&cb)?);
+                            }
+                            drop(clip_cuda);
+
+                            let refs: Vec<&Tensor> = all_proj.iter().collect();
+                            let proj = Tensor::cat(&refs, 0)?;
+                            let cs = vi.crop_shape.unwrap_or((1, batch));
+                            let (wc, hc) = cs;
+                            let (_, seq, hd) = proj.shape().dims3()?;
+                            let side = (seq as f64).sqrt() as usize;
+                            let grid = proj
+                                .reshape((hc, wc, side, side, hd))?
+                                .permute((0, 2, 1, 3, 4))?
+                                .reshape((hc * side, wc * side, hd))?
+                                .contiguous()?;
+                            let (rows, cols, _) = grid.shape().dims3()?;
+                            let nle = newline
+                                .reshape((1, 1, hd))?
+                                .expand((rows, 1, hd))?
+                                .contiguous()?;
+                            Ok(Tensor::cat(&[grid, nle], 1)?
+                                .reshape((rows * (cols + 1), hd))?)
+                        })
+                        .transpose()?;
+
+                    // === Project global + format on CUDA ===
+                    let projected_global = projector.project(&combined_global_gpu)?;
+                    let nl = cast_dtype(&newline, projected_global.dtype(), "nl")?;
+                    let (_, gseq, ghd) = projected_global.shape().dims3()?;
+                    let side = (gseq as f64).sqrt() as usize;
+                    let grid = projected_global
+                        .get(0)?
+                        .reshape((side, side, ghd))?
+                        .contiguous()?;
+                    let nle = nl
+                        .reshape((1, 1, ghd))?
+                        .expand((side, 1, ghd))?
+                        .contiguous()?;
+                    let global_tokens = Tensor::cat(&[grid, nle], 1)?
+                        .reshape((side * (side + 1), ghd))?;
+
+                    // === Assemble ===
+                    let target_dtype = global_tokens.dtype();
+                    let mut segments = Vec::new();
+                    if let Some(lt) = local_tokens_opt {
+                        segments.push(
+                            cast_dtype_owned(lt, target_dtype, "local dtype cast")?,
+                        );
+                    }
+                    segments.push(global_tokens);
+                    let vst = view_sep.reshape((1, hidden_size))?.contiguous()?;
+                    segments.push(cast_dtype_owned(vst, target_dtype, "sep cast")?);
+                    Tensor::cat(&segments, 0)?
+                }
+                None => Tensor::zeros((0, hidden_size), compute_dtype, device)?,
+            };
+            results.push(result);
+        }
+
+        info!("Image embeddings computed (global on CPU, patches on CUDA via swap)");
+        Ok(results)
     }
 
     pub fn compute_vision_projection(
@@ -1690,7 +2266,7 @@ impl DeepseekOcrModel {
                 let dtype = low_precision_compute_dtype(self.dtype);
                 let vision = select_f32(dtype, vision.as_ref(), self.vision_modules_f32());
                 let projector = self.projector_for_dtype(dtype);
-                VisionContext::new_with_dtype(self, vision, projector, dtype)
+                VisionContext::new_with_dtype(self, &vision.sam, &vision.clip, projector, dtype)
                     .process_input_full(input)
             }
             VisionBackend::Ocr2(_) => {
@@ -1986,9 +2562,10 @@ impl DeepseekOcrModel {
             let token_index = usize::try_from(current)
                 .context("token id out of range while preparing decode embedding")?;
             let mut decode_inputs = self
-                .language
+                .language_model()
                 .token_embedding_for_id(token_index)
                 .context("failed to gather embedding for decode token")?
+                .to_device(self.device())?
                 .unsqueeze(0)?
                 .unsqueeze(0)?;
             decode_inputs = cast_dtype_owned(
@@ -2384,7 +2961,7 @@ impl OcrEngine for DeepseekOcrModel {
             vision.crop_mode,
         )
         .with_context(|| "vision input failed")?;
-        let embeddings = compute_image_embeddings(self, &owned_inputs)
+        let embeddings = compute_image_embeddings(self, &owned_inputs, vision)
             .with_context(|| "image embedding failed")?;
         let (input_ids_vec, mask_vec) = build_prompt_tokens(
             tokenizer,
@@ -2434,6 +3011,8 @@ impl OcrEngine for DeepseekOcrModel {
             .into_iter()
             .next()
             .unwrap_or_default();
+        let gen_first: Vec<i64> = generated_tokens.iter().take(20).copied().collect();
+        trace!("decode: first 20 generated tokens = {gen_first:?}");
         let decoded = tokenizer
             .decode(
                 &generated_tokens
@@ -2443,6 +3022,7 @@ impl OcrEngine for DeepseekOcrModel {
                 true,
             )
             .unwrap_or_default();
+        trace!("decode: decoded text length = {} bytes", decoded.len());
         let normalized = normalize_text(&decoded);
 
         Ok(DecodeOutcome {
@@ -2494,6 +3074,7 @@ fn prepare_vision_inputs(
 fn compute_image_embeddings(
     model: &DeepseekOcrModel,
     owned_inputs: &[OwnedVisionInput],
+    vision: VisionSettings,
 ) -> Result<Vec<Tensor>> {
     let timer = Timer::new("vision.compute_embeddings");
     if owned_inputs.is_empty() {
@@ -2507,7 +3088,7 @@ fn compute_image_embeddings(
         .map(|owned| Some(owned.as_ref()))
         .collect();
     trace!("Computing image embeddings for {} image(s)...", refs.len());
-    let outputs = model.compute_image_embeddings(&refs);
+    let outputs = model.compute_image_embeddings_impl(&refs, &vision);
     match &outputs {
         Ok(values) => {
             let tokens_total: u64 = values

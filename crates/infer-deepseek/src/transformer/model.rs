@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use candle_core::{DType, IndexOp, Tensor, quantized::QMatMul};
+use candle_core::{DType, Device, IndexOp, Tensor, quantized::QMatMul};
 use candle_nn::ops::{rms_norm, rms_norm_slow};
 use deepseek_ocr_core::tensor::gather_token_embeddings;
 
@@ -12,7 +12,7 @@ use crate::{
     transformer::{
         cache::{DynamicCache, PromptCacheGuard},
         decoder::TransformerDecoder,
-        weights::{DeepseekLanguageModelWeights, TransformerWeights},
+        weights::{DeepseekLanguageModelWeights, RmsNormWeights, TransformerWeights, qmatmul_to_device},
     },
 };
 
@@ -110,6 +110,13 @@ impl DeepseekLanguageModel {
 
     pub fn flash_attention_enabled(&self) -> bool {
         self.decoder.flash_attention_enabled()
+    }
+
+    /// Move the token embedding tensor to the given device.
+    /// Useful on CUDA to keep the embedding on CPU and save VRAM for activations.
+    pub fn move_token_embedding_to(&mut self, device: &Device) -> Result<()> {
+        self.token_embedding = self.token_embedding.to_device(device)?;
+        Ok(())
     }
 
     /// Lookup token embeddings for the provided input ids.
@@ -275,5 +282,42 @@ impl DeepseekLanguageModel {
             logits,
             aux_loss: decoder_out.aux_loss,
         })
+    }
+
+    /// Reconstruct this language model with all tensors moved to `device`.
+    /// Creates a fresh decoder (with empty RoPE cache) on the target device.
+    pub fn to_device(&self, device: &Device) -> Result<Self> {
+        let weights = DeepseekLanguageModelWeights {
+            token_embedding: self.token_embedding.to_device(device)?,
+            transformer: self.transformer_weights.to_device(device)?,
+            final_layernorm: RmsNormWeights {
+                weight: self.final_layernorm.to_device(device)?,
+            },
+            lm_head_weight: self
+                .lm_head_weight
+                .as_ref()
+                .map(|w| w.to_device(device))
+                .transpose()?,
+            lm_head_q: self
+                .lm_head_q
+                .as_ref()
+                .map(|qm| Ok::<_, anyhow::Error>(Arc::new(qmatmul_to_device(qm, device)?)))
+                .transpose()?,
+            lm_out_dim: self.lm_out_dim,
+            lm_in_dim: self.lm_in_dim,
+            lm_head_label: self.lm_head_label.clone(),
+        };
+        let mut model = Self::from_weights(self.cfg.clone(), weights);
+        model.final_layernorm_f32 = self
+            .final_layernorm_f32
+            .as_ref()
+            .map(|t| t.to_device(device))
+            .transpose()?;
+        model.lm_head_weight_f32 = self
+            .lm_head_weight_f32
+            .as_ref()
+            .map(|t| t.to_device(device))
+            .transpose()?;
+        Ok(model)
     }
 }

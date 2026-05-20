@@ -13,7 +13,8 @@ use deepseek_ocr_dsq_models::{
     AdapterRegistry, AdapterScope, LinearSpec, ModelAdapter, QuantContext,
 };
 use deepseek_ocr_dsq_writer::{
-    encode_bias_values, quantize_q4k, quantize_q6k, quantize_q8_0, DsqWriter, SnapshotMetadata,
+    encode_bias_values, quantize_q2k, quantize_q3k, quantize_q4k, quantize_q6k, quantize_q8_0,
+    DsqWriter, SnapshotMetadata,
 };
 use half::{bf16, f16};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -81,6 +82,10 @@ struct StatsArgs {
 enum QuantDTypeArg {
     #[value(name = "Q8_0")]
     Q8_0,
+    #[value(name = "Q2_K")]
+    Q2K,
+    #[value(name = "Q3_K")]
+    Q3K,
     #[value(name = "Q4_K")]
     Q4K,
     #[value(name = "Q6_K")]
@@ -91,6 +96,8 @@ impl QuantDTypeArg {
     fn label(self) -> &'static str {
         match self {
             Self::Q8_0 => "Q8_0",
+            Self::Q2K => "Q2_K",
+            Self::Q3K => "Q3_K",
             Self::Q4K => "Q4_K",
             Self::Q6K => "Q6_K",
         }
@@ -99,6 +106,8 @@ impl QuantDTypeArg {
     fn to_dtype(self) -> DsqTensorDType {
         match self {
             Self::Q8_0 => DsqTensorDType::Q8_0,
+            Self::Q2K => DsqTensorDType::Q2K,
+            Self::Q3K => DsqTensorDType::Q3K,
             Self::Q4K => DsqTensorDType::Q4K,
             Self::Q6K => DsqTensorDType::Q6K,
         }
@@ -617,6 +626,8 @@ fn quantize_spec(
             }
             let qbytes = match selection.dtype {
                 DsqTensorDType::Q8_0 => quantize_q8_0(&weights, spec.out_dim, spec.in_dim)?,
+                DsqTensorDType::Q2K => quantize_q2k(&weights, spec.out_dim, spec.in_dim)?,
+                DsqTensorDType::Q3K => quantize_q3k(&weights, spec.out_dim, spec.in_dim)?,
                 DsqTensorDType::Q4K => quantize_q4k(&weights, spec.out_dim, spec.in_dim)?,
                 DsqTensorDType::Q6K => quantize_q6k(&weights, spec.out_dim, spec.in_dim)?,
                 other => unreachable!("float dtype {other:?} cannot be selected here"),
@@ -991,7 +1002,9 @@ fn select_dtype(primary: DsqTensorDType, in_dim: usize) -> Result<SelectionResul
 
 fn next_fallback_dtype(dtype: DsqTensorDType) -> Option<DsqTensorDType> {
     match dtype {
-        DsqTensorDType::Q6K | DsqTensorDType::Q4K => Some(DsqTensorDType::Q8_0),
+        DsqTensorDType::Q2K | DsqTensorDType::Q3K | DsqTensorDType::Q4K | DsqTensorDType::Q6K => {
+            Some(DsqTensorDType::Q8_0)
+        }
         DsqTensorDType::Q8_0 => None,
         _ => None,
     }

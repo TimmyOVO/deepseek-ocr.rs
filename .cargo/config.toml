@@ -1,0 +1,4 @@
+[build]
+# Limit parallel codegen units to reduce peak memory usage during compilation,
+# especially when building candle-flash-attn with CUDA.
+jobs = 2

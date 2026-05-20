@@ -8,3 +8,4 @@ __pycache__
 *.dsq
 baselines
 session
+build.log
